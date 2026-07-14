@@ -13,7 +13,8 @@
     "build": "cd client && npm install && npm run build",
     "install-all": "npm install && cd client && npm install",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "postinstall": "npm run build"
+    "build:client": "cd client && npm install && npm run build",
+    "_comment_postinstall": "No auto-build on install — client/dist is prebuilt & committed (Render/VPS deploy with no front-end build → avoids OOM). Rebuild manually with: npm run build:client"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.40.1",

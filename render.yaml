@@ -1,12 +1,30 @@
+# Render Blueprint for Sotyn.Headmasters (salon & spa ERP).
+#
+# This is a STATEFUL Node web service (Express + Socket.IO + better-sqlite3),
+# NOT a serverless/static site — so it cannot run on Vercel. Render runs it as
+# a single always-on web service that serves both the API and the prebuilt
+# client (client/dist is committed, so no front-end build runs here → no OOM).
+#
+# Deploy: Render → New → Blueprint → connect the Sotyn_headmasters repo.
 services:
   - type: web
-    name: sepl-erp
+    name: sotyn-headmasters
     runtime: node
-    plan: free
-    buildCommand: npm install && cd client && npm install && npm run build
+    plan: free                     # free = fine for a demo, but see the DATA note below
+    buildCommand: npm install      # client/dist is prebuilt & committed — do NOT build the client
     startCommand: node server/index.js
     envVars:
       - key: NODE_ENV
         value: production
       - key: JWT_SECRET
-        value: sepl-erp-secret-2026-secure
+        generateValue: true        # Render generates a strong secret and keeps it stable
+    # ── DATA PERSISTENCE ────────────────────────────────────────────────
+    # The app stores everything in a SQLite file at <repo>/data/erp.db.
+    # On the FREE plan the container disk is ephemeral, so that DB is wiped
+    # on every redeploy/restart (fine for a demo, NOT for real salon data).
+    # To keep data permanently: set `plan: starter` (or higher) above and
+    # UNCOMMENT the disk block below — a mounted disk survives deploys.
+    # disk:
+    #   name: sotyn-data
+    #   mountPath: /opt/render/project/src/data
+    #   sizeGB: 1
