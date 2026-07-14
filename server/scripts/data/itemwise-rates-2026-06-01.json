@@ -1,0 +1,1269 @@
+{
+  "source_file": "itemwise.xls",
+  "imported_at": "2026-06-01",
+  "total_excel_rows": 140,
+  "valid_rows": 140,
+  "skipped_rows": 0,
+  "rows": [
+    {
+      "item_code": "CIVIL MATERIAL1093",
+      "item_name": "CEMENT",
+      "department": "CIVIL",
+      "specification": null,
+      "size": null,
+      "uom": "PACKET",
+      "rate": 360
+    },
+    {
+      "item_code": "ELE0223",
+      "item_name": "THIMBLE",
+      "department": "ELE",
+      "specification": "pin type copper",
+      "size": "16mm",
+      "uom": "PCS",
+      "rate": 6.6
+    },
+    {
+      "item_code": "ELE0709",
+      "item_name": "gi wire",
+      "department": "ELE",
+      "specification": "gi type",
+      "size": "8swg",
+      "uom": "MTR",
+      "rate": 110
+    },
+    {
+      "item_code": "ELE0711",
+      "item_name": "MCB",
+      "department": "ELE",
+      "specification": null,
+      "size": "1 POLE 10 AMP",
+      "uom": "PCS",
+      "rate": 390
+    },
+    {
+      "item_code": "ELE0712",
+      "item_name": "MCB",
+      "department": "ELE",
+      "specification": null,
+      "size": "2 POLE 25 AMP",
+      "uom": "PCS",
+      "rate": 390
+    },
+    {
+      "item_code": "ELE0715",
+      "item_name": "gland",
+      "department": "ELE",
+      "specification": null,
+      "size": "28mm",
+      "uom": "PCS",
+      "rate": 65
+    },
+    {
+      "item_code": "ELE0718",
+      "item_name": "wire",
+      "department": "ELE",
+      "specification": null,
+      "size": "2.5mm*10 core",
+      "uom": "MTR",
+      "rate": 40.5
+    },
+    {
+      "item_code": "ELE0719",
+      "item_name": "led light",
+      "department": "ELE",
+      "specification": null,
+      "size": "70 watt",
+      "uom": "PCS",
+      "rate": 5466.1
+    },
+    {
+      "item_code": "ELE0720",
+      "item_name": "LED LIGHT",
+      "department": "ELE",
+      "specification": null,
+      "size": "150 MM",
+      "uom": "PCS",
+      "rate": 5466.1
+    },
+    {
+      "item_code": "ELE0721",
+      "item_name": "LED LIGHT",
+      "department": "ELE",
+      "specification": null,
+      "size": "200 WATT",
+      "uom": "PCS",
+      "rate": 5466.1
+    },
+    {
+      "item_code": "ELE0723",
+      "item_name": "WIRE",
+      "department": "ELE",
+      "specification": null,
+      "size": "3 CORE 3.5SQMM",
+      "uom": "PCS",
+      "rate": 40.5
+    },
+    {
+      "item_code": "ELE0726",
+      "item_name": "CEILING SPEAKER",
+      "department": "ELE",
+      "specification": null,
+      "size": "1.5/3/6w",
+      "uom": "PCS",
+      "rate": 560
+    },
+    {
+      "item_code": "ELE0731",
+      "item_name": "WIRE",
+      "department": "ELE",
+      "specification": null,
+      "size": "3CORE 35 SQMM",
+      "uom": "PCS",
+      "rate": 40.5
+    },
+    {
+      "item_code": "Ele0169",
+      "item_name": "MCB",
+      "department": "ELE",
+      "specification": "FOUR POLE",
+      "size": "25AMP",
+      "uom": "PCS",
+      "rate": 390
+    },
+    {
+      "item_code": "Ele0498",
+      "item_name": "chisel",
+      "department": "ELE",
+      "specification": "ms",
+      "size": "1 kg",
+      "uom": "PCS",
+      "rate": 100
+    },
+    {
+      "item_code": "Ele0579",
+      "item_name": "thimble",
+      "department": "ELE",
+      "specification": "pin type",
+      "size": "1mm",
+      "uom": "PCS",
+      "rate": 6.6
+    },
+    {
+      "item_code": "Ele0581",
+      "item_name": "connector",
+      "department": "ELE",
+      "specification": "electrical",
+      "size": "na",
+      "uom": "PCS",
+      "rate": 16
+    },
+    {
+      "item_code": "Ele0625",
+      "item_name": "thimble",
+      "department": "ELE",
+      "specification": "aluminium pin type",
+      "size": "10sqmm",
+      "uom": "PCS",
+      "rate": 6.6
+    },
+    {
+      "item_code": "Ele0626",
+      "item_name": "hammer bit",
+      "department": "ELE",
+      "specification": "ms hamber",
+      "size": "25mm",
+      "uom": "PCS",
+      "rate": 185
+    },
+    {
+      "item_code": "Ele0627",
+      "item_name": "saddle",
+      "department": "ELE",
+      "specification": "gi",
+      "size": "25mm",
+      "uom": "PCS",
+      "rate": 2.6
+    },
+    {
+      "item_code": "Ele0658",
+      "item_name": "flexible pipe",
+      "department": "ELE",
+      "specification": "gi type",
+      "size": "25mm",
+      "uom": "MTR",
+      "rate": 170
+    },
+    {
+      "item_code": "Ele0660",
+      "item_name": "ms pole",
+      "department": "ELE",
+      "specification": "ms type",
+      "size": "3 mtr",
+      "uom": "SET",
+      "rate": 3300
+    },
+    {
+      "item_code": "Ele0737",
+      "item_name": "Hammer",
+      "department": "ELE",
+      "specification": "1 kg",
+      "size": "Wooden",
+      "uom": "PCS",
+      "rate": 169.49
+    },
+    {
+      "item_code": "Ele0839",
+      "item_name": "mcb box",
+      "department": "ELE",
+      "specification": "db single door",
+      "size": "pole",
+      "uom": "PCS",
+      "rate": 600
+    },
+    {
+      "item_code": "Ele0840",
+      "item_name": "mcb box",
+      "department": "ELE",
+      "specification": "single door single pole",
+      "size": "63amp",
+      "uom": "PCS",
+      "rate": 600
+    },
+    {
+      "item_code": "Ele1061",
+      "item_name": "FLEXIBLE WIRE",
+      "department": "ELE",
+      "specification": "COPPER",
+      "size": "25SQMM",
+      "uom": "MTR",
+      "rate": 125
+    },
+    {
+      "item_code": "Ele1482",
+      "item_name": "DISTRIBUTION BOX",
+      "department": "ELE",
+      "specification": "db",
+      "size": "4 WAY",
+      "uom": "PCS",
+      "rate": 1140
+    },
+    {
+      "item_code": "Ele1597",
+      "item_name": "FLEXIBLE WIRE",
+      "department": "ELE",
+      "specification": "FRLS COPPER WIRE",
+      "size": "1.5SQMM X 2CORE",
+      "uom": "MTR",
+      "rate": 125
+    },
+    {
+      "item_code": "Ele1606",
+      "item_name": "armoured cable",
+      "department": "ELE",
+      "specification": "copper",
+      "size": "4sqmmx3core",
+      "uom": "MTR",
+      "rate": 1583
+    },
+    {
+      "item_code": "Ele1607",
+      "item_name": "armoured cable",
+      "department": "ELE",
+      "specification": "aluminium type",
+      "size": "240sqmmx3.5core",
+      "uom": "MTR",
+      "rate": 1583
+    },
+    {
+      "item_code": "Ele1789",
+      "item_name": "FLEXIBLE WIRE",
+      "department": "ELE",
+      "specification": "PVC",
+      "size": "2 CORE X 1.5SQMM",
+      "uom": "MTR",
+      "rate": 125
+    },
+    {
+      "item_code": "Ele1809",
+      "item_name": "THIMBLE",
+      "department": "ELE",
+      "specification": "copper`",
+      "size": "16mm",
+      "uom": "PCS",
+      "rate": 6.6
+    },
+    {
+      "item_code": "Ele1810",
+      "item_name": "FLEXIBLE WIRE",
+      "department": "ELE",
+      "specification": "COPPER",
+      "size": "1.5SQMM X 2 CORE",
+      "uom": "MTR",
+      "rate": 125
+    },
+    {
+      "item_code": "Ele2522",
+      "item_name": "ARMOURED CABLE",
+      "department": "ELE",
+      "specification": "COPPER",
+      "size": "16SQMMX3CORE",
+      "uom": "MTR",
+      "rate": 1583
+    },
+    {
+      "item_code": "FF0193",
+      "item_name": "welding helmet",
+      "department": "FF",
+      "specification": "head type",
+      "size": null,
+      "uom": "PCS",
+      "rate": 400
+    },
+    {
+      "item_code": "FF0432",
+      "item_name": "wrapping coating",
+      "department": "FF",
+      "specification": "2mm thickness",
+      "size": "na",
+      "uom": "MTR",
+      "rate": 2475
+    },
+    {
+      "item_code": "FF0443",
+      "item_name": "butterfly valve",
+      "department": "FF",
+      "specification": "ci type 1.6 rating",
+      "size": "100mm",
+      "uom": "PCS",
+      "rate": 1284
+    },
+    {
+      "item_code": "FF0446",
+      "item_name": "bend",
+      "department": "FF",
+      "specification": "welded type",
+      "size": "200mm",
+      "uom": "PCS",
+      "rate": 76.28
+    },
+    {
+      "item_code": "FF0448",
+      "item_name": "welding machine",
+      "department": "FF",
+      "specification": "copper",
+      "size": "300 amp",
+      "uom": "PCS",
+      "rate": 1150
+    },
+    {
+      "item_code": "FF0481",
+      "item_name": "nrv",
+      "department": "FF",
+      "specification": "dual plate",
+      "size": "80mm",
+      "uom": "PCS",
+      "rate": 2870
+    },
+    {
+      "item_code": "FF0482",
+      "item_name": "y-strainer",
+      "department": "FF",
+      "specification": "ci type",
+      "size": "100mm",
+      "uom": "PCS",
+      "rate": 3678
+    },
+    {
+      "item_code": "FF0485",
+      "item_name": "nrv",
+      "department": "FF",
+      "specification": "pn 1.6 dual plate",
+      "size": "150mm",
+      "uom": "PCS",
+      "rate": 2870
+    },
+    {
+      "item_code": "FF0486",
+      "item_name": "butterfly valve",
+      "department": "FF",
+      "specification": "pn 1.6",
+      "size": "80mm",
+      "uom": "PCS",
+      "rate": 1050
+    },
+    {
+      "item_code": "FF0514",
+      "item_name": "MS TEE",
+      "department": "FF",
+      "specification": "THREADED TYPE",
+      "size": "25MM",
+      "uom": "PCS",
+      "rate": 139
+    },
+    {
+      "item_code": "FF0601",
+      "item_name": "safety shoes",
+      "department": "FF",
+      "specification": "leather type",
+      "size": "7no",
+      "uom": "SET",
+      "rate": 250
+    },
+    {
+      "item_code": "FF0733",
+      "item_name": "reducer",
+      "department": "FF",
+      "specification": "threaded",
+      "size": "20x25mm",
+      "uom": "PCS",
+      "rate": 26
+    },
+    {
+      "item_code": "FF0747",
+      "item_name": "BLACK PAINT",
+      "department": "FF",
+      "specification": "VITAMIN WRAPPING COATING",
+      "size": "20 LTR",
+      "uom": "LTR",
+      "rate": 240
+    },
+    {
+      "item_code": "FF0750",
+      "item_name": "m.s socket",
+      "department": "FF",
+      "specification": "thread type m.s",
+      "size": "40mm",
+      "uom": "PCS",
+      "rate": 22
+    },
+    {
+      "item_code": "FF0751",
+      "item_name": "m.s socket",
+      "department": "FF",
+      "specification": "thread type",
+      "size": "65mm",
+      "uom": "PCS",
+      "rate": 22
+    },
+    {
+      "item_code": "FF0827",
+      "item_name": "ms tee",
+      "department": "FF",
+      "specification": "threaded type",
+      "size": "32x15x32",
+      "uom": "PCS",
+      "rate": 150
+    },
+    {
+      "item_code": "FF0828",
+      "item_name": "ms elbow",
+      "department": "FF",
+      "specification": "threaded type",
+      "size": "32mm",
+      "uom": "PCS",
+      "rate": 38
+    },
+    {
+      "item_code": "FF0961",
+      "item_name": "ms bush",
+      "department": "FF",
+      "specification": "abc",
+      "size": "25x20mm",
+      "uom": "PCS",
+      "rate": 45
+    },
+    {
+      "item_code": "FF1622",
+      "item_name": "union",
+      "department": "FF",
+      "specification": "gi type",
+      "size": "100mm",
+      "uom": "PCS",
+      "rate": 1569
+    },
+    {
+      "item_code": "FF1623",
+      "item_name": "gi tee",
+      "department": "FF",
+      "specification": "thread type",
+      "size": "50mm",
+      "uom": "PCS",
+      "rate": 140
+    },
+    {
+      "item_code": "FF1664",
+      "item_name": "ms union",
+      "department": "FF",
+      "specification": "ms type",
+      "size": "32mm",
+      "uom": "PCS",
+      "rate": 270
+    },
+    {
+      "item_code": "FF1766",
+      "item_name": "Y-STRAINER",
+      "department": "FF",
+      "specification": "CI TYPE flange",
+      "size": "200MM",
+      "uom": "PCS",
+      "rate": 16226
+    },
+    {
+      "item_code": "FF2104",
+      "item_name": "BRANCH PIPE",
+      "department": "FF",
+      "specification": null,
+      "size": "63mm",
+      "uom": "PCS",
+      "rate": 900
+    },
+    {
+      "item_code": "FF2107",
+      "item_name": "FIRST AID HOSE REEL",
+      "department": "FF",
+      "specification": "20MM DIAX30MM LONG COMPLETEWITH DRUM BRACKET 20MM DIA",
+      "size": "20MM DIA X 30M LONG",
+      "uom": "PCS",
+      "rate": 5550
+    },
+    {
+      "item_code": "FF2119",
+      "item_name": "FIRST AID HOSE REEL",
+      "department": "FF",
+      "specification": "25MM DIAX30MTR LONG COMPLETEWITH DRUM BRACKET 25MM DIA",
+      "size": "25MMDIA X 30MTR LONG",
+      "uom": "PCS",
+      "rate": 5550
+    },
+    {
+      "item_code": "FF2476",
+      "item_name": "BALL VALVE",
+      "department": "FF",
+      "specification": null,
+      "size": "25MM",
+      "uom": "PCS",
+      "rate": 900
+    },
+    {
+      "item_code": "FF2479",
+      "item_name": "HOSE REEL DRUM",
+      "department": "FF",
+      "specification": "na",
+      "size": null,
+      "uom": "PCS",
+      "rate": 2150
+    },
+    {
+      "item_code": "FF2487",
+      "item_name": "SADDLE",
+      "department": "FF",
+      "specification": "PVC",
+      "size": "20MM",
+      "uom": "PCS",
+      "rate": 1.5
+    },
+    {
+      "item_code": "FF2667",
+      "item_name": "Fire Extinguisher",
+      "department": "FF",
+      "specification": "9 ltrs. capacity mechanical foam trolly mounted",
+      "size": null,
+      "uom": "PCS",
+      "rate": 650
+    },
+    {
+      "item_code": "FF2669",
+      "item_name": "Fire Extinguisher",
+      "department": "FF",
+      "specification": "portable chemical fire extinguisher, water (gas pressure) type capacity 9 litres with gun metal cap and nozzle",
+      "size": null,
+      "uom": "PCS",
+      "rate": 650
+    },
+    {
+      "item_code": "FF2710",
+      "item_name": "Hose reel drum",
+      "department": "FF",
+      "specification": "20 mm dia. X 36 m long",
+      "size": null,
+      "uom": "PCS",
+      "rate": 2150
+    },
+    {
+      "item_code": "FF2732",
+      "item_name": "Diesel Engine Pump",
+      "department": "FF",
+      "specification": "Diesel Engine, End suction Type , 2280 Lpm, 55 mtr head",
+      "size": null,
+      "uom": "SET",
+      "rate": 280000
+    },
+    {
+      "item_code": "FF2733",
+      "item_name": "Diesel Engine Pump",
+      "department": "FF",
+      "specification": "Diesel Engine, End suction Type , 2280 Lpm, 55 mtr head",
+      "size": null,
+      "uom": "SET",
+      "rate": 280000
+    },
+    {
+      "item_code": "FF2738",
+      "item_name": "Jockey Pump",
+      "department": "FF",
+      "specification": "End suction centrifugal JOCKEY Pump, 180 LPM head 55 metres",
+      "size": null,
+      "uom": "SET",
+      "rate": 230000
+    },
+    {
+      "item_code": "FF2751",
+      "item_name": "Foot valve",
+      "department": "FF",
+      "specification": "100NB",
+      "size": null,
+      "uom": "PCS",
+      "rate": 6318
+    },
+    {
+      "item_code": "FF2764",
+      "item_name": "Fire extinguisher",
+      "department": "FF",
+      "specification": "4.5kg, ABC Type",
+      "size": null,
+      "uom": "PCS",
+      "rate": 650
+    },
+    {
+      "item_code": "FF2766",
+      "item_name": "Fire Extinguisher",
+      "department": "FF",
+      "specification": "4.5kg, B & C type",
+      "size": null,
+      "uom": "PCS",
+      "rate": 650
+    },
+    {
+      "item_code": "FF2767",
+      "item_name": "Fire Extinguisher",
+      "department": "FF",
+      "specification": "4.5kg, B & C type",
+      "size": null,
+      "uom": "PCS",
+      "rate": 650
+    },
+    {
+      "item_code": "FF2784",
+      "item_name": "Diesel Engine Pump",
+      "department": "FF",
+      "specification": "2280LPM & 90M Head",
+      "size": null,
+      "uom": "PCS",
+      "rate": 280000
+    },
+    {
+      "item_code": "FF2785",
+      "item_name": "Jockey Pump",
+      "department": "FF",
+      "specification": "180LPM & 90M Head",
+      "size": null,
+      "uom": "SET",
+      "rate": 230000
+    },
+    {
+      "item_code": "FF2797",
+      "item_name": "Jockey pump",
+      "department": "FF",
+      "specification": "180 LPM 150 mtr head",
+      "size": null,
+      "uom": "PCS",
+      "rate": 230000
+    },
+    {
+      "item_code": "FF2798",
+      "item_name": "Main pump",
+      "department": "FF",
+      "specification": "Split Casing (2280 LPM 150 mtr head)",
+      "size": null,
+      "uom": "PCS",
+      "rate": 146780
+    },
+    {
+      "item_code": "FF2809",
+      "item_name": "Sprinkler",
+      "department": "FF",
+      "specification": "Standar, Pandentwater sprinkler with K-4.2, thread size is 1/2\" with 57degree temp. Finishing will be brass chrome plated. white shades is RAL 9010 as per UL & FM.",
+      "size": null,
+      "uom": "PCS",
+      "rate": 75
+    },
+    {
+      "item_code": "FF2810",
+      "item_name": "Sprinkler",
+      "department": "FF",
+      "specification": "Standar, Pandentwater sprinkler with K-4.2, thread size is 1/2\" with 57degree temp. Finishing will be brass chrome plated. white shades is RAL 9010 as per UL & FM.",
+      "size": null,
+      "uom": "PCS",
+      "rate": 75
+    },
+    {
+      "item_code": "FF2916",
+      "item_name": "Hose Reel Drum",
+      "department": "FF",
+      "specification": "Rubber Hose Red 20mm X 40 Mtr long",
+      "size": null,
+      "uom": "PCS",
+      "rate": 2150
+    },
+    {
+      "item_code": "FF3010",
+      "item_name": "SPRINKLER",
+      "department": "FF",
+      "specification": "Pendent Sprinkler 79 0C (For Kitchen area if any) (K=80)",
+      "size": null,
+      "uom": "PCS",
+      "rate": 75
+    },
+    {
+      "item_code": "FF3011",
+      "item_name": "MAIN PUMP",
+      "department": "FF",
+      "specification": "Centrifugal End suction long coupled pump of cast iron body and CI impeller with C-40 shaft complete for delivery of 1620ltrs/minute against a total head of 35metres",
+      "size": null,
+      "uom": "PCS",
+      "rate": 146780
+    },
+    {
+      "item_code": "FF3013",
+      "item_name": "JOCKEY PUMP",
+      "department": "FF",
+      "specification": "end suction centrifugal JOCKEY Pump suitable for automatic operation consisting of the following: Impeller complete for delivery of 180 ltrs./minute against a total head of 35 metres",
+      "size": null,
+      "uom": "PCS",
+      "rate": 230000
+    },
+    {
+      "item_code": "FF3015",
+      "item_name": "MAIN PUMP",
+      "department": "FF",
+      "specification": "Centrifugal End suction long coupled pump of cast iron body and CI impeller with C-40 shaft complete for delivery of 1620ltrs/minute against a total head of 56metres",
+      "size": null,
+      "uom": "PCS",
+      "rate": 146780
+    },
+    {
+      "item_code": "FF3086",
+      "item_name": "FIRST AID HOSE REEL",
+      "department": "FF",
+      "specification": "36m long, 20 mm nominal bore, high pressure braided rubber hose as per IS:444 Type III,",
+      "size": "36m long, 20 mm nominal bore, high pressure braided rubber hose as per IS:444 Type III,",
+      "uom": "PCS",
+      "rate": 5550
+    },
+    {
+      "item_code": "FF3087",
+      "item_name": "branch pipe",
+      "department": "FF",
+      "specification": "63 mm male instantaneous type inlet and 16 mm outlet nozzle",
+      "size": "63 mm male instantaneous type inlet and 16 mm outlet nozzle",
+      "uom": "PCS",
+      "rate": 900
+    },
+    {
+      "item_code": "FF3105",
+      "item_name": "JOCKEY PUMP",
+      "department": "FF",
+      "specification": "Vertical Inline centrifugal pump, suitable for operation on 415 volts 卤 6, 3 phase, 50 HZ A.C..supply for the above pump with speed of 2900 R.P.M. with flexible coupling and coupling guard etc..Flow : 240 LPM Head : 95 mts",
+      "size": null,
+      "uom": "PCS",
+      "rate": 230000
+    },
+    {
+      "item_code": "FF3107",
+      "item_name": "MAIN PUMP",
+      "department": "FF",
+      "specification": "Horizontal end suction, high pressure single stage, centrifugal pump, suitable for operation on 415 volts 卤 10 , 3 phase, 50 HZ A.C supply. Fire pump shall have C.I. casing, CS diffusers, bronze impeller (hard finished and dynamically balanced) and S.S. (410) Shaft with gland packing seal, capable for delivering 4550 LPM at outlet head of 95mts to ensure a minimum pressure of 3.5 Kg/Sqcm at the farthest or topmost hydrant.",
+      "size": null,
+      "uom": "PCS",
+      "rate": 146780
+    },
+    {
+      "item_code": "FF3113",
+      "item_name": "MCB",
+      "department": "FF",
+      "specification": null,
+      "size": "1 POLE 10 AMP",
+      "uom": "PCS",
+      "rate": 390
+    },
+    {
+      "item_code": "FF3114",
+      "item_name": "elbow",
+      "department": "FF",
+      "specification": null,
+      "size": "15mm",
+      "uom": "PCS",
+      "rate": 16.9
+    },
+    {
+      "item_code": "FF3116",
+      "item_name": "u clamp",
+      "department": "FF",
+      "specification": null,
+      "size": "8\"",
+      "uom": "PCS",
+      "rate": 36
+    },
+    {
+      "item_code": "FF3117",
+      "item_name": "u clamp",
+      "department": "FF",
+      "specification": null,
+      "size": "6\"",
+      "uom": "PCS",
+      "rate": 36
+    },
+    {
+      "item_code": "FF3126",
+      "item_name": "RACK",
+      "department": "FF",
+      "specification": null,
+      "size": null,
+      "uom": "PCS",
+      "rate": 450
+    },
+    {
+      "item_code": "FF3141",
+      "item_name": "MS TEE",
+      "department": "FF",
+      "specification": null,
+      "size": " 32*32*32",
+      "uom": "PCS",
+      "rate": 150
+    },
+    {
+      "item_code": "FF3153",
+      "item_name": "MS TEE",
+      "department": "FF",
+      "specification": null,
+      "size": "50*50*50",
+      "uom": "PCS",
+      "rate": 150
+    },
+    {
+      "item_code": "FF3154",
+      "item_name": "MS TEE",
+      "department": "FF",
+      "specification": null,
+      "size": "40*40*40",
+      "uom": "PCS",
+      "rate": 150
+    },
+    {
+      "item_code": "FF3155",
+      "item_name": "MS TEE",
+      "department": "FF",
+      "specification": null,
+      "size": "25*25*25",
+      "uom": "PCS",
+      "rate": 150
+    },
+    {
+      "item_code": "FF3156",
+      "item_name": "MS HEX NIPPLE",
+      "department": "FF",
+      "specification": null,
+      "size": "20MM",
+      "uom": "PCS",
+      "rate": 65
+    },
+    {
+      "item_code": "FF3157",
+      "item_name": "MS HEX NIPPLE",
+      "department": "FF",
+      "specification": null,
+      "size": "25MM",
+      "uom": "PCS",
+      "rate": 40
+    },
+    {
+      "item_code": "FF3158",
+      "item_name": "BUSH",
+      "department": "FF",
+      "specification": null,
+      "size": "40*15",
+      "uom": "PCS",
+      "rate": 45.9
+    },
+    {
+      "item_code": "FF3160",
+      "item_name": "Y- STRAINER",
+      "department": "FF",
+      "specification": null,
+      "size": "20MM",
+      "uom": "PCS",
+      "rate": 7200
+    },
+    {
+      "item_code": "FF3161",
+      "item_name": "CHECK VALVE",
+      "department": "FF",
+      "specification": null,
+      "size": "20MM",
+      "uom": "PCS",
+      "rate": 3503
+    },
+    {
+      "item_code": "FF3179",
+      "item_name": "MS FLANGE",
+      "department": "FF",
+      "specification": null,
+      "size": "12\"",
+      "uom": "PCS",
+      "rate": 395
+    },
+    {
+      "item_code": "FF3181",
+      "item_name": "TEE",
+      "department": "FF",
+      "specification": null,
+      "size": "65MM",
+      "uom": "PCS",
+      "rate": 153.2
+    },
+    {
+      "item_code": "FF3186",
+      "item_name": "U CLAMP",
+      "department": "FF",
+      "specification": null,
+      "size": "80MM",
+      "uom": "PCS",
+      "rate": 29
+    },
+    {
+      "item_code": "FF3188",
+      "item_name": "G.I STRIP",
+      "department": "FF",
+      "specification": null,
+      "size": "2MM",
+      "uom": "PCS",
+      "rate": 92
+    },
+    {
+      "item_code": "FF3206",
+      "item_name": "ms elbow",
+      "department": "FF",
+      "specification": null,
+      "size": "100 mm",
+      "uom": "PCS",
+      "rate": 55
+    },
+    {
+      "item_code": "FF3213",
+      "item_name": "cpvc tee",
+      "department": "FF",
+      "specification": null,
+      "size": "20 mm",
+      "uom": "PCS",
+      "rate": 47
+    },
+    {
+      "item_code": "FF3227",
+      "item_name": "led light",
+      "department": "FF",
+      "specification": null,
+      "size": "100 watt",
+      "uom": "PCS",
+      "rate": 5466.1
+    },
+    {
+      "item_code": "FF3254",
+      "item_name": "NUT WASHER",
+      "department": "FF",
+      "specification": null,
+      "size": "8MM",
+      "uom": "PCS",
+      "rate": 1
+    },
+    {
+      "item_code": "FF3264",
+      "item_name": "Drill bit",
+      "department": "FF",
+      "specification": null,
+      "size": "16 mm",
+      "uom": "PCS",
+      "rate": 110
+    },
+    {
+      "item_code": "FF3266",
+      "item_name": "cable tie",
+      "department": "FF",
+      "specification": null,
+      "size": "150 mm",
+      "uom": "PCS",
+      "rate": 40
+    },
+    {
+      "item_code": "FF3270",
+      "item_name": "cpvc socket",
+      "department": "FF",
+      "specification": null,
+      "size": "20 mm",
+      "uom": "PCS",
+      "rate": 45.26
+    },
+    {
+      "item_code": "FF3271",
+      "item_name": "cpvc socket",
+      "department": "FF",
+      "specification": null,
+      "size": "32 mm",
+      "uom": "PCS",
+      "rate": 21.85
+    },
+    {
+      "item_code": "FF3272",
+      "item_name": "cpvc socket",
+      "department": "FF",
+      "specification": null,
+      "size": "25 mm",
+      "uom": "PCS",
+      "rate": 45.26
+    },
+    {
+      "item_code": "FF3273",
+      "item_name": "pvc pipe",
+      "department": "FF",
+      "specification": null,
+      "size": "110 mm",
+      "uom": "PCS",
+      "rate": 20
+    },
+    {
+      "item_code": "FF3274",
+      "item_name": "End cap",
+      "department": "FF",
+      "specification": null,
+      "size": "20 mm",
+      "uom": "PCS",
+      "rate": 43
+    },
+    {
+      "item_code": "FF3275",
+      "item_name": "End cap",
+      "department": "FF",
+      "specification": null,
+      "size": "25 mm",
+      "uom": "PCS",
+      "rate": 43
+    },
+    {
+      "item_code": "FF3276",
+      "item_name": "End cap",
+      "department": "FF",
+      "specification": null,
+      "size": "32 mm",
+      "uom": "PCS",
+      "rate": 43
+    },
+    {
+      "item_code": "FF3277",
+      "item_name": "End cap",
+      "department": "FF",
+      "specification": null,
+      "size": "110 mm",
+      "uom": "PCS",
+      "rate": 43
+    },
+    {
+      "item_code": "LV0447",
+      "item_name": "hdmi cable",
+      "department": "LV",
+      "specification": "5mtr range",
+      "size": "5 mtr",
+      "uom": "PCS",
+      "rate": 169.49
+    },
+    {
+      "item_code": "LV0450",
+      "item_name": "hdmi cable",
+      "department": "LV",
+      "specification": "copper",
+      "size": "25mtr",
+      "uom": "PCS",
+      "rate": 169.49
+    },
+    {
+      "item_code": "LV0477",
+      "item_name": "cable tie",
+      "department": "LV",
+      "specification": "nylon",
+      "size": "250mm",
+      "uom": "PACKET",
+      "rate": 40
+    },
+    {
+      "item_code": "LV0494",
+      "item_name": "saddle",
+      "department": "LV",
+      "specification": "gi",
+      "size": "0.75mm",
+      "uom": "PCS",
+      "rate": 5
+    },
+    {
+      "item_code": "LV0630",
+      "item_name": "gitti",
+      "department": "LV",
+      "specification": "wall gitti",
+      "size": "12mm",
+      "uom": "PACKET",
+      "rate": 25
+    },
+    {
+      "item_code": "LV0748",
+      "item_name": "box",
+      "department": "LV",
+      "specification": "ro box",
+      "size": "na",
+      "uom": "PCS",
+      "rate": 12.54
+    },
+    {
+      "item_code": "LV0963",
+      "item_name": "Gitti",
+      "department": "LV",
+      "specification": "35x8",
+      "size": "35x8",
+      "uom": "PACKET",
+      "rate": 25
+    },
+    {
+      "item_code": "LV1596",
+      "item_name": "ARMOURED CABLE",
+      "department": "LV",
+      "specification": "COPPER TYPE",
+      "size": "1.5SQMMX2CORE",
+      "uom": "MTR",
+      "rate": 1583
+    },
+    {
+      "item_code": "LV1881",
+      "item_name": "Manual call point",
+      "department": "LV",
+      "specification": "Conventional",
+      "size": "na",
+      "uom": "PCS",
+      "rate": 15120
+    },
+    {
+      "item_code": "LV2141",
+      "item_name": "HOOTER",
+      "department": "LV",
+      "specification": "CONVENTIONAL",
+      "size": null,
+      "uom": "PCS",
+      "rate": 170
+    },
+    {
+      "item_code": "LV2646",
+      "item_name": "POE Switch",
+      "department": "LV",
+      "specification": "16 port/1 nos",
+      "size": null,
+      "uom": "PCS",
+      "rate": 7796.61
+    },
+    {
+      "item_code": "LV2867",
+      "item_name": "Smoke detector",
+      "department": "LV",
+      "specification": "Intelligent Analog Addressable Photothermal Detector",
+      "size": null,
+      "uom": "PCS",
+      "rate": 1130
+    },
+    {
+      "item_code": "LV3084",
+      "item_name": "LED LIGHT",
+      "department": "LV",
+      "specification": null,
+      "size": "100 MM",
+      "uom": "PCS",
+      "rate": 5466.1
+    },
+    {
+      "item_code": "OTH0002",
+      "item_name": "PVC PIPE",
+      "department": "FF",
+      "specification": "90MM",
+      "size": "90MM",
+      "uom": "PCS",
+      "rate": 20
+    },
+    {
+      "item_code": "OTH0008",
+      "item_name": "SCREW",
+      "department": "FF",
+      "specification": "3INCHI",
+      "size": "3INCHI",
+      "uom": "KG",
+      "rate": 2.26
+    },
+    {
+      "item_code": "OTH0019",
+      "item_name": "GRINDER",
+      "department": "OTHER",
+      "specification": null,
+      "size": null,
+      "uom": "PCS",
+      "rate": 2200
+    },
+    {
+      "item_code": "PLU2641",
+      "item_name": "CPVC PIPE",
+      "department": "PLU",
+      "specification": null,
+      "size": "3 INCH",
+      "uom": "MTR",
+      "rate": 127.67
+    },
+    {
+      "item_code": "PLU2642",
+      "item_name": "CPVC REDUCER",
+      "department": "PLU",
+      "specification": "SCH-40",
+      "size": "4\"X3\"",
+      "uom": "PCS",
+      "rate": 362.26
+    },
+    {
+      "item_code": "PLU2643",
+      "item_name": "CPVC TEE",
+      "department": "PLU",
+      "specification": "SCH-40",
+      "size": "3\"",
+      "uom": "PCS",
+      "rate": 47
+    },
+    {
+      "item_code": "PLU2644",
+      "item_name": "CPVC BALL VALVE",
+      "department": "PLU",
+      "specification": "SCH-80",
+      "size": "3\"",
+      "uom": "PCS",
+      "rate": 135
+    },
+    {
+      "item_code": "PLU3081",
+      "item_name": "CPVC SOCKET",
+      "department": "PLU",
+      "specification": null,
+      "size": "3INCH",
+      "uom": "PCS",
+      "rate": 45.26
+    }
+  ]
+}

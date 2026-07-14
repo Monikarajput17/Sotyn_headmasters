@@ -1,0 +1,10 @@
+node_modules/
+/data/
+.env
+client/node_modules/
+.claude/
+# client/dist IS committed on purpose — the VPS deploys prebuilt (its build OOMs),
+# so the built bundle ships in the repo. Rebuild with `npm run build` before commit.
+
+# generated sales-billing exports that land in client/public
+client/public/*.xlsx

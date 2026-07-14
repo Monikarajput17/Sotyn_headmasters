@@ -1,0 +1,20 @@
+{
+  "name": "sepl-erp-mcp-connector",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only MCP connector for the SEPL ERP. Lets Claude query the live ERP API (approvals, finance, DPR, sales/indents) — GET-only, cannot change any data.",
+  "type": "module",
+  "bin": {
+    "sepl-erp-mcp": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "http": "MCP_TRANSPORT=http node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "zod": "^3.23.8"
+  }
+}

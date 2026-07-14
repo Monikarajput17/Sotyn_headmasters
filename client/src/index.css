@@ -1,0 +1,395 @@
+/* Inter is now self-hosted (perf pass — first-paint). The former Google Fonts
+   @import was a render-blocking 3-hop CDN chain (this CSS → fonts.googleapis.com
+   → fonts.gstatic.com) that also couldn't be precached offline. It's now the
+   @fontsource-variable/inter woff2, bundled same-origin + weight-axis variable
+   (one file, all weights), imported in main.jsx. Family: 'Inter Variable'. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter Variable', 'Inter', -apple-system, 'Segoe UI', sans-serif;
+  background-color: #f0f4f8;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
+/* IMPORTANT — wrap in @layer components so Tailwind utility classes
+   like `pl-10` properly override the px-3.5 baked into .input. Without
+   this layer, .input and .pl-10 had equal specificity and source order
+   decided which won — causing icons to overlap placeholder text in
+   every <input className="input pl-10"> across the Sotyn.Headmasters. */
+@layer components {
+  .sidebar-link {
+    @apply flex items-center gap-3 px-4 py-2.5 text-sm rounded-lg transition-all duration-200;
+  }
+  .sidebar-link:hover {
+    @apply bg-white/10 translate-x-1;
+  }
+  .sidebar-link.active {
+    @apply bg-white/20 font-semibold shadow-sm;
+  }
+
+  .card {
+    @apply bg-white rounded-2xl shadow-sm border border-gray-100/80 p-6 transition-shadow hover:shadow-md;
+  }
+
+  /* Brand palette (mam, 2026-05-20).  First pass used blue-700/800
+     which read as a mid-blue.  Second pass (reference: solar-panel
+     photo) deepened to blue-800/900 — closer to the saturated
+     "royal blue" / navy tone in the reference image.  Red preserved
+     ONLY for semantic destructive / danger states. */
+  .btn {
+    @apply px-4 py-2 rounded-xl font-semibold text-sm transition-all duration-200 disabled:opacity-50 cursor-pointer shadow-sm;
+  }
+  .btn:active { @apply scale-95; }
+  .btn-primary {
+    @apply bg-gradient-to-r from-blue-800 to-blue-900 text-white hover:from-blue-900 hover:to-slate-900 shadow-blue-300;
+  }
+  .btn-success {
+    @apply bg-gradient-to-r from-emerald-500 to-emerald-600 text-white hover:from-emerald-600 hover:to-emerald-700 shadow-emerald-200;
+  }
+  .btn-danger {
+    /* Semantic — destructive actions stay red regardless of brand */
+    @apply bg-gradient-to-r from-red-500 to-red-600 text-white hover:from-red-600 hover:to-red-700 shadow-red-200;
+  }
+  .btn-secondary {
+    @apply bg-white text-gray-700 border border-gray-200 hover:bg-gray-50 hover:border-gray-300 shadow-none;
+  }
+
+  .input {
+    @apply w-full px-3.5 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-700/30 focus:border-blue-700 transition-all bg-white;
+  }
+
+  .select {
+    @apply w-full px-3.5 py-2.5 border border-gray-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-700/30 focus:border-blue-700 transition-all;
+  }
+
+  .label {
+    @apply block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5;
+  }
+
+  /* Compact variant — use inside narrow grid cells (qty / rate / amount
+     columns in BOQ tables) so the input never disappears under padding.
+     Pair with `.input-compact` instead of `.input`. */
+  .input-compact {
+    @apply w-full min-w-0 px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-700/30 focus:border-blue-700 transition-all bg-white;
+  }
+
+  /* Sticky toolbar — INTENTIONALLY INERT.  Earlier iterations made this
+     a `position: sticky` bar with negative margins to bleed past main's
+     padding.  In practice it caused stat cards / page headers to layer
+     awkwardly behind it on pages like DPR ("seriously do you think its
+     good ui/ux" — mam, 2026-05-13).  Reverted to plain block flow so
+     pages scroll naturally; the Layout's top header (hamburger, page
+     title, bell) is a SEPARATE fixed element above <main> and still
+     stays put on scroll.  Markup keeps the `.sticky-toolbar` wrapper so
+     spacing/grouping remains, but no sticky behavior. */
+  .sticky-toolbar {
+    display: block;
+  }
+  .sticky-toolbar > * + * {
+    margin-top: 0.75rem;
+  }
+}
+
+/* Mobile: iOS Safari auto-zooms the whole page whenever you focus an input
+   whose font-size is under 16px — so every form field on a phone yanked the
+   layout around. Force form controls to 16px on small screens only; desktop
+   keeps the compact 14px (mam 2026-06-25 mobile audit, "think like a user"). */
+@media (max-width: 640px) {
+  input, select, textarea,
+  .input, .select, .input-compact {
+    font-size: 16px !important;
+  }
+}
+
+/* Global protection for number inputs styled with `.input` — mam: "qty
+   is very small not showing peroper when we enter". Without this, a
+   number input inside a col-span-1 grid cell ends up with ~25px width
+   minus 28px of horizontal padding = negative usable area, and the
+   typed value visually disappears.
+   - min-width guarantees readable space (~3 digits visible).
+   - Right-align matches number-entry convention.
+   - Reduced horizontal padding makes the digits hug the right edge so
+     they stay in view even when the column is tight. */
+input[type="number"].input,
+input[type="number"].input-compact,
+input.input[inputmode="decimal"],
+input.input[inputmode="numeric"] {
+  text-align: right;
+  min-width: 60px;
+  padding-left: 0.5rem;
+  padding-right: 0.5rem;
+  -moz-appearance: textfield;
+}
+input[type="number"].input::-webkit-outer-spin-button,
+input[type="number"].input::-webkit-inner-spin-button,
+input[type="number"].input-compact::-webkit-outer-spin-button,
+input[type="number"].input-compact::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Mobile tap-target enhancements — many action buttons across the Sotyn.Headmasters
+   use text-[10px] with very tight padding. On phones (<= 640px) bump
+   the min-height to comfortably hit with a fingertip and ensure the
+   text is readable. Targets all .btn variants in one place so we don't
+   have to touch every page. */
+@media (max-width: 640px) {
+  .btn {
+    min-height: 36px;
+    padding-top: 0.4rem;
+    padding-bottom: 0.4rem;
+  }
+  /* Lift any utility-class 10px button text to 11px on phone */
+  .btn.text-\[10px\] {
+    font-size: 11px;
+    line-height: 1.1;
+  }
+  /* Same for inline tap targets that aren't .btn but use 10px (badges
+     that double as buttons, small action chips in tables, etc.) */
+  button.text-\[10px\],
+  a.text-\[10px\] {
+    font-size: 11px;
+    line-height: 1.1;
+  }
+  /* Make table cells slightly more touch-friendly on phone — small
+     padding bump improves tap accuracy on row-level actions. */
+  td { padding-top: 0.7rem; padding-bottom: 0.7rem; }
+
+  /* ─── Mobile mass-fix (mam 2026-05-28, MD complaint) ─────────────
+     Two universal fixes that close the worst phone pain points
+     without touching ~50 page files individually.
+
+     1. Auto horizontal-scroll any card that wraps a wide table.
+        Many .card containers across the Sotyn.Headmasters (Business Book, Vendors,
+        Cheque FMS, Snags, Orders, Item Master, …) hold tables that
+        overflow 375px width. Browser-supported :has() lets us target
+        them in one rule. We also kill the card's p-6 padding while
+        keeping the rounded outer chrome, so the table can scroll
+        cleanly to the right edge of the screen.
+        Note: the card root keeps overflow:hidden under rounded-2xl,
+        which would clip the scrollable child — so we also relax
+        overflow on the parent in mobile. */
+  .card:has(> table),
+  .card:has(> div > table),
+  .card:has(> div > div > table) {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 0;
+  }
+  /* Keep the inner card padding for the head area when present (e.g. a
+     filter row + table inside the same card). The table itself stays
+     full-width and scrollable. */
+  .card:has(> table) > *:not(table),
+  .card:has(> div > table) > *:not(div):not(table) {
+    padding: 1rem;
+  }
+
+  /* 2. Bump icon-only padding-1 buttons to a 32px tap target. Pages
+        like Indent to Dispatch have 5+ p-1 icon buttons crammed in
+        the action column. Browsers can't tell "icon button" from
+        "container with padding 1", so we scope to <button> tags that
+        are direct children of action cells / action wrappers and don't
+        have other padding utilities. */
+  button.p-1,
+  button.p-1\.5,
+  button.p-0\.5 {
+    padding: 0.5rem;
+    min-width: 32px;
+    min-height: 32px;
+  }
+  /* Slightly bigger touch zone on any 9px / 10px icon-only chip used
+     as an action (e.g. tiny "✓ Clear pmt" buttons we added recently). */
+  button.text-\[9px\],
+  button.text-\[10px\] {
+    min-height: 32px;
+    padding: 0.4rem 0.6rem;
+  }
+  /* Filter pill rows (Item Master / Cheque FMS / Procurement) use
+     py-1.5 padding which renders at 30-31px tall — 1-2 px under the
+     tap-target line. Hits both text-xs and text-[11px] variants. */
+  button.py-1\.5,
+  a.py-1\.5 {
+    min-height: 32px;
+  }
+}
+
+table {
+  @apply w-full text-sm;
+}
+thead {
+  @apply bg-gradient-to-r from-gray-50 to-gray-100/50;
+}
+th {
+  @apply px-4 py-3 text-left font-bold text-gray-500 uppercase text-[10px] tracking-wider;
+}
+/* Freeze head — mam (2026-06-02): "freeze like excel till headers".
+   Previously inert because page-level sticky leaked thead through
+   page-header / stat tiles.  Now wired correctly:
+     - per-th sticky (NOT thead, since Chrome ignores position:sticky
+       on <thead>/<tbody>)
+     - opaque solid bg so scrolled content can't bleed through
+     - bottom shadow for the Excel-style "frozen separator" line
+     - relies on the WRAPPER having max-h-* + overflow-y-auto so the
+       table scrolls inside its own container, not the whole page.
+       The wrapper-scoped scrolling kills the old layering bug
+       because there's nothing above the thead to peek through.
+   Tables opt in by adding the `freeze-head` className.  Pairs with
+   `freeze-col` (already wired) when the first column should also
+   pin during horizontal scroll. */
+.freeze-head thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #f3f4f6;            /* gray-100 — matches thead gradient end */
+  box-shadow: inset 0 -1px 0 0 rgba(0, 0, 0, 0.08);
+}
+/* When freeze-col is ALSO active, the first th of the header row
+   needs to win the z-index race so it stays above both the sticky
+   thead row AND the sticky first column. */
+.freeze-head.freeze-col thead tr > :first-child {
+  z-index: 6;
+  background: #f3f4f6;
+}
+/* freeze-2col + freeze-head: pin BOTH first two columns of the
+   header at the higher z-index so they stay on top while scrolling. */
+.freeze-head.freeze-2col thead tr > :first-child,
+.freeze-head.freeze-2col thead tr > :nth-child(2) {
+  z-index: 6;
+  background: #f3f4f6;
+}
+/* Preserve themed thead row backgrounds (amber for Pending sub-tabs,
+   indigo for Ready-to-Dispatch, sky / etc.) — mam expects the visual
+   tint to stay when the header sticks. */
+.freeze-head thead tr.bg-amber-100\/50 > th { background: #fde68a; }      /* amber-200 — opaque equivalent */
+.freeze-head thead tr.bg-indigo-100\/50 > th { background: #c7d2fe; }     /* indigo-200 */
+.freeze-head thead tr.bg-sky-100\/50 > th { background: #bae6fd; }        /* sky-200 */
+.freeze-head thead tr.bg-emerald-100\/50 > th { background: #a7f3d0; }    /* emerald-200 */
+.freeze-head thead tr.bg-gray-50 > th { background: #f3f4f6; }            /* gray-100 */
+td {
+  @apply px-4 py-3 border-t border-gray-50;
+}
+/* Dense variant for wide multi-column tables (mam 2026-06-16: "adjust
+   page to fit") — tighter horizontal padding so extra columns like the
+   Indent-to-Dispatch Billable / Delivery-Bill pair fit with far less
+   horizontal scrolling. Opt-in via the `dense-cols` className. */
+.dense-cols th,
+.dense-cols td {
+  @apply px-2;
+}
+tbody tr {
+  @apply transition-colors;
+}
+tbody tr:hover {
+  @apply bg-red-50/40;
+}
+
+/* Freeze first column on horizontal scroll — mam (2026-05-25):
+   "if we want go to left to right we need first go to end then can
+   scroll left to right which is time wasting". When a wide table is
+   wrapped in an overflow-x-auto container, this pins the first <td> /
+   <th> of every row to the left edge so the indent number / row label
+   stays visible while the user scrolls right to see actions / status.
+
+   Add the `freeze-col` className alongside the existing `freeze-head`
+   on any <table> you want this on. Works with whatever row background
+   (white / gray-50 / amber-50) by inheriting from the parent row, with
+   a fallback white so rows without an explicit bg stay clean.
+
+   The box-shadow on the right edge creates a subtle visual separator
+   that signals "this column is pinned" without a hard border. */
+.freeze-col tr > :first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: white;
+  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.08);
+}
+.freeze-col thead tr > :first-child {
+  background: #f9fafb; /* matches the gray-50 thead gradient start */
+  z-index: 2;
+}
+/* Preserve row background colours behind the pinned cell so expanded /
+   highlighted rows don't show a white stripe on the left. */
+.freeze-col tr.bg-gray-50 > :first-child   { background: #f9fafb; }
+.freeze-col tr.bg-amber-50 > :first-child  { background: #fffbeb; }
+.freeze-col tr.bg-red-50 > :first-child    { background: #fef2f2; }
+.freeze-col tr.bg-emerald-50 > :first-child { background: #ecfdf5; }
+.freeze-col tr.bg-indigo-50 > :first-child  { background: #eef2ff; }
+.freeze-col tbody tr:hover > :first-child {
+  /* Match the global tbody tr:hover bg-red-50/40 effect */
+  background: rgba(254, 226, 226, 0.4);
+}
+
+/* freeze-2col — pins the FIRST TWO columns instead of just one.  Use
+   when the meaningful row label spans two cells (e.g. on the Vendor
+   Rates table the Indent No is in col 1 and the Sub-Item description
+   is in col 2 — losing the sub-item while scrolling right makes the
+   rate columns ambiguous).  Mam (2026-05-25): "LOOK NOT GOOD INTERFACE
+   TILL ITEM WISE FREEZE".
+
+   The wrapper must set --freeze-col-1-w to the actual width of the
+   first column in pixels (defaults to 140px).  The 2nd column's
+   sticky left is positioned right after the first column.
+*/
+.freeze-2col tr > :first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: white;
+}
+.freeze-2col tr > :nth-child(2) {
+  position: sticky;
+  left: var(--freeze-col-1-w, 140px);
+  z-index: 1;
+  background: white;
+  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.08);
+}
+.freeze-2col thead tr > :first-child,
+.freeze-2col thead tr > :nth-child(2) {
+  background: #f9fafb;
+  z-index: 2;
+}
+.freeze-2col tr.bg-gray-50 > :first-child,
+.freeze-2col tr.bg-gray-50 > :nth-child(2) { background: #f9fafb; }
+.freeze-2col tbody tr:hover > :first-child,
+.freeze-2col tbody tr:hover > :nth-child(2) {
+  background: rgba(254, 226, 226, 0.4);
+}
+
+.badge {
+  @apply inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide uppercase;
+}
+.badge-blue { @apply bg-red-50 text-red-700 ring-1 ring-red-200; }
+.badge-green { @apply bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200; }
+.badge-yellow { @apply bg-amber-50 text-amber-700 ring-1 ring-amber-200; }
+.badge-red { @apply bg-red-50 text-red-700 ring-1 ring-red-200; }
+.badge-gray { @apply bg-gray-50 text-gray-600 ring-1 ring-gray-200; }
+.badge-blue { @apply bg-blue-100 text-blue-900 ring-1 ring-blue-200; }
+
+/* sotyn chat page specific css rule */
+@media screen and (max-width: 767px) {
+  .schat-wrapper ~ .p-footer {
+    display: none !important;
+  }
+}
+
+/* Animations */
+@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.card { animation: fadeIn 0.3s ease-out; }
+
+/* ─── Sotyn.Headmasters — shared form input helper ─── */
+.inp { width:100%; border:1px solid #e5e7eb; border-radius:.5rem; padding:.5rem .75rem; font-size:.875rem; outline:none; background:#fff; }
+.inp:focus { border-color:#1d4ed8; box-shadow:0 0 0 2px rgba(29,78,216,.15); }

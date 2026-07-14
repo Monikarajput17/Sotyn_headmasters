@@ -1,0 +1,1086 @@
+{
+  "_meta": {
+    "name": "SEPL Solar Item Master",
+    "version": "1.0",
+    "currency": "INR",
+    "note": "Exported from solar-item-master.xlsx. Rates are PURCHASE (cost) rates, ex-GST."
+  },
+  "factors": {
+    "mount": [
+      {
+        "mount_type": "ground",
+        "structure_cost_multiplier": 1,
+        "area_sqm_per_kWp": 9
+      },
+      {
+        "mount_type": "rcc",
+        "structure_cost_multiplier": 1.15,
+        "area_sqm_per_kWp": 7
+      },
+      {
+        "mount_type": "tin",
+        "structure_cost_multiplier": 0.85,
+        "area_sqm_per_kWp": 6.5
+      },
+      {
+        "mount_type": "carport",
+        "structure_cost_multiplier": 1.6,
+        "area_sqm_per_kWp": 12
+      },
+      {
+        "mount_type": "floating",
+        "structure_cost_multiplier": 1.9,
+        "area_sqm_per_kWp": 8
+      }
+    ],
+    "array": [
+      {
+        "array_type": "fixed",
+        "structure_multiplier": 1,
+        "yield_multiplier": 1
+      },
+      {
+        "array_type": "seasonal",
+        "structure_multiplier": 1.1,
+        "yield_multiplier": 1.05
+      },
+      {
+        "array_type": "tracker",
+        "structure_multiplier": 1.45,
+        "yield_multiplier": 1.18
+      }
+    ],
+    "state": [
+      {
+        "state": "Himachal Pradesh",
+        "specific_yield_kWh/kWp": 1600,
+        "t_min_°C": 2,
+        "t_max_°C": 42
+      },
+      {
+        "state": "Punjab",
+        "specific_yield_kWh/kWp": 1620,
+        "t_min_°C": 4,
+        "t_max_°C": 45
+      },
+      {
+        "state": "Rajasthan",
+        "specific_yield_kWh/kWp": 1700,
+        "t_min_°C": 6,
+        "t_max_°C": 48
+      },
+      {
+        "state": "Gujarat",
+        "specific_yield_kWh/kWp": 1650,
+        "t_min_°C": 6,
+        "t_max_°C": 47
+      },
+      {
+        "state": "Maharashtra",
+        "specific_yield_kWh/kWp": 1550,
+        "t_min_°C": 8,
+        "t_max_°C": 45
+      },
+      {
+        "state": "Tamil Nadu",
+        "specific_yield_kWh/kWp": 1600,
+        "t_min_°C": 10,
+        "t_max_°C": 44
+      },
+      {
+        "state": "Uttar Pradesh",
+        "specific_yield_kWh/kWp": 1500,
+        "t_min_°C": 7,
+        "t_max_°C": 44
+      }
+    ]
+  },
+  "panels": [
+    {
+      "item_code": "PNL-WAA-550-NDCR",
+      "brand": "Waaree",
+      "model": "WSMD-550",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.6,
+      "vmp_v": 41.7,
+      "imp_a": 13.2,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.25,
+      "module_eff_%": 21.3,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 11.5,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-WAA-550-DCR",
+      "brand": "Waaree",
+      "model": "WSMD-550-D",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "DCR",
+      "voc_v": 49.6,
+      "vmp_v": 41.7,
+      "imp_a": 13.2,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.25,
+      "module_eff_%": 21.3,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 13.2,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-ADA-545-NDCR",
+      "brand": "Adani",
+      "model": "ELAN-545",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.7,
+      "vmp_v": 41.5,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.27,
+      "module_eff_%": 21,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 11.8,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-ADA-545-DCR",
+      "brand": "Adani",
+      "model": "ELAN-545-D",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "DCR",
+      "voc_v": 49.7,
+      "vmp_v": 41.5,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.27,
+      "module_eff_%": 21,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 13.5,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-VIK-550-NDCR",
+      "brand": "Vikram Solar",
+      "model": "SOMERA-550",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.5,
+      "vmp_v": 41.6,
+      "imp_a": 13.2,
+      "isc_a": 14,
+      "temp_coef_voc_%/°C": -0.26,
+      "module_eff_%": 21.2,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 11.6,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-VIK-550-DCR",
+      "brand": "Vikram Solar",
+      "model": "SOMERA-550-D",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "DCR",
+      "voc_v": 49.5,
+      "vmp_v": 41.6,
+      "imp_a": 13.2,
+      "isc_a": 14,
+      "temp_coef_voc_%/°C": -0.26,
+      "module_eff_%": 21.2,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 13.3,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-PRE-540-NDCR",
+      "brand": "Premier",
+      "model": "PSEL-540",
+      "technology": "Mono PERC",
+      "wattage_wp": 540,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.4,
+      "vmp_v": 41.3,
+      "imp_a": 13,
+      "isc_a": 13.8,
+      "temp_coef_voc_%/°C": -0.28,
+      "module_eff_%": 20.8,
+      "warranty_product_yrs": 10,
+      "warranty_perf_yrs": 25,
+      "purchase_rate_₹/Wp": 11.2,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-PRE-540-DCR",
+      "brand": "Premier",
+      "model": "PSEL-540-D",
+      "technology": "Mono PERC",
+      "wattage_wp": 540,
+      "cell_content": "DCR",
+      "voc_v": 49.4,
+      "vmp_v": 41.3,
+      "imp_a": 13,
+      "isc_a": 13.8,
+      "temp_coef_voc_%/°C": -0.28,
+      "module_eff_%": 20.8,
+      "warranty_product_yrs": 10,
+      "warranty_perf_yrs": 25,
+      "purchase_rate_₹/Wp": 12.9,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-GOL-545-NDCR",
+      "brand": "Goldi",
+      "model": "GSPL-545",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.6,
+      "vmp_v": 41.4,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.28,
+      "module_eff_%": 20.9,
+      "warranty_product_yrs": 10,
+      "warranty_perf_yrs": 25,
+      "purchase_rate_₹/Wp": 10.9,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-GOL-545-DCR",
+      "brand": "Goldi",
+      "model": "GSPL-545-D",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "DCR",
+      "voc_v": 49.6,
+      "vmp_v": 41.4,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.28,
+      "module_eff_%": 20.9,
+      "warranty_product_yrs": 10,
+      "warranty_perf_yrs": 25,
+      "purchase_rate_₹/Wp": 12.6,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-REN-550-NDCR",
+      "brand": "RenewSys",
+      "model": "DESERV-550",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.5,
+      "vmp_v": 41.6,
+      "imp_a": 13.2,
+      "isc_a": 14,
+      "temp_coef_voc_%/°C": -0.27,
+      "module_eff_%": 21.1,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 11.3,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-REN-550-DCR",
+      "brand": "RenewSys",
+      "model": "DESERV-550-D",
+      "technology": "Bifacial Mono PERC",
+      "wattage_wp": 550,
+      "cell_content": "DCR",
+      "voc_v": 49.5,
+      "vmp_v": 41.6,
+      "imp_a": 13.2,
+      "isc_a": 14,
+      "temp_coef_voc_%/°C": -0.27,
+      "module_eff_%": 21.1,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 13,
+      "gst_%": 12,
+      "tier": 2
+    },
+    {
+      "item_code": "PNL-TAT-545-NDCR",
+      "brand": "Tata Power",
+      "model": "TP-545",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "Non-DCR",
+      "voc_v": 49.7,
+      "vmp_v": 41.5,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.26,
+      "module_eff_%": 21,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 12.2,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-TAT-545-DCR",
+      "brand": "Tata Power",
+      "model": "TP-545-D",
+      "technology": "Mono PERC",
+      "wattage_wp": 545,
+      "cell_content": "DCR",
+      "voc_v": 49.7,
+      "vmp_v": 41.5,
+      "imp_a": 13.1,
+      "isc_a": 13.9,
+      "temp_coef_voc_%/°C": -0.26,
+      "module_eff_%": 21,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 14,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-JIN-575-NDCR",
+      "brand": "Jinko (import)",
+      "model": "TIGER-NEO-575",
+      "technology": "TOPCon",
+      "wattage_wp": 575,
+      "cell_content": "Non-DCR",
+      "voc_v": 51.8,
+      "vmp_v": 43.2,
+      "imp_a": 13.3,
+      "isc_a": 14.1,
+      "temp_coef_voc_%/°C": -0.24,
+      "module_eff_%": 22.3,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 10.8,
+      "gst_%": 12,
+      "tier": 1
+    },
+    {
+      "item_code": "PNL-TRI-580-NDCR",
+      "brand": "Trina (import)",
+      "model": "VERTEX-580",
+      "technology": "TOPCon",
+      "wattage_wp": 580,
+      "cell_content": "Non-DCR",
+      "voc_v": 52,
+      "vmp_v": 43.4,
+      "imp_a": 13.4,
+      "isc_a": 14.2,
+      "temp_coef_voc_%/°C": -0.24,
+      "module_eff_%": 22.5,
+      "warranty_product_yrs": 12,
+      "warranty_perf_yrs": 30,
+      "purchase_rate_₹/Wp": 10.7,
+      "gst_%": 12,
+      "tier": 1
+    }
+  ],
+  "inverters": [
+    {
+      "item_code": "INV-SUN-110",
+      "brand": "Sungrow",
+      "model": "SG110CX",
+      "type": "String",
+      "rated_kw": 110,
+      "phase": "3-ph",
+      "mppt_count": 9,
+      "mppt_v_min": 200,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 30,
+      "euro_eff_%": 98.5,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 3.1,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SOF-075",
+      "brand": "Sofar",
+      "model": "75KTL-X",
+      "type": "String",
+      "rated_kw": 75,
+      "phase": "3-ph",
+      "mppt_count": 7,
+      "mppt_v_min": 180,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 26,
+      "euro_eff_%": 98.6,
+      "warranty_yrs": 5,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.5,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SOF-100",
+      "brand": "Sofar",
+      "model": "100KTL-X",
+      "type": "String",
+      "rated_kw": 100,
+      "phase": "3-ph",
+      "mppt_count": 8,
+      "mppt_v_min": 180,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 26,
+      "euro_eff_%": 98.6,
+      "warranty_yrs": 5,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.5,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SOF-125",
+      "brand": "Sofar",
+      "model": "125KTL-X",
+      "type": "String",
+      "rated_kw": 125,
+      "phase": "3-ph",
+      "mppt_count": 10,
+      "mppt_v_min": 180,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 26,
+      "euro_eff_%": 98.7,
+      "warranty_yrs": 5,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.5,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SOF-300",
+      "brand": "Sofar",
+      "model": "300KTL-HV",
+      "type": "String",
+      "rated_kw": 300,
+      "phase": "3-ph",
+      "mppt_count": 12,
+      "mppt_v_min": 500,
+      "mppt_v_max": 1500,
+      "max_dc_v": 1500,
+      "max_input_current_a": 40,
+      "euro_eff_%": 99,
+      "warranty_yrs": 5,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.5,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-GRO-100",
+      "brand": "Growatt",
+      "model": "MAX 100KTL3",
+      "type": "String",
+      "rated_kw": 100,
+      "phase": "3-ph",
+      "mppt_count": 8,
+      "mppt_v_min": 180,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 26,
+      "euro_eff_%": 98.6,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.6,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-GWE-100",
+      "brand": "GoodWe",
+      "model": "GW100K-HT",
+      "type": "String",
+      "rated_kw": 100,
+      "phase": "3-ph",
+      "mppt_count": 10,
+      "mppt_v_min": 200,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 30,
+      "euro_eff_%": 98.7,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.7,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SOL-100",
+      "brand": "Solis",
+      "model": "S5-GC100K",
+      "type": "String",
+      "rated_kw": 100,
+      "phase": "3-ph",
+      "mppt_count": 9,
+      "mppt_v_min": 200,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 26,
+      "euro_eff_%": 98.7,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 2.6,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-DEL-100",
+      "brand": "Delta",
+      "model": "M100A_280",
+      "type": "String",
+      "rated_kw": 100,
+      "phase": "3-ph",
+      "mppt_count": 10,
+      "mppt_v_min": 200,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 30,
+      "euro_eff_%": 98.8,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 3,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-SMA-110",
+      "brand": "SMA",
+      "model": "STP110-60",
+      "type": "String",
+      "rated_kw": 110,
+      "phase": "3-ph",
+      "mppt_count": 6,
+      "mppt_v_min": 150,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1100,
+      "max_input_current_a": 30,
+      "euro_eff_%": 98.6,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 4.2,
+      "gst_%": 18
+    },
+    {
+      "item_code": "INV-FRO-027",
+      "brand": "Fronius",
+      "model": "ECO 27.0-3-S",
+      "type": "String",
+      "rated_kw": 27,
+      "phase": "3-ph",
+      "mppt_count": 2,
+      "mppt_v_min": 580,
+      "mppt_v_max": 1000,
+      "max_dc_v": 1000,
+      "max_input_current_a": 35,
+      "euro_eff_%": 98.5,
+      "warranty_yrs": 10,
+      "warranty_ext_yrs": 5,
+      "purchase_rate_₹/W": 4.5,
+      "gst_%": 18
+    }
+  ],
+  "structure": [
+    {
+      "make_label": "HDG GI 120µ",
+      "material": "Hot-Dip Galvanised GI",
+      "galvanization_micron": 120,
+      "default_mount": "Ground",
+      "design_wind_basis_ms": 39,
+      "steel_kg_per_kW": 55,
+      "purchase_rate_₹/Wp": 3.4,
+      "gst_%": 18
+    },
+    {
+      "make_label": "HDG GI 80µ",
+      "material": "Hot-Dip Galvanised GI",
+      "galvanization_micron": 80,
+      "default_mount": "Ground",
+      "design_wind_basis_ms": 39,
+      "steel_kg_per_kW": 50,
+      "purchase_rate_₹/Wp": 3,
+      "gst_%": 18
+    },
+    {
+      "make_label": "Pre-galvanized",
+      "material": "Pre-Galvanised GI",
+      "galvanization_micron": 25,
+      "default_mount": "Ground",
+      "design_wind_basis_ms": 39,
+      "steel_kg_per_kW": 48,
+      "purchase_rate_₹/Wp": 2.7,
+      "gst_%": 18
+    },
+    {
+      "make_label": "MS painted",
+      "material": "Mild Steel (painted)",
+      "galvanization_micron": 0,
+      "default_mount": "Ground",
+      "design_wind_basis_ms": 39,
+      "steel_kg_per_kW": 60,
+      "purchase_rate_₹/Wp": 2.3,
+      "gst_%": 18
+    },
+    {
+      "make_label": "Aluminium",
+      "material": "Aluminium",
+      "galvanization_micron": 0,
+      "default_mount": "RCC",
+      "design_wind_basis_ms": 39,
+      "steel_kg_per_kW": 30,
+      "purchase_rate_₹/Wp": 4,
+      "gst_%": 18
+    }
+  ],
+  "cables": [
+    {
+      "brand": "Polycab",
+      "application": "DC String",
+      "size_sqmm": 4,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 42,
+      "gst_%": 18
+    },
+    {
+      "brand": "Polycab",
+      "application": "DC String",
+      "size_sqmm": 6,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 62,
+      "gst_%": 18
+    },
+    {
+      "brand": "Polycab",
+      "application": "AC LT",
+      "size_sqmm": 300,
+      "cores": "3.5C",
+      "conductor": "Aluminium",
+      "grade": "XLPE armoured",
+      "voltage_grade": "1.1 kV",
+      "purchase_rate_₹/m": 650,
+      "gst_%": 18
+    },
+    {
+      "brand": "KEI",
+      "application": "DC String",
+      "size_sqmm": 4,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 41,
+      "gst_%": 18
+    },
+    {
+      "brand": "KEI",
+      "application": "AC LT",
+      "size_sqmm": 300,
+      "cores": "3.5C",
+      "conductor": "Aluminium",
+      "grade": "XLPE armoured",
+      "voltage_grade": "1.1 kV",
+      "purchase_rate_₹/m": 640,
+      "gst_%": 18
+    },
+    {
+      "brand": "Havells",
+      "application": "DC String",
+      "size_sqmm": 4,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 43,
+      "gst_%": 18
+    },
+    {
+      "brand": "Havells",
+      "application": "AC LT",
+      "size_sqmm": 300,
+      "cores": "3.5C",
+      "conductor": "Aluminium",
+      "grade": "XLPE armoured",
+      "voltage_grade": "1.1 kV",
+      "purchase_rate_₹/m": 660,
+      "gst_%": 18
+    },
+    {
+      "brand": "RR Kabel",
+      "application": "DC String",
+      "size_sqmm": 4,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 39,
+      "gst_%": 18
+    },
+    {
+      "brand": "RR Kabel",
+      "application": "AC LT",
+      "size_sqmm": 300,
+      "cores": "3.5C",
+      "conductor": "Aluminium",
+      "grade": "XLPE armoured",
+      "voltage_grade": "1.1 kV",
+      "purchase_rate_₹/m": 610,
+      "gst_%": 18
+    },
+    {
+      "brand": "Lapp (premium)",
+      "application": "DC String",
+      "size_sqmm": 4,
+      "cores": "1C",
+      "conductor": "Copper",
+      "grade": "TÜV",
+      "voltage_grade": "1.5 kV DC",
+      "purchase_rate_₹/m": 55,
+      "gst_%": 18
+    },
+    {
+      "brand": "Lapp (premium)",
+      "application": "AC LT",
+      "size_sqmm": 300,
+      "cores": "3.5C",
+      "conductor": "Aluminium",
+      "grade": "XLPE armoured",
+      "voltage_grade": "1.1 kV",
+      "purchase_rate_₹/m": 780,
+      "gst_%": 18
+    }
+  ],
+  "bos": [
+    {
+      "item_code": "BOS-ACDB",
+      "category": "ACDB",
+      "description": "AC Distribution Box (with SPD + MCCB)",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 28000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-DCDB",
+      "category": "DCDB",
+      "description": "DC Distribution Box (with fuses + SPD)",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 18000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-MC4",
+      "category": "MC4 Connector",
+      "description": "MC4 connector pair (1500V)",
+      "brand": "OEM",
+      "unit": "Pair",
+      "purchase_rate_₹/unit": 140,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-EARTH",
+      "category": "Earthing",
+      "description": "Copper-bonded earth electrode kit",
+      "brand": "Cu Bonded",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 5500,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-ECAB",
+      "category": "Earthing Cable",
+      "description": "Earthing cable / GI strip",
+      "brand": "Polycab",
+      "unit": "Mtr",
+      "purchase_rate_₹/unit": 110,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-LA",
+      "category": "Lightning Arrestor",
+      "description": "Copper-bonded lightning arrestor + mast",
+      "brand": "Cu Bonded",
+      "unit": "Nos",
+      "purchase_rate_₹/unit": 7500,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-RMS",
+      "category": "RMS",
+      "description": "Remote monitoring system (data logger + SIM)",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 45000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-DGSYNC",
+      "category": "DG Sync",
+      "description": "DG synchronization panel + controller",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 38000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-ZEC",
+      "category": "Zero-Export Controller",
+      "description": "Export limiter + grid CTs + reverse-power relay",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 85000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-SPD",
+      "category": "SPD",
+      "description": "Surge protection device (Type-2)",
+      "brand": "Standard",
+      "unit": "Nos",
+      "purchase_rate_₹/unit": 2200,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-WMS",
+      "category": "Weather Station",
+      "description": "Irradiance + temp weather monitoring",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 65000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-CABACC",
+      "category": "Cable Accessories",
+      "description": "Ties, clamps, ferrules, thimbles, glands",
+      "brand": "Standard",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 12000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-CLEAN",
+      "category": "Cleaning System",
+      "description": "Module cleaning system / water lines",
+      "brand": "Standard",
+      "unit": "Lot",
+      "purchase_rate_₹/unit": 8000,
+      "gst_%": 18
+    },
+    {
+      "item_code": "BOS-NETMTR",
+      "category": "Net Meter",
+      "description": "DISCOM net meter (govt charge, at actual)",
+      "brand": "DISCOM",
+      "unit": "Set",
+      "purchase_rate_₹/unit": 500000,
+      "gst_%": 0
+    }
+  ],
+  "labour": [
+    {
+      "activity": "Installation & Commissioning",
+      "unit": "₹/Wp",
+      "rate_₹": 2,
+      "gst_%": 18
+    },
+    {
+      "activity": "Civil / Foundation (ground mount)",
+      "unit": "₹/Wp",
+      "rate_₹": 0.8,
+      "gst_%": 18
+    },
+    {
+      "activity": "Transportation & Handling",
+      "unit": "₹/km",
+      "rate_₹": 150,
+      "gst_%": 18
+    },
+    {
+      "activity": "Liaisoning & DISCOM Approvals",
+      "unit": "₹/Lot",
+      "rate_₹": 75000,
+      "gst_%": 18
+    },
+    {
+      "activity": "Design & Drawings (SLD, GA)",
+      "unit": "₹/Lot",
+      "rate_₹": 40000,
+      "gst_%": 18
+    },
+    {
+      "activity": "AMC / O&M (after free period)",
+      "unit": "₹/year",
+      "rate_₹": 200000,
+      "gst_%": 18
+    }
+  ],
+  "settings": [
+    {
+      "key": "gst_goods_%",
+      "value": 12,
+      "unit": "%",
+      "note": "Solar modules/structure/cable (goods)"
+    },
+    {
+      "key": "gst_service_%",
+      "value": 18,
+      "unit": "%",
+      "note": "Installation & services"
+    },
+    {
+      "key": "gst_blended_%",
+      "value": 13.8,
+      "unit": "%",
+      "note": "70:30 goods:service blended (used on quote)"
+    },
+    {
+      "key": "accessories_%",
+      "value": 3,
+      "unit": "%",
+      "note": "Accessories loaded on material PP"
+    },
+    {
+      "key": "performance_ratio",
+      "value": 0.8,
+      "unit": "ratio",
+      "note": "Plant PR for generation estimate"
+    },
+    {
+      "key": "degradation_%/yr",
+      "value": 0.8,
+      "unit": "%",
+      "note": "Annual module degradation"
+    },
+    {
+      "key": "co2_factor_kg/kWh",
+      "value": 0.82,
+      "unit": "kg/kWh",
+      "note": "Grid emission factor (India)"
+    },
+    {
+      "key": "grid_tariff_default_₹",
+      "value": 8,
+      "unit": "₹/unit",
+      "note": "C&I default tariff for ROI"
+    },
+    {
+      "key": "target_margin_%",
+      "value": 22,
+      "unit": "%",
+      "note": "Default throughput margin target"
+    },
+    {
+      "key": "min_margin_floor_%",
+      "value": 15,
+      "unit": "%",
+      "note": "Margin floor (warn below)"
+    }
+  ],
+  "ui": {
+    "panel": {
+      "Waaree": [
+        11.5,
+        13.2
+      ],
+      "Adani": [
+        11.8,
+        13.5
+      ],
+      "Vikram Solar": [
+        11.6,
+        13.3
+      ],
+      "Premier": [
+        11.2,
+        12.9
+      ],
+      "Goldi": [
+        10.9,
+        12.6
+      ],
+      "RenewSys": [
+        11.3,
+        13
+      ],
+      "Tata Power": [
+        12.2,
+        14
+      ],
+      "Jinko (import)": [
+        10.8,
+        null
+      ],
+      "Trina (import)": [
+        10.7,
+        null
+      ]
+    },
+    "inverter": {
+      "Sungrow": 3.1,
+      "Sofar": 2.5,
+      "Growatt": 2.6,
+      "GoodWe": 2.7,
+      "Solis": 2.6,
+      "Delta": 3,
+      "SMA": 4.2,
+      "Fronius": 4.5
+    },
+    "structure": {
+      "HDG GI 120µ": 3.4,
+      "HDG GI 80µ": 3,
+      "Pre-galvanized": 2.7,
+      "MS painted": 2.3,
+      "Aluminium": 4
+    },
+    "cable": {
+      "Polycab": [
+        42,
+        650
+      ],
+      "KEI": [
+        41,
+        640
+      ],
+      "Havells": [
+        43,
+        660
+      ],
+      "RR Kabel": [
+        39,
+        610
+      ],
+      "Lapp (premium)": [
+        55,
+        780
+      ]
+    }
+  }
+}

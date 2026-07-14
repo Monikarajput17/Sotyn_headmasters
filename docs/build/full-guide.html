@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>SEPL ERP — Complete Guide</title>
+<style>
+  :root { --brand:#1e3a8a; --brand2:#172554; --ink:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); font-size: 11pt; line-height: 1.5; margin: 0; }
+  .page { max-width: 920px; margin: 0 auto; padding: 28px 40px; }
+  .cover { min-height: 96vh; display: flex; flex-direction: column; justify-content: center;
+           background: linear-gradient(160deg, var(--brand) 0%, var(--brand2) 100%); color: #fff; padding: 60px; page-break-after: always; }
+  .cover .badge { font-size: 13pt; letter-spacing: 3px; text-transform: uppercase; color: #bfdbfe; }
+  .cover h1 { font-size: 40pt; line-height: 1.1; margin: 18px 0 8px; font-weight: 800; border: none; }
+  .cover .sub { font-size: 15pt; color: #dbeafe; max-width: 640px; }
+  .cover .meta { margin-top: 48px; font-size: 11pt; color: #c7d2fe; border-top: 1px solid rgba(255,255,255,.25); padding-top: 16px; }
+  .cover .meta b { color: #fff; }
+  h1 { color: var(--brand); font-size: 20pt; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 3px solid var(--brand); page-break-before: always; }
+  h2 { color: var(--brand2); font-size: 14pt; margin: 22px 0 8px; border-left: 4px solid var(--accent); padding-left: 10px; }
+  h3 { color: #374151; font-size: 12pt; margin: 16px 0 6px; }
+  h4 { color: #4b5563; font-size: 11pt; margin: 12px 0 4px; }
+  p { margin: 6px 0; }
+  a { color: var(--brand); text-decoration: none; }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-size: 9.5pt; font-family: "Cascadia Code", Consolas, monospace; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 12px 14px; border-radius: 8px; overflow-x: auto; font-size: 9pt; line-height: 1.45; }
+  pre code { background: none; color: inherit; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 9.5pt; page-break-inside: avoid; }
+  th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; vertical-align: top; }
+  th { background: var(--brand); color: #fff; font-weight: 600; }
+  tr:nth-child(even) td { background: #f8fafc; }
+  blockquote { border-left: 4px solid #93c5fd; background: #eff6ff; margin: 10px 0; padding: 6px 14px; color: #1e40af; border-radius: 0 6px 6px 0; }
+  ul, ol { margin: 6px 0; padding-left: 22px; }
+  li { margin: 2px 0; }
+  hr { border: none; border-top: 1px solid var(--line); margin: 20px 0; }
+  @media print { .page { max-width: none; } h1 { page-break-before: always; } h2, h3, h4 { page-break-after: avoid; } }
+</style></head>
+<body>
+  <section class="cover">
+    <div class="badge">Secured Engineers Pvt. Ltd.</div>
+    <h1>SEPL ERP</h1>
+    <div class="sub">Complete Guide — User Manual &amp; Technical Reference (steps + technology)</div>
+    <div class="meta">
+      <div><b>Scope:</b> All modules · step-by-step usage · languages &amp; tech used</div>
+      <div><b>Platform:</b> Web app + installable PWA (phone / laptop / desktop)</div>
+      <div><b>Stack:</b> React · Node.js / Express · SQLite · Socket.IO · WebRTC</div>
+      <div><b>Built by:</b> SOTYN.AI &nbsp;·&nbsp; <b>Generated:</b> 2026-06-22</div>
+    </div>
+  </section>
+  <main class="page">
+    <p><strong>Secured Engineers Pvt. Ltd. — Enterprise Resource Planning system</strong>
+Built by <strong>SOTYN.AI</strong> · Live at <strong>securederp.in</strong></p>
+<p>This is the master guide. It covers (1) the technology and languages the ERP is built with, (2) how it is put together, and (3) step-by-step instructions for every module.</p>
+<hr>
+<h2 id="table-of-contents">Table of Contents</h2>
+<ol>
+<li><a href="#1-what-this-erp-is">What this ERP is</a></li>
+<li><a href="#2-technology--languages-used">Technology &amp; Languages Used</a></li>
+<li><a href="#3-architecture">Architecture (how it fits together)</a></li>
+<li><a href="#4-getting-started">Getting Started — login &amp; roles</a></li>
+<li><a href="#5-navigation--common-controls">Navigation &amp; common controls</a></li>
+<li><a href="#6-sales--crm">Sales &amp; CRM</a></li>
+<li><a href="#7-procurement">Procurement (Indent → Dispatch)</a></li>
+<li><a href="#8-client-purchase-orders--planning">Client Purchase Orders &amp; Planning</a></li>
+<li><a href="#9-projects--site-execution">Projects &amp; Site Execution</a></li>
+<li><a href="#10-finance">Finance</a></li>
+<li><a href="#11-hrms">HRMS (People)</a></li>
+<li><a href="#12-inventory">Inventory</a></li>
+<li><a href="#13-tasks--service-desk">Tasks &amp; Service Desk</a></li>
+<li><a href="#14-whatsapp">WhatsApp — internal chat &amp; calls</a></li>
+<li><a href="#15-executive-dashboards">Executive Dashboards</a></li>
+<li><a href="#16-admin--settings">Admin &amp; Settings</a></li>
+<li><a href="#17-cross-cutting-concepts">Cross-cutting concepts</a></li>
+<li><a href="#18-deployment--operations">Deployment &amp; Operations</a></li>
+</ol>
+<hr>
+<h2 id="1-what-this-erp-is">1. What this ERP is</h2>
+<p>A single web application that runs the whole business end-to-end: sales enquiries → quotations → client purchase orders → material indents → vendor rates &amp; POs → dispatch → site execution (DPR, labour) → billing → collections → finance, plus HR/payroll, inventory, tasks, an internal WhatsApp-style chat with voice/video calls, an AI assistant that reads your data, dashboards, and full role-based permissions.</p>
+<p>Everything is <strong>visible end-to-end</strong>: every site, every order, every rupee.</p>
+<hr>
+<h2 id="2-technology--languages-used">2. Technology &amp; Languages Used</h2>
+<p><strong>Programming language:</strong> JavaScript (Node.js on the server, React in the browser). No TypeScript — plain modern JavaScript (ES modules/JSX on the client, CommonJS on the server).</p>
+<h3 id="frontend-what-runs-in-the-browser">Frontend (what runs in the browser)</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Technology</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Language</td>
+<td>JavaScript (JSX)</td>
+</tr>
+<tr>
+<td>UI framework</td>
+<td><strong>React 18</strong></td>
+</tr>
+<tr>
+<td>Build tool / dev server</td>
+<td><strong>Vite</strong></td>
+</tr>
+<tr>
+<td>Styling</td>
+<td><strong>Tailwind CSS</strong> (+ @tailwindcss/forms, PostCSS, Autoprefixer)</td>
+</tr>
+<tr>
+<td>Routing</td>
+<td><strong>react-router-dom</strong></td>
+</tr>
+<tr>
+<td>HTTP calls</td>
+<td><strong>axios</strong></td>
+</tr>
+<tr>
+<td>Charts</td>
+<td><strong>Recharts</strong></td>
+</tr>
+<tr>
+<td>Icons</td>
+<td><strong>react-icons</strong></td>
+</tr>
+<tr>
+<td>Toasts/alerts</td>
+<td><strong>react-hot-toast</strong></td>
+</tr>
+<tr>
+<td>Real-time</td>
+<td><strong>socket.io-client</strong></td>
+</tr>
+<tr>
+<td>Maps</td>
+<td><strong>Leaflet</strong> (location features)</td>
+</tr>
+<tr>
+<td>QR scanning</td>
+<td><strong>html5-qrcode</strong></td>
+</tr>
+<tr>
+<td>Error monitoring</td>
+<td><strong>@sentry/react</strong></td>
+</tr>
+<tr>
+<td>Calls</td>
+<td><strong>WebRTC</strong> (browser-native, for voice/video)</td>
+</tr>
+</tbody></table>
+<h3 id="backend-what-runs-on-the-server">Backend (what runs on the server)</h3>
+<table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Technology</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>Language</td>
+<td>JavaScript (Node.js)</td>
+</tr>
+<tr>
+<td>Web framework</td>
+<td><strong>Express</strong></td>
+</tr>
+<tr>
+<td>Database</td>
+<td><strong>SQLite</strong> via <strong>better-sqlite3</strong> (file: <code>data/erp.db</code>; chat in a separate <code>data/chat.db</code>)</td>
+</tr>
+<tr>
+<td>Auth</td>
+<td><strong>JSON Web Tokens (jsonwebtoken)</strong> + <strong>bcryptjs</strong> password hashing</td>
+</tr>
+<tr>
+<td>Real-time</td>
+<td><strong>Socket.IO</strong> (chat + call signalling)</td>
+</tr>
+<tr>
+<td>File uploads</td>
+<td><strong>multer</strong></td>
+</tr>
+<tr>
+<td>Excel / BOQ parsing</td>
+<td><strong>xlsx (SheetJS)</strong></td>
+</tr>
+<tr>
+<td>Word / PDF reading</td>
+<td><strong>mammoth</strong>, <strong>pdf-parse</strong></td>
+</tr>
+<tr>
+<td>Email</td>
+<td><strong>nodemailer</strong></td>
+</tr>
+<tr>
+<td>SMS / WhatsApp gateway</td>
+<td><strong>twilio</strong></td>
+</tr>
+<tr>
+<td>Web push notifications</td>
+<td><strong>web-push</strong></td>
+</tr>
+<tr>
+<td>AI assistant</td>
+<td><strong>@anthropic-ai/sdk</strong> (Claude)</td>
+</tr>
+<tr>
+<td>Compression / CORS / config</td>
+<td>compression, cors, dotenv</td>
+</tr>
+<tr>
+<td>Error monitoring</td>
+<td><strong>@sentry/node</strong></td>
+</tr>
+</tbody></table>
+<h3 id="hosting--operations">Hosting / Operations</h3>
+<ul>
+<li><strong>Hostinger VPS (Ubuntu)</strong> running <strong>nginx</strong> as the reverse proxy in front of the Node app.</li>
+<li><strong>PM2</strong> keeps the Node process alive (<code>pm2 restart erp</code>).</li>
+<li>Source control: <strong>Git / GitHub</strong>; deploy = <code>git pull</code> → <code>npm install</code> → <code>npm run build</code> → <code>pm2 restart erp</code>.</li>
+<li>Nightly <strong>database backups</strong> (better-sqlite3 online backup API) for both <code>erp.db</code> and <code>chat.db</code>.</li>
+</ul>
+<hr>
+<h2 id="3-architecture">3. Architecture</h2>
+<pre><code>Browser (React + Vite build)  ──HTTPS──▶  nginx  ──▶  Node/Express API (PM2)
+        │  axios (REST /api/*)                              │
+        │  socket.io-client (real-time)                     ├─▶ SQLite  data/erp.db   (all ERP data)
+        └  WebRTC (peer-to-peer media) ◀── signalling ──────┤        ▶ data/chat.db  (WhatsApp chat)
+                                                            ├─▶ Anthropic Claude API (AI assistant + rate suggestions)
+                                                            ├─▶ Email (SMTP) / Twilio / Web Push
+                                                            └─▶ /uploads (files, photos, BOQs, bills)
+</code></pre>
+<ul>
+<li><strong>REST API</strong> under <code>/api/...</code> for all data operations.</li>
+<li><strong>Socket.IO</strong> for live chat, read receipts, notifications, and call signalling (per-group rooms <code>g:&lt;id&gt;</code>, per-user rooms <code>u:&lt;id&gt;</code>).</li>
+<li><strong>WebRTC</strong> carries call audio/video directly peer-to-peer; only tiny control messages go through the server. A STUN server is used by default; a TURN server (self-hosted <code>coturn</code>) is configurable for calls across different networks.</li>
+<li><strong>Role-based permissions</strong> gate every module (view / create / edit / delete / approve / see-all).</li>
+</ul>
+<hr>
+<h2 id="4-getting-started">4. Getting Started</h2>
+<ol>
+<li>Open <strong>securederp.in</strong> → the <strong>Sign in</strong> screen appears.</li>
+<li>Enter your <strong>Email/Username</strong> and <strong>Password</strong> (provided by your admin). Tick <strong>Remember me</strong> to save the username on that device.</li>
+<li>Click <strong>Sign in</strong>. You land on the dashboard.</li>
+<li><strong>Change your password:</strong> bottom-left of the sidebar → <strong>Change Password</strong>.</li>
+<li><strong>Roles:</strong> what you see is controlled by your role. <strong>Admin</strong> sees and can do everything (and can save forms even with blank mandatory fields). Other roles see only the modules granted to them.</li>
+</ol>
+<hr>
+<h2 id="5-navigation--common-controls">5. Navigation &amp; common controls</h2>
+<ul>
+<li><strong>Left sidebar:</strong> grouped menu (Procurement, Projects, Finance, HRMS, Inventory, Tasks, Service Desk, Executive, Admin, Settings). Click a group to expand. <strong>WhatsApp</strong> is pinned at the bottom. Use the sidebar <strong>search</strong> box to jump to a screen.</li>
+<li><strong>Top bar:</strong> notifications bell, your name/avatar menu (Change Password / Logout).</li>
+<li><strong>Tables</strong> typically have: a <strong>search</strong> box, <strong>filters/chips</strong>, <strong>Export Excel</strong>, and <strong>Add</strong> buttons (shown only if you have create permission).</li>
+<li><strong>Mandatory fields</strong> are marked <code>*</code>. If a required field is empty you can&#39;t save — <strong>except Admin</strong>, who can save partial records anywhere.</li>
+<li><strong>Dates/times</strong> are shown on the India clock (IST) everywhere.</li>
+</ul>
+<hr>
+<h2 id="6-sales--crm">6. Sales &amp; CRM</h2>
+<h3 id="61-sales-funnel-leads">6.1 Sales Funnel (Leads)</h3>
+<p>Track enquiries from first contact to won/lost.
+<strong>Steps:</strong> open <strong>Sales Funnel</strong> → <strong>Add Lead</strong> → fill client, contact, source, category, value → save → move the lead through stages as it progresses.</p>
+<h3 id="62-business-book">6.2 Business Book</h3>
+<p>The master list of confirmed clients/projects and their order values; feeds Orders, AR/AP, and dashboards.</p>
+<h3 id="63-boq--quotations">6.3 BOQ &amp; Quotations</h3>
+<p>Build priced quotations (Bill of Quantities).
+<strong>Steps:</strong> open <strong>Quotations</strong> → create a quote → add line items (description, qty, unit, rate) → the total computes → save/print. AI auto-quotation can pre-price extra-schedule items from the most recent matching BOQ.</p>
+<h3 id="64-labour-rate-sheet">6.4 Labour Rate Sheet</h3>
+<p>A master of labour rates per task (its own permission module <code>labour_rates</code>).
+<strong>Steps:</strong> open <strong>Labour Rate</strong> → <strong>Add</strong> an item (name, specification, size, rate, UOM, category) → or <strong>Import</strong> an Excel sheet → use <strong>Duplicates → Merge</strong> to clean repeated rows.</p>
+<hr>
+<h2 id="7-procurement">7. Procurement</h2>
+<p>The procurement spine is <strong>Indent → Dispatch</strong>, with these tabs: <strong>Raise Indent · Vendor Rates · Vendor PO · Payment · Purchase Bills · Dispatch &amp; Receiving · Debit Notes · PO Pipeline</strong>. Supporting masters: <strong>Item Master</strong> and <strong>Vendors</strong>.</p>
+<h3 id="71-item-master">7.1 Item Master</h3>
+<p>Every purchasable item with full pricing traceability.
+<strong>Steps:</strong> <strong>Items</strong> → <strong>Add Item</strong> → fill Item Name, Type, Specification, Size, UOM, GST, Make, Rate, and the pricing source (Vendor, Source Type, Bill/PO Number, Bill/PO Date) → save. Changing rate/vendor/source automatically saves the old price to history (never deleted). Bulk import via CSV is available.</p>
+<h3 id="72-vendors">7.2 Vendors</h3>
+<p>Vendor master with full details and rate comparison.
+<strong>Steps:</strong> <strong>Vendors</strong> → <strong>Add Vendor</strong> → fill Vendor Name, <strong>Firm Name</strong>, Category, Type, Deals In, Make/Brand, Contact, Phone, Email, State, District, GST, Payment Terms, Address. Search matches <strong>vendor name and firm name</strong> (and code/district/phone). Each row shows the firm name and a <strong>Last Updated</strong> timestamp. <strong>Bulk Import</strong> adds/updates many vendors from CSV. <strong>Rate Comparison</strong> tab compares up to 3 vendors per item.</p>
+<h3 id="73-raise-indent">7.3 Raise Indent</h3>
+<p>Site/engineer requests material.
+<strong>Steps:</strong> <strong>Raise Indent</strong> → pick site → add items (from Item Master) with quantities → submit → it goes for <strong>L1 + L2 approval</strong>. Only indents that clear both approvals flow into Vendor Rates.</p>
+<h3 id="74-vendor-rates-item-wise">7.4 Vendor Rates (item-wise)</h3>
+<p>Collect up to <strong>3 vendor quotes</strong> per item, then finalize the best.
+<strong>Steps:</strong></p>
+<ol>
+<li>Each approved item appears as a row. For <strong>Vendor 1/2/3</strong> pick the vendor (dropdown searchable by <strong>name and firm name</strong>), enter the <strong>Rate</strong> and <strong>Terms</strong>.</li>
+<li><strong>Suggestion columns (reference only, never change your rates):</strong><ul>
+<li><strong>PP Rate</strong> — the purchase price pulled from the linked Order-to-Planning BOQ item.</li>
+<li><strong>Mktg Rate (AI · min market)</strong> — auto-filled in the background by AI with the estimated <strong>minimum</strong> market rate (no clicking; a ↻ button re-estimates).</li>
+</ul>
+</li>
+<li>Use <strong>Bulk fill</strong> to apply one vendor + terms to many ticked rows.</li>
+<li><strong>Finalize</strong> the chosen vendor/rate → the item is ready for a PO.</li>
+</ol>
+<h3 id="75-vendor-po--2-level-approval">7.5 Vendor PO + 2-level approval</h3>
+<p><strong>Steps:</strong> <strong>Vendor PO</strong> → <strong>Create Vendor PO</strong> → pick vendor, link indent items, set qty/rate, payment &amp; freight terms → create. A new PO starts <strong>Pending L1 (Nitin Jain)</strong> → after L1 approves → <strong>Pending L2 (Ankur Kaplesh)</strong> → after L2 approves → <strong>Approved/Sent</strong>. The right approver (or Admin/COO) sees <strong>✓ Approve / ✕ Reject</strong> (reject needs a reason). View/Print PO and Delivery Note from each row.</p>
+<h3 id="76-payment-purchase-bills-dispatch--receiving-debit-notes-po-pipeline">7.6 Payment, Purchase Bills, Dispatch &amp; Receiving, Debit Notes, PO Pipeline</h3>
+<ul>
+<li><strong>Payment</strong> — flags POs needing advance / old-payment-clear before material; &quot;Mark Cleared&quot; unblocks.</li>
+<li><strong>Purchase Bills</strong> — record the vendor&#39;s bill against a PO (vendor dropdown searchable by firm name).</li>
+<li><strong>Dispatch &amp; Receiving</strong> — track material going out / received; delivery notes.</li>
+<li><strong>Debit Notes</strong> — post-PO adjustments.</li>
+<li><strong>PO Pipeline</strong> — overview of where each PO stands.</li>
+</ul>
+<hr>
+<h2 id="8-client-purchase-orders--planning">8. Client Purchase Orders &amp; Planning</h2>
+<h3 id="81-upload-client-purchase-order-orders">8.1 Upload Client Purchase Order (Orders)</h3>
+<p><strong>Steps:</strong> <strong>Order to Planning</strong> → <strong>Upload Client Purchase Order</strong> → choose the CRM, upload the PO copy → <strong>Upload BOQ &amp; Fetch Items</strong> (Excel auto-fills the items; PDF/Word/image just attaches). For each BOQ line you have <strong>Qty · Unit · Rate (SITC) · PP (Purchase Price) · Labour · Amount</strong>.</p>
+<ul>
+<li><strong>Download blank BOQ format:</strong> a button gives a ready Excel template (SN, Description, Specification, Size, Qty, Unit, SITC Rate, Purchase Price, Labour Rate, Amount, HSN). Fill data in this template so uploads import cleanly — <strong>PP and Labour Rate are also auto-filled from the Excel</strong> when those columns are present.</li>
+<li>Click <strong>Create Purchase Order</strong>.</li>
+</ul>
+<h3 id="82-order-planning--schedule-gantt">8.2 Order Planning &amp; Schedule (Gantt)</h3>
+<p>Plan execution dates; <strong>Schedule (Gantt)</strong> computes the &quot;must raise indent by&quot; date per BOQ item via a backward pass.</p>
+<hr>
+<h2 id="9-projects--site-execution">9. Projects &amp; Site Execution</h2>
+<ul>
+<li><strong>Indent Labour Payment</strong> — full project execution + billing pipeline (project → budget → work order → muster → DPR link → measurement book → contractor RA → client RA → payment received).</li>
+<li><strong>Daily Reports (DPR)</strong> — daily site progress; Table A labour rate = 11% of SITC.</li>
+<li><strong>Snags</strong> — snag/defect list per site.</li>
+<li><strong>Fire NOC Renewal</strong> — track fire NOC renewals.</li>
+<li><strong>Sales Billing</strong> — 4-type sequential client bills (replaces the old Installations page); payments flow to receivables.</li>
+</ul>
+<hr>
+<h2 id="10-finance">10. Finance</h2>
+<ul>
+<li><strong>Cheques</strong> — cheque financial management.</li>
+<li><strong>Payables (Payment Required)</strong> — standard approval flow <strong>L1 Accountant → L2 Nitin Jain → L3 MD (Ankur Kaplesh) → Release (Aanchal)</strong>. Approving needs no remark; <strong>rejecting requires a remark</strong>. Named approvers resolve by name; Admin/COO can stand in.</li>
+<li><strong>Collections</strong> — money received from clients.</li>
+<li><strong>Invoices (Billing)</strong> — client invoices.</li>
+<li><strong>Cash Flow</strong> — cash position.</li>
+<li><strong>AR/AP Tracker</strong> — rolling 13-week cash-flow forecast (receivables vs payables by party × week, in Lakhs). AR auto-rolls on Mon/Thu, AP on Tue/Fri (unpaid entries move to the next collection day). Excel/bulk/paste inputs; a summary box shows where the running cycle goes negative.</li>
+<li><strong>Expenses</strong> — company expenses.</li>
+</ul>
+<hr>
+<h2 id="11-hrms">11. HRMS</h2>
+<ul>
+<li><strong>Hiring</strong> — recruitment / ATS / interviews / offers.</li>
+<li><strong>Sub-contractor Hiring</strong> — 14-step pre-award + onboarding tracker per site.</li>
+<li><strong>Onboarding / Training</strong> — induction and training records.</li>
+<li><strong>Attendance</strong> — daily attendance (already on IST).</li>
+<li><strong>Payroll</strong> — salary processing with the confirmed day rules (late grace 09:46–10:00 with 3 free then ₹20/min, &gt;10:00 = half day, ≥4h = full, &lt;4h = half, short-leave/CL/Sunday handling, OT &gt;9h at straight per-hour rate).</li>
+<li><strong>Employees</strong> — employee master.</li>
+<li><strong>Performance</strong> — weekly KPI scorecard.</li>
+<li><strong>Sub-contractor Master</strong> — sub-contractor details.</li>
+</ul>
+<hr>
+<h2 id="12-inventory">12. Inventory</h2>
+<ul>
+<li><strong>Tool Rentals</strong> — rented tools (buy-vs-rent guidance at 2× threshold).</li>
+<li><strong>Assets</strong> — company assets.</li>
+<li><strong>Inventory</strong> — stock.</li>
+<li><strong>Tools</strong> — tools management.</li>
+<li><strong>Room Rentals</strong> — accommodation/rooms with monthly due dates and payment modes (Bank/UPI/Scanner).</li>
+</ul>
+<hr>
+<h2 id="13-tasks--service-desk">13. Tasks &amp; Service Desk</h2>
+<ul>
+<li><strong>Delegations</strong> — assign and track delegated tasks (with voice-note upload transcribed on the server).</li>
+<li><strong>PMS Tasks / Checklists</strong> — recurring tasks and checklists.</li>
+<li><strong>Complaints</strong> — customer/site complaints.</li>
+<li><strong>Help Tickets</strong> — internal support tickets (reachable from the sidebar; the floating &quot;?&quot; bubble was removed).</li>
+</ul>
+<hr>
+<h2 id="14-whatsapp">14. WhatsApp</h2>
+<p>An internal, WhatsApp-styled team chat (separate <code>chat.db</code>, real-time via Socket.IO). Pinned at the bottom of the sidebar; shown to every signed-in user.</p>
+<p><strong>Group chat</strong></p>
+<ol>
+<li>Tap <strong>+</strong> → <strong>New group</strong> → name it, tick members → <strong>Create group</strong>. (Creating groups &amp; managing members needs the <code>site_chat</code> Create permission.)</li>
+<li>Anyone <strong>added to a group can chat</strong> (read, reply, voice notes, files) — <strong>no extra permission needed</strong>.</li>
+<li><strong>Rename:</strong> tap the group header → edit <strong>Group name</strong> → <strong>Rename</strong>.</li>
+</ol>
+<p><strong>Direct messages (private)</strong></p>
+<ol>
+<li>Tap the <strong>person+ icon</strong> → pick a person → a private 1-on-1 opens.</li>
+<li><strong>DMs are private</strong> — only the two people can read them; <strong>even Admin/COO cannot see others&#39; DMs</strong>. (Admin still oversees group chats.)</li>
+</ol>
+<p><strong>Messaging features</strong></p>
+<ul>
+<li>Text, <strong>photos/files</strong> (drag-and-drop onto the thread), <strong>voice messages</strong> (mic button → record → send, plays inline).</li>
+<li><strong>@mention:</strong> type <code>@</code> → pick a member → inserts <code>@Name</code>; mentions are highlighted.</li>
+<li><strong>Read receipts:</strong> ✓ sent, ✓✓ delivered, ✓✓ blue read-by-all; <strong>Message Info</strong> (hover → ⓘ) shows who read it / who it&#39;s delivered to, with times.</li>
+<li><strong>Profile photos:</strong> tap your avatar (top-right of the WhatsApp page) to upload; photos show in chat list, headers, bubbles, member lists.</li>
+<li><strong>Notifications:</strong> new messages pop a top-center banner + browser notification + an unread badge on the sidebar link — anywhere in the app.</li>
+</ul>
+<p><strong>Voice &amp; video calls (1-on-1)</strong></p>
+<ol>
+<li>Open a <strong>DM</strong> → in the header tap <strong>📞 (voice)</strong> or <strong>🎥 (video)</strong>.</li>
+<li>The other person gets a ringing <strong>incoming-call</strong> screen → <strong>Accept</strong> or <strong>Decline</strong>.</li>
+<li>During a call: <strong>mute</strong>, <strong>camera on/off</strong> (video), <strong>hang up</strong>.</li>
+<li>Calls use <strong>WebRTC</strong> (peer-to-peer). STUN works on the same network; for reliable calls across different networks a <strong>TURN server</strong> is needed (self-hosted <code>coturn</code>; set <code>turn_url</code>/<code>turn_username</code>/<code>turn_password</code> in settings).</li>
+</ol>
+<hr>
+<h2 id="15-executive-dashboards">15. Executive Dashboards</h2>
+<ul>
+<li><strong>War Room</strong>, <strong>Operating Console (CMD)</strong>, <strong>TOC View</strong> — admin-only executive dashboards summarising operations, cash, and throughput.</li>
+</ul>
+<hr>
+<h2 id="16-admin--settings">16. Admin &amp; Settings</h2>
+<ul>
+<li><strong>Users</strong> — create/manage users, assign roles, toggle location tracking.</li>
+<li><strong>Roles &amp; Permissions</strong> — per-role matrix of <strong>View / Create / Edit / Delete / Approve / See-All</strong> for <strong>every module</strong> (including Labour Rate Sheet, Labour Payment, WhatsApp, etc.).</li>
+<li><strong>Backups</strong> — run/download DB backups (nightly auto-backup keeps the last 30 of <code>erp.db</code> and <code>chat.db</code>).</li>
+<li><strong>AI Settings</strong> — paste the Claude API key + pick the model; powers the AI assistant and the market-rate suggestions.</li>
+<li><strong>Email / Email Triggers</strong> — SMTP config and automated email rules.</li>
+<li><strong>Audit Log / Activity Log</strong> — who did what.</li>
+<li><strong>Location</strong> — site/location master and map.</li>
+</ul>
+<hr>
+<h2 id="17-cross-cutting-concepts">17. Cross-cutting concepts</h2>
+<ul>
+<li><strong>Permissions:</strong> every module is gated; shared read endpoints (dropdowns/dashboards) stay open. Grant changes apply live on tab focus.</li>
+<li><strong>Admin mandatory-bypass:</strong> Admin can save forms even with blank required fields, app-wide (a global rule disables native required-field blocking for Admin; custom JS checks on Vendors &amp; Item Master also exempt Admin). Non-admins keep full validation. (Payment Required is intentionally kept strict.)</li>
+<li><strong>Approvals:</strong> Vendor PO (L1 Nitin → L2 Ankur), Payment Required (L1→L2→L3→Release), Indents (L1+L2). Named approvers resolve by name; Admin/COO can stand in.</li>
+<li><strong>AI assistant (&quot;Ask ERP&quot;):</strong> reads your ERP data to answer questions; also powers minimum-market-rate suggestions. Rate-limited per the org&#39;s token/min — heavy AI features (auto-rate) are throttled so the chat keeps working.</li>
+<li><strong>IST timestamps:</strong> all timestamps display on the India clock.</li>
+</ul>
+<hr>
+<h2 id="18-deployment--operations">18. Deployment &amp; Operations</h2>
+<p><strong>Stack on the VPS:</strong> Ubuntu + nginx (reverse proxy) + Node (Express) under PM2 + SQLite files.</p>
+<p><strong>Standard deploy (from the Hostinger browser terminal):</strong></p>
+<pre><code class="language-bash">cd /root/erp &amp;&amp; git pull &amp;&amp; npm install &amp;&amp; cd client &amp;&amp; npm install &amp;&amp; npm run build &amp;&amp; cd .. &amp;&amp; pm2 restart erp
+</code></pre>
+<ul>
+<li>Backend-only changes can skip the client build.</li>
+<li>If <code>git pull</code> is blocked by the server-side <code>package-lock.json</code>, run <code>git stash</code> first (or once: <code>git update-index --assume-unchanged client/package-lock.json package-lock.json</code>).</li>
+<li>After deploy, hard-refresh the browser (Ctrl+Shift+R) / reopen the PWA.</li>
+</ul>
+<p><strong>Health &amp; recovery:</strong></p>
+<ul>
+<li><code>pm2 status</code> (should show <code>erp</code> <strong>online</strong>), <code>pm2 logs erp --err --lines 50</code> to diagnose a 502.</li>
+<li>A 502 = Node is down; <code>pm2 restart erp</code> brings the API back.</li>
+<li>On small VPSes, build out-of-memory can occur — add swap or build with <code>NODE_OPTIONS=--max-old-space-size=2048</code>.</li>
+</ul>
+<p><strong>Backups:</strong> automatic nightly (02:00) to <code>/root/erp-backups/</code> (last 30 kept) for both <code>erp.db</code> and <code>chat.db</code>; also runnable from <strong>Settings → Backups</strong>.</p>
+<hr>
+<p><em>Document generated for SEPL ERP. For the older, exhaustive section-by-section manual see <code>docs/ERP-COMPLETE-DOCUMENTATION.md</code> (and the Word/PDF/PPTX in <code>docs/</code>).</em></p>
+
+  </main>
+</body></html>

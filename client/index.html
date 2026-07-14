@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Sotyn.Headmasters</title>
+
+    <!-- Favicon · SEPL logo (mam 2026-05-25: "IS IT POSIBLE AT HERE
+         SECURED LOGO CAN SHOW"). The old purple-bolt favicon.svg was a
+         template leftover. Modern browsers accept webp directly. -->
+    <link rel="icon" type="image/svg+xml" href="/salon-logo.svg" />
+
+    <!-- ─── PWA / Add-to-Home-Screen (mam 2026-05-26) ───────────────────
+         Without these, iPhone falls back to a SCREENSHOT of the login
+         page and Android falls back to the favicon (the purple blob),
+         so the two devices look wildly different.  These tags pin both
+         to the same SEPL-branded square icon. -->
+    <link rel="manifest" href="/manifest.json" />
+    <!-- Royal blue brand (Tailwind blue-800, matches Login hero via-stop
+         and the blue-900→blue-950 sidebar). Was red #dc2626 in v1; mam
+         rebranded the Sotyn.Headmasters from red to royal blue on 2026-05-20. -->
+    <meta name="theme-color" content="#1e40af" />
+
+    <!-- iOS — Add to Home Screen.  apple-touch-icon stops iOS from
+         screenshotting the page.  apple-mobile-web-app-title fixes the
+         "SEPL-Busin…" truncation in the home-screen label. -->
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <meta name="apple-mobile-web-app-title" content="Sotyn.Headmasters" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <!-- Android Chrome fallbacks. -->
+    <meta name="application-name" content="Sotyn.Headmasters" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
+    <!-- Instant first-paint splash (perf pass — first-paint). The app root is
+         otherwise empty, so nothing paints until the entry JS + react-vendor
+         (~98 KB gz) download, parse and React mounts — a blank screen on cold
+         load. This inline, self-contained splash paints as soon as the (small,
+         render-blocking) stylesheet lands, well before the JS bundle. React's
+         createRoot().render() clears #root on mount, so it's removed with no
+         cleanup JS. The .2s delay on splashIn means fast loads never flash it. -->
+    <style>
+      #app-splash{position:fixed;inset:0;display:flex;flex-direction:column;
+        align-items:center;justify-content:center;gap:18px;background:#f0f4f8;
+        font-family:'Inter Variable','Inter',-apple-system,'Segoe UI',sans-serif;
+        opacity:0;animation:splashIn .3s ease .2s forwards}
+      #app-splash .ring{width:44px;height:44px;border-radius:50%;
+        border:3px solid #cbd5e1;border-top-color:#1e40af;
+        animation:splashSpin .8s linear infinite}
+      #app-splash .brand{font-weight:800;letter-spacing:-.01em;color:#1e3a8a;font-size:20px}
+      @keyframes splashSpin{to{transform:rotate(360deg)}}
+      @keyframes splashIn{to{opacity:1}}
+      @media (prefers-reduced-motion:reduce){#app-splash .ring{animation:none}}
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="app-splash">
+        <div class="ring"></div>
+        <div class="brand">Sotyn.Headmasters</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

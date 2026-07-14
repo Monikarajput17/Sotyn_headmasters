@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sotyn-erp": {
+      "command": "node",
+      "args": ["mcp-connector/server.js"]
+    }
+  }
+}
