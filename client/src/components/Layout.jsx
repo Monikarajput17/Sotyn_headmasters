@@ -98,9 +98,11 @@ const SIDEBAR_GROUPS = [
     // construction (Site Engineer, Foreman, DPR). Route stays in App.jsx.
   ]},
   { id: 'tasks', label: 'Tasks', icon: FiCheckSquare, items: [
-    // Delegations + PMS Tasks removed — both pick a "project" from the
-    // construction Business Book. Checklists is generic (opening/closing lists).
+    { path: '/delegations', label: 'Delegations', icon: FiPaperclip,   module: 'delegations' },
     { path: '/checklists',  label: 'Checklists',  icon: FiCheckCircle, module: 'checklists' },
+  ]},
+  { id: 'support', label: 'Support', icon: FiPhoneCall, items: [
+    { path: '/help-tickets', label: 'Help Tickets', icon: FiMessageCircle, module: null, open: true },
   ]},
   { id: 'admin', label: 'Admin', icon: FiKey, adminOnly: true, items: [
     { path: '/admin/word-count', label: 'Activity Log', icon: FiActivity, module: 'users' },

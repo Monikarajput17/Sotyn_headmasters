@@ -28,6 +28,7 @@ const ALL_MODULES = [
   { key: 'payroll', label: 'Payroll' },
   { key: 'employees', label: 'Employees' },
   // ─── Other ───
+  { key: 'delegations', label: 'Delegations' },
   { key: 'checklists', label: 'Checklists' },
   { key: 'site_chat', label: 'Salon Chat — manage groups (chatting is open to all)' },
   { key: 'ai_agent', label: 'AI Assistant (Ask Sotyn)' },

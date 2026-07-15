@@ -5647,7 +5647,7 @@ in your first week. If a process feels broken, raise a Help Ticket
       if (mgrRole) {
         insertPerm.run(mgrRole.id, 'dashboard', 1, 0, 0, 0, 0);
         for (const m of SALON_ALL) insertPerm.run(mgrRole.id, m, 1, 1, 1, 1, 1);
-        for (const m of ['attendance','payroll','employees','checklists','site_chat']) insertPerm.run(mgrRole.id, m, 1, 1, 1, 1, 1);
+        for (const m of ['attendance','payroll','employees','checklists','delegations','site_chat']) insertPerm.run(mgrRole.id, m, 1, 1, 1, 1, 1);
       }
 
       // Receptionist / front desk — bookings, billing, clients
@@ -5658,6 +5658,7 @@ in your first week. If a process feels broken, raise a Help Ticket
         insertPerm.run(recRole.id, 'salon_pos', 1, 1, 0, 0, 0);
         insertPerm.run(recRole.id, 'salon_clients', 1, 1, 1, 0, 0);
         insertPerm.run(recRole.id, 'salon_memberships', 1, 1, 0, 0, 0);
+        insertPerm.run(recRole.id, 'delegations', 1, 1, 1, 0, 0);
         for (const m of ['salon_services','salon_products','salon_stylists','site_chat']) insertPerm.run(recRole.id, m, 1, 0, 0, 0, 0);
       }
 
@@ -5938,9 +5939,12 @@ in your first week. If a process feels broken, raise a Help Ticket
     }
   }
 
-  // Seed sample Business Book entries (last 10 from Master Sheet)
+  // Seed sample Business Book entries (last 10 from Master Sheet).
+  // Sotyn.Headmasters (salon): these are real SEPL construction leads (CONSERN
+  // PHARMA, V-GUARD…) that also populate the Delegation project picker, so they
+  // are disabled via ERP_DISABLE_DEMO_SEED. Unset to restore for a construction ERP.
   const bbCount = db.prepare('SELECT COUNT(*) as c FROM business_book').get().c;
-  if (bbCount === 0) {
+  if (bbCount === 0 && !process.env.ERP_DISABLE_DEMO_SEED) {
     const insertBB = db.prepare(`INSERT OR IGNORE INTO business_book (
       lead_no, lead_type, client_name, company_name, client_contact, source_of_enquiry,
       district, state, billing_address, sale_amount_without_gst, order_type, penalty_clause,

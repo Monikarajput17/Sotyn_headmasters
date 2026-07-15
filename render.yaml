@@ -22,6 +22,8 @@ services:
         value: "1"
       - key: ERP_DISABLE_SOLAR_SEED      # skip solar rate-book demo data
         value: "1"
+      - key: ERP_DISABLE_DEMO_SEED       # skip construction Business Book / sites demo leads
+        value: "1"
     # ── DATA PERSISTENCE ────────────────────────────────────────────────
     # The app stores everything in a SQLite file at <repo>/data/erp.db.
     # On the FREE plan the container disk is ephemeral, so that DB is wiped
