@@ -1,0 +1,1 @@
+import{e as d}from"./react-vendor-j6k_rcxr.js";function f(t,n,i="tab"){let s,a,e;Array.isArray(t)?(s=t,a=n,e=i):(s=null,a=t,e=n||"tab");const[o,b]=d(),r=o.get(e);return[(s?s.includes(r):!!r)?r:a,c=>{const l=new URLSearchParams(o),u=s?s.includes(c):!0;c===a||!u?l.delete(e):l.set(e,c),b(l,{replace:!1})}]}export{f as u};
