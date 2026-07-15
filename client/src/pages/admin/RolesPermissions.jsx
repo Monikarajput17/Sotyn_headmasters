@@ -85,7 +85,7 @@ const ALL_MODULES = [
   { key: 'expenses', label: 'Expenses' },
 
   // — Platform
-  { key: 'ai_agent', label: 'AI Agent (Ask Sotyn.Headmasters)' },
+  { key: 'ai_agent', label: 'AI Agent (Ask Sotyn)' },
   { key: 'users', label: 'User Management' },
 ];
 

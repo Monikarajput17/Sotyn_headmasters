@@ -38,7 +38,7 @@ router.put('/settings', requirePermission(M, 'edit'), (req, res) => {
   const b = req.body || {};
   getDb().prepare(
     'UPDATE salon_settings SET salon_name=?, currency=?, default_tax_pct=?, points_per_currency=?, point_value=?, updated_at=CURRENT_TIMESTAMP WHERE id=1'
-  ).run(b.salon_name || 'Sotyn.Headmasters', b.currency || '₹', b.default_tax_pct || 0, b.points_per_currency || 0, b.point_value || 1);
+  ).run(b.salon_name || 'Headmasters Ludhiana', b.currency || '₹', b.default_tax_pct || 0, b.points_per_currency || 0, b.point_value || 1);
   res.json({ message: 'Updated' });
 });
 

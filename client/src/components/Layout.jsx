@@ -433,7 +433,7 @@ export default function Layout() {
     }
     const s = SIDEBAR_SETTINGS.items.find(m => m.path === location.pathname);
     if (s) return { group: SIDEBAR_SETTINGS.label, label: s.label };
-    return { group: null, label: 'Sotyn.Headmasters' };
+    return { group: null, label: 'Headmasters' };
   })();
 
   // Avatar initials from the user's name (fallback to username), max 2 chars.
@@ -478,7 +478,7 @@ export default function Layout() {
               <div className="w-9 h-9 bg-white rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/40 overflow-hidden p-0.5">
                 <img
                   src="/salon-logo.svg"
-                  alt="Sotyn.Headmasters"
+                  alt="Headmasters"
                   className="w-full h-full object-contain"
                   onError={(e) => {
                     if (!e.target.dataset.fallback) {
@@ -492,7 +492,7 @@ export default function Layout() {
                 <span className="text-blue-700 font-extrabold text-xs" style={{ display: 'none' }}>SE</span>
               </div>
               <div>
-                <h1 className="text-sm font-extrabold tracking-tight">Sotyn.Headmasters</h1>
+                <h1 className="text-sm font-extrabold tracking-tight">Headmasters</h1>
                 <p className="text-[9px] text-red-200 -mt-0.5">Salon & Spa</p>
               </div>
             </div>
@@ -718,7 +718,7 @@ export default function Layout() {
               <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center ring-1 ring-gray-200 overflow-hidden p-0.5">
                 <img
                   src="/salon-logo.svg"
-                  alt="Sotyn.Headmasters"
+                  alt="Headmasters"
                   className="w-full h-full object-contain"
                   onError={(e) => {
                     if (!e.target.dataset.fallback) {
@@ -825,7 +825,7 @@ export default function Layout() {
           {/* Sotyn.Headmasters credit — shown at the bottom of every page (mam 2026-06-19). */}
           <div className="p-footer mt-6 pt-3 border-t border-slate-200 text-center select-none">
             <p className="text-[9px] uppercase tracking-[0.3em] text-slate-400">Powered by</p>
-            <p className="text-sm font-extrabold tracking-wide bg-gradient-to-r from-blue-700 via-blue-500 to-blue-700 bg-clip-text text-transparent">Sotyn.Headmasters</p>
+            <p className="text-sm font-extrabold tracking-wide bg-gradient-to-r from-blue-700 via-blue-500 to-blue-700 bg-clip-text text-transparent">Sotyn</p>
           </div>
         </main>
       </div>

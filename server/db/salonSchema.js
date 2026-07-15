@@ -204,7 +204,7 @@ function runSalonMigrations(db) {
     -- Salon-wide settings (loyalty rate, tax %, currency). Single row id=1.
     CREATE TABLE IF NOT EXISTS salon_settings (
       id INTEGER PRIMARY KEY CHECK(id=1),
-      salon_name TEXT DEFAULT 'Sotyn.Headmasters',
+      salon_name TEXT DEFAULT 'Headmasters Ludhiana',
       currency TEXT DEFAULT '₹',
       default_tax_pct REAL DEFAULT 18,
       points_per_currency REAL DEFAULT 0.05,   -- points earned per ₹1 spent

@@ -13,7 +13,7 @@ export default function SalonDashboard() {
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2"><FiScissors className="text-blue-700" /> Sotyn.Headmasters</h1>
+        <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2"><FiScissors className="text-blue-700" /> Headmasters</h1>
         <p className="text-sm text-gray-500">Today at a glance</p>
       </div>
 

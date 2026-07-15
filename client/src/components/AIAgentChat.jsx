@@ -237,7 +237,7 @@ export default function AIAgentChat() {
         <button
           {...aiFab.handlers}
           onClick={aiFab.onClickGuard(() => setOpen(true))}
-          title="Ask Sotyn.Headmasters — AI Assistant (drag to move)"
+          title="Ask Sotyn — AI Assistant (drag to move)"
           style={{ ...aiFab.style, zIndex: 30 }}
           className="ai-robot-btn w-16 h-16 rounded-2xl bg-gradient-to-b from-slate-700 via-slate-800 to-slate-900 text-white shadow-xl shadow-cyan-900/30 ring-1 ring-cyan-400/30 flex items-center justify-center hover:scale-110 transition-transform cursor-grab active:cursor-grabbing"
         >
@@ -257,7 +257,7 @@ export default function AIAgentChat() {
         <div className="fixed bottom-6 right-6 z-40 w-[min(90vw,400px)] h-[min(80vh,560px)] bg-white border border-gray-200 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-blue-800 to-blue-950 text-white">
             <div>
-              <div className="font-semibold text-sm">Ask Sotyn.Headmasters</div>
+              <div className="font-semibold text-sm">Ask Sotyn</div>
               <div className="text-[10px] text-blue-100 -mt-0.5">AI assistant · reads your data</div>
             </div>
             <div className="flex items-center gap-1">
@@ -368,7 +368,7 @@ export default function AIAgentChat() {
                 ref={inputRef}
                 rows={1}
                 className="input flex-1 text-sm resize-none"
-                placeholder="Ask anything about your Sotyn.Headmasters data…"
+                placeholder="Ask anything about your Headmasters data…"
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={onKeyDown}

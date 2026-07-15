@@ -11,7 +11,7 @@ const api = (path, opts) => fetch('/api/salon/public' + path, opts).then(async r
 });
 
 export default function PublicBooking() {
-  const [info, setInfo] = useState({ salon_name: 'Sotyn.Headmasters' });
+  const [info, setInfo] = useState({ salon_name: 'Headmasters Ludhiana' });
   const [services, setServices] = useState([]);
   const [stylists, setStylists] = useState([]);
   const [picked, setPicked] = useState([]);        // service ids
@@ -143,7 +143,7 @@ function Shell({ salon, children }) {
         </div>
       </header>
       <main className="max-w-5xl mx-auto px-4 py-6">{children}</main>
-      <footer className="text-center text-[11px] text-gray-400 py-6">Powered by {salon}</footer>
+      <footer className="text-center text-[11px] text-gray-400 py-6">Powered by Sotyn</footer>
     </div>
   );
 }

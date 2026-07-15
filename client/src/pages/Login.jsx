@@ -79,10 +79,10 @@ export default function Login() {
             <div className="flex items-center gap-3 mb-12">
               <div className="w-14 h-14 rounded-xl overflow-hidden shadow-md shadow-zinc-300 ring-1 ring-zinc-200 flex items-center justify-center bg-white">
                 <img src={SEPL_LOGO_PATH}
-                onError={(e) => { if (e.target.src !== SEPL_LOGO_FALLBACK) e.target.src = SEPL_LOGO_FALLBACK; }} alt="Sotyn.Headmasters" className="w-full h-full object-contain p-1" />
+                onError={(e) => { if (e.target.src !== SEPL_LOGO_FALLBACK) e.target.src = SEPL_LOGO_FALLBACK; }} alt="Headmasters" className="w-full h-full object-contain p-1" />
               </div>
               <div>
-                <p className="text-blue-700 font-extrabold text-lg leading-tight tracking-tight">Sotyn.Headmasters</p>
+                <p className="text-blue-700 font-extrabold text-lg leading-tight tracking-tight">Headmasters</p>
                 <p className="text-[11px] text-zinc-600 tracking-wide">Salon & Spa</p>
               </div>
             </div>
@@ -91,7 +91,7 @@ export default function Login() {
             <h1 className="text-3xl sm:text-4xl font-extrabold text-zinc-900 tracking-tight">
               Welcome back <span className="inline-block animate-wave">👋</span>
             </h1>
-            <p className="text-zinc-600 text-sm mt-2 mb-8">Sign in to Sotyn.Headmasters</p>
+            <p className="text-zinc-600 text-sm mt-2 mb-8">Sign in to Headmasters</p>
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
@@ -188,7 +188,7 @@ export default function Login() {
             <div className="relative z-10 text-center">
               <div className="w-36 h-36 mx-auto mb-6 rounded-2xl overflow-hidden shadow-2xl shadow-blue-950/60 ring-2 ring-white/40 flex items-center justify-center bg-white/95 backdrop-blur-sm p-3">
                 <img src={SEPL_LOGO_PATH}
-                onError={(e) => { if (e.target.src !== SEPL_LOGO_FALLBACK) e.target.src = SEPL_LOGO_FALLBACK; }} alt="Sotyn.Headmasters" className="w-full h-full object-contain" />
+                onError={(e) => { if (e.target.src !== SEPL_LOGO_FALLBACK) e.target.src = SEPL_LOGO_FALLBACK; }} alt="Headmasters" className="w-full h-full object-contain" />
               </div>
               <h2 className="text-4xl font-extrabold text-white mb-3 tracking-tight drop-shadow-lg">
                 Look good. <br />
@@ -210,7 +210,7 @@ export default function Login() {
           Crafted with <span className="text-blue-600">&hearts;</span> by
         </p>
         <p className="text-base font-extrabold tracking-wide bg-gradient-to-r from-blue-700 via-blue-500 to-blue-700 bg-clip-text text-transparent">
-          Sotyn.Headmasters
+          Sotyn
         </p>
         <p className="text-[9px] text-zinc-500 mt-0.5">&copy; {new Date().getFullYear()} · All rights reserved</p>
       </footer>
