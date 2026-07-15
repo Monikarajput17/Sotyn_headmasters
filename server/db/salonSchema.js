@@ -219,45 +219,105 @@ function runSalonMigrations(db) {
 
   db.prepare('INSERT OR IGNORE INTO salon_settings (id) VALUES (1)').run();
 
-  // ─── One-time demo seed (guarded) ──────────────────────────────────
+  // ─── Demo seed (guarded) ──────────────────────────────────────────
   db.exec('CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)');
-  const seeded = db.prepare("SELECT value FROM app_settings WHERE key='salon_seeded'").get();
-  if (!seeded) {
+
+  // Service menu modelled on Headmasters Ludhiana (headmastersludhiana.co.in) —
+  // categories + services mirror their real offering. Their site lists no
+  // prices ("UPTO 50% Off"), so these are realistic premium-Ludhiana estimates
+  // the salon edits in Service Menu. [name, code, duration_min, price, desc]
+  const HEADMASTERS_MENU = [
+    ['Hair', 1, [
+      ['Haircut — Women (Stylist)', 'H01', 45, 700, 'Wash, cut & blow-dry'],
+      ['Haircut — Women (Creative Director)', 'H02', 60, 1500, 'Signature cut by senior artist'],
+      ['Haircut — Men', 'H03', 30, 400, 'Cut & style'],
+      ['Kids Haircut', 'H04', 30, 350, 'Under 10 years'],
+      ['Wash & Blow-Dry', 'H05', 30, 600, 'Shampoo + blow-dry'],
+      ['Hair Styling / Ironing / Tongs', 'H06', 45, 900, 'Ironing, curls or tongs'],
+    ]],
+    ['Hair Colour', 2, [
+      ['Root Touch-Up (Ammonia-free)', 'C01', 60, 1300, 'Regrowth colour'],
+      ['Global Colour — Short', 'C02', 90, 2500, 'Full-head single colour'],
+      ['Global Colour — Long', 'C03', 120, 4000, 'Full-head, long hair'],
+      ['Highlights — Full Head', 'C04', 150, 5500, 'Foil highlights'],
+      ['Balayage / Ombre', 'C05', 180, 6500, 'Hand-painted balayage'],
+      ['Fashion Colour', 'C06', 150, 4500, 'Vibrant fashion shades'],
+    ]],
+    ['Hair Treatments', 3, [
+      ['Hair Spa', 'T01', 45, 1200, 'Deep-conditioning spa'],
+      ['Keratin Treatment — Short', 'T02', 120, 5000, 'Smoothing keratin'],
+      ['Keratin Treatment — Long', 'T03', 180, 8000, 'Keratin, long hair'],
+      ['Smoothening — Short', 'T04', 120, 4500, 'Anti-frizz smoothening'],
+      ['Hair Botox', 'T05', 120, 6000, 'Repair & shine treatment'],
+      ['Hairfall / Dandruff Treatment', 'T06', 45, 1500, 'Scalp treatment'],
+    ]],
+    ['Skin & Facial', 4, [
+      ['Clean-Up', 'S01', 30, 800, 'Express cleanse'],
+      ['Fruit Facial', 'S02', 60, 1200, 'Refreshing fruit facial'],
+      ['Gold Facial', 'S03', 75, 2000, 'Radiance gold facial'],
+      ['Anti-Ageing Facial', 'S04', 75, 3000, 'Collagen boost'],
+      ['Hydra Facial', 'S05', 75, 4000, 'Deep-hydration hydra facial'],
+      ['Bleach / De-Tan (Face & Neck)', 'S06', 30, 700, 'Brightening bleach / de-tan'],
+    ]],
+    ['Waxing & Threading', 5, [
+      ['Eyebrow Threading', 'W01', 15, 100, 'Shape & clean'],
+      ['Upper Lip Threading', 'W02', 10, 60, ''],
+      ['Full Arms Wax', 'W03', 30, 500, 'Honey / rica wax'],
+      ['Full Legs Wax', 'W04', 40, 700, ''],
+      ['Half Legs / Underarms Wax', 'W05', 20, 300, ''],
+      ['Full Body Wax', 'W06', 90, 2500, 'Rica full-body wax'],
+    ]],
+    ['Nails', 6, [
+      ['Manicure — Classic', 'N01', 45, 700, ''],
+      ['Manicure — Spa', 'N02', 60, 1200, 'Luxury spa manicure'],
+      ['Pedicure — Classic', 'N03', 45, 900, ''],
+      ['Pedicure — Spa', 'N04', 60, 1500, 'Luxury spa pedicure'],
+      ['Gel Polish', 'N05', 45, 1200, 'Long-lasting gel'],
+      ['Nail Extensions', 'N06', 90, 2500, 'Acrylic / gel extensions'],
+    ]],
+    ['Spa & Massage', 7, [
+      ['Head Massage', 'M01', 30, 600, 'Relaxing head massage'],
+      ['Body Massage — 60 min', 'M02', 60, 2500, 'Full-body relaxation'],
+      ['Sports Therapy', 'M03', 60, 3000, 'Deep-tissue sports massage'],
+      ['Body Polishing', 'M04', 90, 3500, 'Full-body polish & glow'],
+    ]],
+    ['Makeup', 8, [
+      ['Day / Light Makeup', 'G01', 60, 2000, 'Natural day look'],
+      ['Party Makeup', 'G02', 75, 3500, 'Evening / party look'],
+      ['HD Makeup', 'G03', 90, 6000, 'High-definition makeup'],
+      ['Airbrush Makeup', 'G04', 90, 8000, 'Airbrush finish'],
+      ['Bridal Makeup', 'G05', 150, 15000, 'Complete bridal look'],
+      ['Pre-Bridal Package', 'G06', 120, 12000, 'Multi-session pre-bridal'],
+    ]],
+    ['Aesthetic Treatments', 9, [
+      ['Laser Hair Reduction — Upper Lip', 'A01', 20, 1500, 'Per session'],
+      ['Laser Hair Reduction — Full Face', 'A02', 40, 4000, 'Per session'],
+      ['Laser Hair Reduction — Full Body', 'A03', 120, 12000, 'Per session'],
+      ['Chemical Peel', 'A04', 45, 3000, 'Skin resurfacing peel'],
+      ['Microdermabrasion', 'A05', 45, 2500, 'Exfoliating treatment'],
+      ['Anti-Wrinkle (per zone)', 'A06', 30, 8000, 'Injectable, per zone'],
+    ]],
+    ['Eyelash & Brows', 10, [
+      ['Classic Eyelash Extensions', 'E01', 90, 2500, ''],
+      ['Volume Eyelash Extensions', 'E02', 120, 4000, ''],
+      ['Lash Lift & Tint', 'E03', 60, 2000, ''],
+      ['Eyebrow Microblading', 'E04', 90, 8000, 'Semi-permanent brows'],
+    ]],
+  ];
+  const insertMenu = () => {
     const catStmt = db.prepare('INSERT INTO service_categories (name, sort_order) VALUES (?, ?)');
     const svcStmt = db.prepare('INSERT INTO services (category_id, name, code, duration_min, price, description) VALUES (?,?,?,?,?,?)');
-    const cats = [
-      ['Hair', 1, [
-        ['Haircut — Women', 'SVC-H01', 45, 600, 'Wash, cut & blow-dry'],
-        ['Haircut — Men', 'SVC-H02', 30, 300, 'Cut & style'],
-        ['Hair Colour — Global', 'SVC-H03', 120, 2500, 'Full-head global colour'],
-        ['Highlights', 'SVC-H04', 150, 3500, 'Foil highlights'],
-        ['Hair Spa', 'SVC-H05', 60, 1200, 'Deep-conditioning spa'],
-        ['Keratin Treatment', 'SVC-H06', 180, 5000, 'Smoothing keratin'],
-      ]],
-      ['Skin & Facial', 2, [
-        ['Classic Facial', 'SVC-S01', 60, 1500, 'Cleanse, scrub, mask'],
-        ['Anti-Ageing Facial', 'SVC-S02', 75, 2500, 'Collagen boost'],
-        ['Clean-up', 'SVC-S03', 30, 700, 'Express clean-up'],
-      ]],
-      ['Nails', 3, [
-        ['Manicure', 'SVC-N01', 45, 800, 'Classic manicure'],
-        ['Pedicure', 'SVC-N02', 60, 1000, 'Spa pedicure'],
-        ['Gel Polish', 'SVC-N03', 45, 1200, 'Long-lasting gel'],
-      ]],
-      ['Spa & Massage', 4, [
-        ['Body Massage — 60 min', 'SVC-M01', 60, 2000, 'Relaxation massage'],
-        ['Body Polishing', 'SVC-M02', 90, 3000, 'Full-body polish'],
-      ]],
-      ['Makeup & Grooming', 5, [
-        ['Party Makeup', 'SVC-G01', 90, 3500, 'Occasion makeup'],
-        ['Threading', 'SVC-G02', 15, 100, 'Eyebrow threading'],
-        ['Waxing — Full Arms', 'SVC-G03', 30, 500, 'Full-arm wax'],
-      ]],
-    ];
-    for (const [cname, order, svcs] of cats) {
+    for (const [cname, order, svcs] of HEADMASTERS_MENU) {
       const c = catStmt.run(cname, order);
       for (const s of svcs) svcStmt.run(c.lastInsertRowid, ...s);
     }
+  };
+
+  const seeded = db.prepare("SELECT value FROM app_settings WHERE key='salon_seeded'").get();
+  if (!seeded) {
+    insertMenu();
+    // Menu already at the Headmasters version → mark it so the upgrade below no-ops.
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('salon_menu_headmasters_v1', datetime('now'))").run();
 
     const styStmt = db.prepare('INSERT INTO stylists (name, phone, specialization, commission_pct) VALUES (?,?,?,?)');
     styStmt.run('Priya Sharma', '9800000001', 'Hair & Colour', 15);
@@ -277,7 +337,21 @@ function runSalonMigrations(db) {
     prodStmt.run('Nail Polish', 'PRD-005', 'Lakme', 250, 120, 40, 10);
 
     db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('salon_seeded', datetime('now'))").run();
-    console.log('[salon] demo services / stylists / membership plans / products seeded');
+    console.log('[salon] Headmasters service menu / stylists / plans / products seeded');
+  }
+
+  // Menu upgrade — swap the old generic demo menu for the Headmasters menu on
+  // DBs seeded before it existed. Only runs while the salon hasn't billed yet,
+  // so a live menu with sales history is never wiped.
+  const menuFlag = db.prepare("SELECT value FROM app_settings WHERE key='salon_menu_headmasters_v1'").get();
+  if (!menuFlag) {
+    const hasSales = db.prepare('SELECT COUNT(*) AS c FROM pos_sales').get().c > 0;
+    if (!hasSales) {
+      db.exec('DELETE FROM services; DELETE FROM service_categories;');
+      insertMenu();
+      console.log('[salon] service menu upgraded to Headmasters Ludhiana');
+    }
+    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('salon_menu_headmasters_v1', datetime('now'))").run();
   }
 }
 
