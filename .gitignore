@@ -8,3 +8,6 @@ client/node_modules/
 
 # generated sales-billing exports that land in client/public
 client/public/*.xlsx
+
+# stray generated exports — never ship SEPL/legacy data in the build
+client/dist/*.xlsx
