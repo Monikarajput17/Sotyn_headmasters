@@ -282,14 +282,14 @@ export default function AIAgentChat() {
                 <p className="font-medium text-gray-700">Try asking:</p>
                 <div className="grid gap-1.5">
                   {[
-                    'What rate did we give L&T for 1.5T AC last time?',
-                    'Which customers haven\'t paid in 60 days?',
-                    'DPR kaise submit kare? Hindi me batao',
-                    'How to create Sales Bill?',
-                    'Today\'s DPR submissions by site',
+                    'What were today\'s total sales?',
+                    'Which clients haven\'t visited in 60 days?',
+                    'Who are my top stylists by revenue this month?',
+                    'How many appointments are booked tomorrow?',
+                    'Which retail products are low on stock?',
                   ].map((s, i) => (
                     <button key={i} onClick={() => setInput(s)}
-                      className="text-left bg-white border border-gray-200 hover:border-red-300 hover:bg-red-50 rounded px-2 py-1.5 text-xs text-gray-700">
+                      className="text-left bg-white border border-gray-200 hover:border-blue-300 hover:bg-blue-50 rounded px-2 py-1.5 text-xs text-gray-700">
                       {s}
                     </button>
                   ))}

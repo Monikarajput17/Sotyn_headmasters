@@ -85,16 +85,20 @@ try {
   console.warn('[auth] could not pre-lock JWT secret:', e.message);
 }
 
-// Seed the 20 MIS scorecard templates on first boot. Idempotent — re-runs
-// when the table already has rows are no-ops.
-try {
-  const { seedScoringTemplates } = require('./db/seedScoring');
-  const { getDb } = require('./db/schema');
-  const r = seedScoringTemplates(getDb());
-  if (r.seeded > 0) console.log(`[seed] scoring: seeded ${r.seeded} templates`);
-  if (r.raciAdded > 0) console.log(`[seed] scoring: added RACI row to ${r.raciAdded} templates`);
-} catch (e) {
-  console.warn('[seed] scoring failed:', e.message);
+// Seed the 20 MIS scorecard templates on first boot. Idempotent.
+// Sotyn.Headmasters (salon): these templates are construction KPIs (Site
+// Engineer, DPR profit, Indent accuracy…), so they're disabled by default via
+// ERP_DISABLE_SCORING_SEED. Unset the env to restore for a construction ERP.
+if (!process.env.ERP_DISABLE_SCORING_SEED) {
+  try {
+    const { seedScoringTemplates } = require('./db/seedScoring');
+    const { getDb } = require('./db/schema');
+    const r = seedScoringTemplates(getDb());
+    if (r.seeded > 0) console.log(`[seed] scoring: seeded ${r.seeded} templates`);
+    if (r.raciAdded > 0) console.log(`[seed] scoring: added RACI row to ${r.raciAdded} templates`);
+  } catch (e) {
+    console.warn('[seed] scoring failed:', e.message);
+  }
 }
 
 // Solar Quotation module — create tables + seed the rate book on first boot

@@ -84,32 +84,23 @@ const SIDEBAR_GROUPS = [
     { path: '/salon/memberships',  label: 'Memberships',    icon: FiAward,        module: 'salon_memberships' },
     { path: '/salon/commissions',  label: 'Commissions',    icon: FiTrendingUp,   module: 'salon_commissions' },
   ]},
-  { id: 'finance', label: 'Finance', icon: LuIndianRupee, items: [
-    { path: '/billing',          label: 'Invoices',    icon: FiList,       module: 'billing' },
-    { path: '/cashflow',         label: 'Cash Flow',   icon: FiRefreshCw,  module: 'cashflow' },
-    { path: '/cheques',          label: 'Cheques',     icon: FiFile,       module: 'cheques' },
-    { path: '/payment-required', label: 'Payables',    icon: FiCreditCard, module: 'payment_required' },
-  ]},
-  { id: 'people', label: 'HRMS', icon: FiUsers, items: [
-    { path: '/attendance',      label: 'Attendance',       icon: FiCalendar,   module: 'attendance' },
-    { path: '/payroll',         label: 'Payroll',          icon: FiDollarSign, module: 'payroll' },
-    { path: '/employees',       label: 'Employees',        icon: FiAtSign,     module: 'employees' },
-    { path: '/hr',              label: 'Hiring',           icon: FiUserPlus,   module: 'hr' },
-    { path: '/scorecard',       label: 'Performance',      icon: FiAward,      module: 'scoring' },
-    { path: '/champions',       label: 'Champions League', icon: FaTrophy,     module: 'gamification' },
-  ]},
-  { id: 'inventory', label: 'Inventory', icon: FiPackage, items: [
-    { path: '/inventory',      label: 'Products / Stock', icon: FiServer, module: 'inventory' },
-    { path: '/company-assets', label: 'Assets',           icon: FiBox,    module: 'company_assets' },
+  // Staff — generic team management that applies to a salon. The construction
+  // groups (Finance/Invoices with RA·MB·Installation bills, Cash Flow project
+  // finance, Inventory warehouse stock, Service-Desk site complaints, and the
+  // construction-KPI Scorecard/Champions) were removed — a salon's money lives
+  // in Salon → Billing / Commissions / Dashboard, and retail stock in
+  // Salon → Retail Products. Routes stay in App.jsx (just unlinked) so nothing 404s.
+  { id: 'people', label: 'Staff', icon: FiUsers, items: [
+    { path: '/attendance', label: 'Attendance', icon: FiCalendar,   module: 'attendance' },
+    { path: '/payroll',    label: 'Payroll',    icon: FiDollarSign, module: 'payroll' },
+    { path: '/employees',  label: 'Employees',  icon: FiAtSign,     module: 'employees' },
+    // Hiring (/hr) removed — its Manpower-Planning + Sub-Contractor tabs are
+    // construction (Site Engineer, Foreman, DPR). Route stays in App.jsx.
   ]},
   { id: 'tasks', label: 'Tasks', icon: FiCheckSquare, items: [
-    { path: '/delegations', label: 'Delegations', icon: FiPaperclip,   module: 'delegations' },
-    { path: '/pms-tasks',   label: 'PMS Tasks',   icon: FiLayers,      module: 'pms_tasks' },
+    // Delegations + PMS Tasks removed — both pick a "project" from the
+    // construction Business Book. Checklists is generic (opening/closing lists).
     { path: '/checklists',  label: 'Checklists',  icon: FiCheckCircle, module: 'checklists' },
-  ]},
-  { id: 'service_desk', label: 'Service Desk', icon: FiPhoneCall, items: [
-    { path: '/complaints',   label: 'Complaints',   icon: FiAlertTriangle, module: 'complaints' },
-    { path: '/help-tickets', label: 'Help Tickets', icon: FiMessageCircle, module: null, open: true },
   ]},
   { id: 'admin', label: 'Admin', icon: FiKey, adminOnly: true, items: [
     { path: '/admin/word-count', label: 'Activity Log', icon: FiActivity, module: 'users' },

@@ -13,9 +13,8 @@ import { FiPlus, FiEdit2, FiTrash2, FiShield, FiCheck, FiX } from 'react-icons/f
 // revoke access.  Grouped by sidebar section for readability; keys
 // (used by backend role_permissions) are unchanged.
 const ALL_MODULES = [
-  // — Finance & Daily Operations
   { key: 'dashboard', label: 'Dashboard' },
-  // ─── Sotyn.Headmasters fork — salon & spa modules ───
+  // ─── Salon ───
   { key: 'salon_appointments', label: 'Salon · Appointments' },
   { key: 'salon_pos', label: 'Salon · Billing / POS' },
   { key: 'salon_clients', label: 'Salon · Clients' },
@@ -24,68 +23,14 @@ const ALL_MODULES = [
   { key: 'salon_stylists', label: 'Salon · Stylists' },
   { key: 'salon_memberships', label: 'Salon · Memberships' },
   { key: 'salon_commissions', label: 'Salon · Commissions' },
-  { key: 'cashflow', label: 'Cash Flow' },
-  { key: 'cheques', label: 'Cheque FMS' },
-  { key: 'payment_required', label: 'Payment Required' },
+  // ─── Staff ───
   { key: 'attendance', label: 'Attendance' },
-  { key: 'collections', label: 'Collection Engine' },
-  { key: 'ar_ap_tracker', label: 'AR/AP Tracker' },
-  { key: 'site_chat', label: 'Salon Chat — create/manage groups (chatting is open to all)' },
-  { key: 'dpr', label: 'DPR' },
-  { key: 'indent_labour_payment', label: 'Indent Labour Payment' },
-  { key: 'labour_payment', label: 'Labour Payment Indents' },
-  { key: 'delegations', label: 'Delegations' },
-  { key: 'pms_tasks', label: 'PMS Tasks' },
-  { key: 'checklists', label: 'Checklists' },
-
-  // — Sales & CRM
-  { key: 'leads', label: 'Sales Funnel' },
-  { key: 'crm_funnel', label: 'CRM Sales Funnel' },
-  { key: 'fire_noc', label: 'Fire NOC Renewal' },
-  { key: 'rental_tools', label: 'Rental Tools' },
-  { key: 'influencers', label: 'Influencers' },
-  { key: 'crm_kitting', label: 'CRM Full Kitting' },
-  { key: 'quotations', label: 'BOQ & Quotations' },
-  { key: 'ai_quotation', label: 'AI Auto-Quotation' },
-  { key: 'labour_rates', label: 'Labour Rate Sheet' },
-  { key: 'business_book', label: 'Business Book' },
-
-  // — Solar Division (PR #2: Funnel / Quotation / Projects / Masters)
-  { key: 'solar_quotation', label: 'Solar Division (Funnel / Quotation / Projects / Masters)' },
-
-  // — Materials, Vendors, Procurement
-  { key: 'item_master', label: 'Item Master' },
-  { key: 'orders', label: 'Orders & Planning' },
-  { key: 'vendors', label: 'Vendors' },
-  { key: 'sub_contractors', label: 'Sub-Contractors' },
-  { key: 'customers', label: 'Customers' },
-  { key: 'procurement', label: 'Indent to Dispatch' },
-  { key: 'procurement_schedule', label: 'Schedule (Gantt)' },
-  { key: 'indent_fms', label: 'Indent FMS (legacy)' },
-  { key: 'inventory', label: 'Inventory' },
-
-  // — Execution / Site
-  { key: 'installation', label: 'Installation' },
-  { key: 'billing', label: 'Billing' },
-  { key: 'complaints', label: 'Complaints' },
-  { key: 'snags', label: 'Snag List' },
-  { key: 'company_assets', label: 'Company Assets' },
-  { key: 'help_tickets', label: 'Help Tickets' },
-
-  // — HR / People
-  { key: 'hr_system', label: 'HR System (recruitment / ATS / offers)' },
-  { key: 'subcon_hiring', label: 'Sub-contractor Hiring' },
-  { key: 'hr', label: 'HR & Hiring (legacy)' },
   { key: 'payroll', label: 'Payroll' },
-  { key: 'scoring', label: 'Weekly Score' },
-  { key: 'gamification', label: 'Champions League (Gamification)' },
-  { key: 'tools', label: 'Tools Management' },
-  { key: 'rentals', label: 'Room Rentals' },
   { key: 'employees', label: 'Employees' },
-  { key: 'expenses', label: 'Expenses' },
-
-  // — Platform
-  { key: 'ai_agent', label: 'AI Agent (Ask Sotyn)' },
+  // ─── Other ───
+  { key: 'checklists', label: 'Checklists' },
+  { key: 'site_chat', label: 'Salon Chat — manage groups (chatting is open to all)' },
+  { key: 'ai_agent', label: 'AI Assistant (Ask Sotyn)' },
   { key: 'users', label: 'User Management' },
 ];
 

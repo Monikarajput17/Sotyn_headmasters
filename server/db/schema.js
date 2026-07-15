@@ -5555,20 +5555,14 @@ in your first week. If a process feels broken, raise a Help Ticket
   for (const s of sources) insertSource.run(s);
 
   // Seed default roles
+  // Sotyn.Headmasters (salon) roles — replace the construction roles.
   const defaultRoles = [
     { name: 'Admin', desc: 'Full access to all modules', is_system: 1 },
-    { name: 'Sales Manager', desc: 'Manage leads, quotations, orders', is_system: 0 },
-    { name: 'Sales Executive', desc: 'View and create leads, quotations', is_system: 0 },
-    { name: 'Purchase Manager', desc: 'Manage procurement and vendors', is_system: 0 },
-    { name: 'Site Engineer', desc: 'Installation and testing', is_system: 0 },
-    { name: 'HR Manager', desc: 'HR, hiring, employees', is_system: 0 },
-    { name: 'Accountant', desc: 'Billing, expenses, payments', is_system: 0 },
-    { name: 'Data Entry', desc: 'Data entry for Business Book and orders', is_system: 0 },
-    { name: 'Billing Engineer', desc: 'Approves billing and payment requests', is_system: 0 },
-    { name: 'Viewer', desc: 'View-only access to all modules', is_system: 0 },
-    // Mam (2026-05-22) HR System Phase 1 roles.
-    { name: 'Hiring Manager', desc: 'Raises hiring requests, reviews candidates', is_system: 0 },
-    { name: 'Interviewer', desc: 'Conducts interviews and submits feedback', is_system: 0 },
+    { name: 'Salon Manager', desc: 'Runs the salon — appointments, billing, clients, staff', is_system: 0 },
+    { name: 'Receptionist', desc: 'Front desk — bookings, billing, clients', is_system: 0 },
+    { name: 'Cashier', desc: 'Billing / POS and client lookup', is_system: 0 },
+    { name: 'Stylist', desc: 'View own appointments and commissions', is_system: 0 },
+    { name: 'Viewer', desc: 'View-only access', is_system: 0 },
   ];
 
   const ALL_MODULES = [
@@ -5646,60 +5640,43 @@ in your first week. If a process feels broken, raise a Help Ticket
       // Admin gets full access
       for (const m of ALL_MODULES) insertPerm.run(adminRole.id, m, 1, 1, 1, 1, 1);
 
-      // Data Entry - full access to business_book + orders, view others
-      const deRole = db.prepare("SELECT id FROM roles WHERE name='Data Entry'").get();
-      if (deRole) {
-        for (const m of ['dashboard']) insertPerm.run(deRole.id, m, 1, 0, 0, 0, 0);
-        for (const m of ['business_book','orders']) insertPerm.run(deRole.id, m, 1, 1, 1, 1, 0);
-        for (const m of ['leads','quotations','vendors','procurement','cashflow','collections','indent_fms','dpr','installation','billing','complaints','hr','employees','expenses','checklists']) insertPerm.run(deRole.id, m, 1, 0, 0, 0, 0);
+      const SALON_ALL = ['salon_appointments','salon_pos','salon_clients','salon_services','salon_products','salon_stylists','salon_memberships','salon_commissions'];
+
+      // Salon Manager — full run of the salon + staff
+      const mgrRole = db.prepare("SELECT id FROM roles WHERE name='Salon Manager'").get();
+      if (mgrRole) {
+        insertPerm.run(mgrRole.id, 'dashboard', 1, 0, 0, 0, 0);
+        for (const m of SALON_ALL) insertPerm.run(mgrRole.id, m, 1, 1, 1, 1, 1);
+        for (const m of ['attendance','payroll','employees','checklists','site_chat']) insertPerm.run(mgrRole.id, m, 1, 1, 1, 1, 1);
       }
 
-      // Sales Manager
-      const smRole = db.prepare("SELECT id FROM roles WHERE name='Sales Manager'").get();
-      if (smRole) {
-        for (const m of ['dashboard','leads','quotations','orders']) insertPerm.run(smRole.id, m, 1, 1, 1, 1, 1);
-        for (const m of ['business_book']) insertPerm.run(smRole.id, m, 1, 0, 0, 0, 0);
-        for (const m of ['vendors','procurement','installation','billing','complaints']) insertPerm.run(smRole.id, m, 1, 0, 0, 0, 0);
+      // Receptionist / front desk — bookings, billing, clients
+      const recRole = db.prepare("SELECT id FROM roles WHERE name='Receptionist'").get();
+      if (recRole) {
+        insertPerm.run(recRole.id, 'dashboard', 1, 0, 0, 0, 0);
+        insertPerm.run(recRole.id, 'salon_appointments', 1, 1, 1, 0, 0);
+        insertPerm.run(recRole.id, 'salon_pos', 1, 1, 0, 0, 0);
+        insertPerm.run(recRole.id, 'salon_clients', 1, 1, 1, 0, 0);
+        insertPerm.run(recRole.id, 'salon_memberships', 1, 1, 0, 0, 0);
+        for (const m of ['salon_services','salon_products','salon_stylists','site_chat']) insertPerm.run(recRole.id, m, 1, 0, 0, 0, 0);
       }
 
-      // Sales Executive
-      const seRole = db.prepare("SELECT id FROM roles WHERE name='Sales Executive'").get();
-      if (seRole) {
-        for (const m of ['dashboard','leads','quotations']) insertPerm.run(seRole.id, m, 1, 1, 1, 0, 0);
-        for (const m of ['orders','business_book']) insertPerm.run(seRole.id, m, 1, 0, 0, 0, 0);
+      // Cashier — billing / POS + client lookup
+      const cashRole = db.prepare("SELECT id FROM roles WHERE name='Cashier'").get();
+      if (cashRole) {
+        insertPerm.run(cashRole.id, 'dashboard', 1, 0, 0, 0, 0);
+        insertPerm.run(cashRole.id, 'salon_pos', 1, 1, 0, 0, 0);
+        for (const m of ['salon_clients','salon_services','salon_products','salon_appointments','site_chat']) insertPerm.run(cashRole.id, m, 1, 0, 0, 0, 0);
       }
 
-      // Purchase Manager
-      const pmRole = db.prepare("SELECT id FROM roles WHERE name='Purchase Manager'").get();
-      if (pmRole) {
-        for (const m of ['dashboard','vendors','procurement']) insertPerm.run(pmRole.id, m, 1, 1, 1, 1, 1);
-        for (const m of ['orders','billing']) insertPerm.run(pmRole.id, m, 1, 1, 1, 0, 0);
-        for (const m of ['business_book']) insertPerm.run(pmRole.id, m, 1, 0, 0, 0, 0);
+      // Stylist — see their appointments + commissions
+      const styRole = db.prepare("SELECT id FROM roles WHERE name='Stylist'").get();
+      if (styRole) {
+        insertPerm.run(styRole.id, 'dashboard', 1, 0, 0, 0, 0);
+        for (const m of ['salon_appointments','salon_commissions','salon_services','site_chat']) insertPerm.run(styRole.id, m, 1, 0, 0, 0, 0);
       }
 
-      // Site Engineer
-      const engRole = db.prepare("SELECT id FROM roles WHERE name='Site Engineer'").get();
-      if (engRole) {
-        for (const m of ['dashboard','installation','complaints']) insertPerm.run(engRole.id, m, 1, 1, 1, 0, 0);
-        for (const m of ['billing']) insertPerm.run(engRole.id, m, 1, 1, 0, 0, 0);
-        for (const m of ['orders','business_book']) insertPerm.run(engRole.id, m, 1, 0, 0, 0, 0);
-      }
-
-      // HR Manager
-      const hrRole = db.prepare("SELECT id FROM roles WHERE name='HR Manager'").get();
-      if (hrRole) {
-        for (const m of ['dashboard','hr','employees','expenses','checklists']) insertPerm.run(hrRole.id, m, 1, 1, 1, 1, 1);
-        for (const m of ['business_book']) insertPerm.run(hrRole.id, m, 1, 0, 0, 0, 0);
-      }
-
-      // Accountant
-      const accRole = db.prepare("SELECT id FROM roles WHERE name='Accountant'").get();
-      if (accRole) {
-        for (const m of ['dashboard','billing','expenses']) insertPerm.run(accRole.id, m, 1, 1, 1, 0, 1);
-        for (const m of ['orders','procurement','vendors','business_book']) insertPerm.run(accRole.id, m, 1, 0, 0, 0, 0);
-      }
-
-      // Viewer
+      // Viewer — view everything
       const viewerRole = db.prepare("SELECT id FROM roles WHERE name='Viewer'").get();
       if (viewerRole) {
         for (const m of ALL_MODULES) insertPerm.run(viewerRole.id, m, 1, 0, 0, 0, 0);
@@ -5726,14 +5703,9 @@ in your first week. If a process feels broken, raise a Help Ticket
       if (!exists) {
         if (role.name === 'Admin') {
           insertPermIfMissing.run(role.id, mod, 1, 1, 1, 1, 1);
-        } else if (role.name === 'Site Engineer' && (mod === 'dpr' || mod === 'payment_required')) {
-          insertPermIfMissing.run(role.id, mod, 1, 1, 1, 0, 0);
-        } else if (role.name === 'Data Entry' && (mod === 'business_book' || mod === 'item_master' || mod === 'orders')) {
-          insertPermIfMissing.run(role.id, mod, 1, 1, 1, 1, 0);
-        } else if (role.name === 'Accountant' && (mod === 'cashflow' || mod === 'collections' || mod === 'payment_required')) {
-          insertPermIfMissing.run(role.id, mod, 1, 1, 1, 0, 1);
         } else {
-          // Default DENY — new modules are hidden until explicitly granted.
+          // Default DENY — modules are hidden until explicitly granted. The
+          // salon roles' grants were seeded above; this only fills the gaps.
           insertPermIfMissing.run(role.id, mod, 0, 0, 0, 0, 0);
         }
       }
