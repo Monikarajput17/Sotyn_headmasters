@@ -18,16 +18,39 @@ export default function Employees() {
   const [bulkModal, setBulkModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});
+  const [showMgr2, setShowMgr2] = useState(false);
   const [search, setSearch] = useState('');
   const [bulkData, setBulkData] = useState('');
   const [bulkPreview, setBulkPreview] = useState([]);
   const fileRef = useRef(null);
+  // Shift/week-off history — date-effective, so "editing" it means adding a
+  // new row (POST), never overwriting an old one (see employee_shifts in
+  // schema.js: keeps past attendance from being reclassified retroactively).
+  const [shiftHistory, setShiftHistory] = useState([]);
+  const [shiftForm, setShiftForm] = useState({ effective_from: new Date().toISOString().slice(0, 10), shift_start: '', shift_end: '', week_off_day: '0' });
+  const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
   const load = () => {
     api.get('/hr/employees').then(r => setEmployees(r.data));
     api.get('/auth/users').then(r => setUsers((r.data || []).filter(u => u.active !== 0))).catch(() => {});
   };
   useEffect(() => { load(); }, []);
+
+  const loadShiftHistory = (employeeId) => {
+    if (!employeeId) { setShiftHistory([]); return; }
+    api.get(`/hr/employees/${employeeId}/shifts`).then(r => setShiftHistory(r.data || [])).catch(() => setShiftHistory([]));
+  };
+
+  const saveShift = async () => {
+    if (!editing) return;
+    if (!shiftForm.effective_from) return toast.error('Effective from date is required');
+    try {
+      await api.post(`/hr/employees/${editing.id}/shifts`, shiftForm);
+      toast.success('Shift updated');
+      loadShiftHistory(editing.id);
+      load();
+    } catch (err) { toast.error(err.response?.data?.error || 'Failed'); }
+  };
 
   // Delete an employee — surfaces WHY it's blocked instead of a bare "Delete
   // failed" (mam 2026-07-06). Payroll history → server 400 tells her to
@@ -101,6 +124,12 @@ export default function Employees() {
     delete payload._aadhar_file;
     delete payload._pan_file;
     delete payload._qualification_file;
+    // Shift fields are only used on the CREATE form to seed the employee's
+    // first shift/week-off entry (see below) — not columns on employees
+    // itself (they live in employee_shifts), so don't send them here.
+    delete payload.shift_start;
+    delete payload.shift_end;
+    delete payload.week_off_day;
     if (form._aadhar_file) {
       const url = await uploadFile(form._aadhar_file); if (!url) return;
       payload.aadhar_file = url;
@@ -121,8 +150,23 @@ export default function Employees() {
       if (!payload.qualification_file) return toast.error('Upload Highest qualification certificate');
     }
     try {
-      if (editing) { await api.put(`/hr/employees/${editing.id}`, payload); }
-      else { await api.post('/hr/employees', payload); }
+      if (editing) {
+        await api.put(`/hr/employees/${editing.id}`, payload);
+      } else {
+        const res = await api.post('/hr/employees', payload);
+        // Seed the first shift/week-off entry if the admin filled any of
+        // those in on the create form (all optional — skip if untouched).
+        if (form.shift_start || form.shift_end || (form.week_off_day && form.week_off_day !== '0')) {
+          try {
+            await api.post(`/hr/employees/${res.data.id}/shifts`, {
+              effective_from: form.join_date || new Date().toISOString().slice(0, 10),
+              shift_start: form.shift_start || null,
+              shift_end: form.shift_end || null,
+              week_off_day: form.week_off_day ?? 0,
+            });
+          } catch (e) { toast.error('Employee created, but shift could not be saved — set it from Edit.'); }
+        }
+      }
       toast.success(editing ? 'Updated' : 'Created');
       setModal(false); load();
     } catch (err) { toast.error(err.response?.data?.error || 'Failed'); }
@@ -234,7 +278,7 @@ export default function Employees() {
           <button onClick={exportCSV} className="btn btn-secondary flex items-center gap-2 text-sm"><FiDownload size={15} /> Export CSV</button>
           <button onClick={autoLink} className="btn btn-secondary flex items-center gap-2 text-sm" title="Link unlinked employees to users by matching email"><FiLink2 size={15} /> Auto-Link by Email</button>
           <button onClick={() => { setBulkData(''); setBulkPreview([]); setBulkModal(true); }} className="btn btn-secondary flex items-center gap-2 text-sm"><FiUpload size={15} /> Bulk Import</button>
-          <button onClick={() => { setEditing(null); setForm({ name: '', phone: '', email: '', designation: '', department: '', join_date: '', salary: 0, user_id: null }); setModal(true); }} className="btn btn-primary flex items-center gap-2"><FiPlus size={15} /> Add Employee</button>
+          <button onClick={() => { setEditing(null); setForm({ name: '', phone: '', email: '', designation: '', department: '', join_date: '', salary: 0, user_id: null }); setShiftHistory([]); setShowMgr2(false); setModal(true); }} className="btn btn-primary flex items-center gap-2"><FiPlus size={15} /> Add Employee</button>
         </div>
       </div>
 
@@ -265,7 +309,7 @@ export default function Employees() {
               {canSeeSalary && <td className="font-medium">Rs {(e.salary || 0).toLocaleString('en-IN')}</td>}
               <td><StatusBadge status={e.status} /></td>
               <td><div className="flex gap-1">
-                <button onClick={() => { setEditing(e); setForm(e); setModal(true); }} className="p-1.5 hover:bg-red-50 rounded text-red-600"><FiEdit2 size={15} /></button>
+                <button onClick={() => { setEditing(e); setForm(e); setModal(true); loadShiftHistory(e.id); setShowMgr2(!!e.reporting_manager_id_2); setShiftForm({ effective_from: new Date().toISOString().slice(0, 10), shift_start: e.shift_start || '', shift_end: e.shift_end || '', week_off_day: e.week_off_day != null ? String(e.week_off_day) : '0' }); }} className="p-1.5 hover:bg-red-50 rounded text-red-600"><FiEdit2 size={15} /></button>
                 {canDelete('employees') && <button onClick={() => deleteEmployee(e)} className="p-1 text-gray-400 hover:text-red-600"><FiTrash2 size={14} /></button>}
               </div></td>
             </tr>
@@ -323,7 +367,7 @@ export default function Employees() {
                 : <span className="text-[11px] font-semibold text-red-600">Not linked — DPR Staff Cost won't include this employee</span>}
             </div>
             <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100 text-xs">
-              <button onClick={() => { setEditing(e); setForm(e); setModal(true); }} className="text-blue-600 hover:underline flex items-center gap-1 font-semibold">
+              <button onClick={() => { setEditing(e); setForm(e); setModal(true); loadShiftHistory(e.id); setShowMgr2(!!e.reporting_manager_id_2); setShiftForm({ effective_from: new Date().toISOString().slice(0, 10), shift_start: e.shift_start || '', shift_end: e.shift_end || '', week_off_day: e.week_off_day != null ? String(e.week_off_day) : '0' }); }} className="text-blue-600 hover:underline flex items-center gap-1 font-semibold">
                 <FiEdit2 size={11} /> Edit
               </button>
               {canDelete('employees') && (
@@ -360,7 +404,87 @@ export default function Employees() {
               />
               <p className="text-[10px] text-gray-500 mt-0.5">If left blank and email matches a user, it will auto-link on save.</p>
             </div>
+            <div className="col-span-2">
+              <label className="label">Reporting Manager</label>
+              <SearchableSelect
+                options={employees.filter(x => x.id !== editing?.id).map(x => ({ ...x, label: x.name }))}
+                value={form.reporting_manager_id_1 || null}
+                valueKey="id"
+                displayKey="label"
+                placeholder="Search employee…"
+                onChange={(x) => setForm({ ...form, reporting_manager_id_1: x?.id || null })}
+              />
+              {/* Most employees have just one manager — a second is only shown
+                  when needed, so the form doesn't force two boxes on everyone. */}
+              {showMgr2 || form.reporting_manager_id_2 ? (
+                <div className="mt-2">
+                  <SearchableSelect
+                    options={employees.filter(x => x.id !== editing?.id && x.id !== form.reporting_manager_id_1).map(x => ({ ...x, label: x.name }))}
+                    value={form.reporting_manager_id_2 || null}
+                    valueKey="id"
+                    displayKey="label"
+                    placeholder="Search second manager…"
+                    onChange={(x) => setForm({ ...form, reporting_manager_id_2: x?.id || null })}
+                  />
+                  <button type="button" onClick={() => { setShowMgr2(false); setForm(f => ({ ...f, reporting_manager_id_2: null })); }} className="text-[10px] text-gray-500 hover:underline mt-0.5">Remove second manager</button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => setShowMgr2(true)} className="text-[10px] text-blue-600 hover:underline mt-1">+ Add a second reporting manager</button>
+              )}
+            </div>
           </div>
+
+          {/* Shift start/end + weekly off day. DATE-EFFECTIVE: saving here adds
+              a new history row instead of overwriting the current one, so a
+              shift/week-off change never relabels attendance that already
+              happened under the old shift (e.g. shift was 09:00 through Aug 18,
+              changes to 10:00 from Aug 24 — days before Aug 24 keep using 09:00). */}
+          {!editing && (
+            <div className="card p-3 bg-blue-50/40 border-l-4 border-blue-400 space-y-3">
+              <div className="text-xs font-semibold text-blue-800 uppercase tracking-wide">Shift &amp; Week-Off <span className="text-gray-400 font-normal normal-case">(optional — can also be set later from Edit)</span></div>
+              <div className="grid grid-cols-3 gap-2">
+                <div><label className="label text-[10px]">Shift Start</label><input className="input" type="time" value={form.shift_start || ''} onChange={e => setForm({ ...form, shift_start: e.target.value })} /></div>
+                <div><label className="label text-[10px]">Shift End</label><input className="input" type="time" value={form.shift_end || ''} onChange={e => setForm({ ...form, shift_end: e.target.value })} /></div>
+                <div><label className="label text-[10px]">Week Off</label>
+                  <select className="select" value={form.week_off_day ?? '0'} onChange={e => setForm({ ...form, week_off_day: e.target.value })}>
+                    {WEEKDAYS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {editing && (
+            <div className="card p-3 bg-blue-50/40 border-l-4 border-blue-400 space-y-3">
+              <div className="text-xs font-semibold text-blue-800 uppercase tracking-wide">Shift &amp; Week-Off</div>
+              {shiftHistory.length > 0 && (
+                <p className="text-[11px] text-gray-600">
+                  Current: {shiftHistory[shiftHistory.length - 1].shift_start || '—'}–{shiftHistory[shiftHistory.length - 1].shift_end || '—'},
+                  {' '}Week-Off: {WEEKDAYS[shiftHistory[shiftHistory.length - 1].week_off_day ?? 0]}
+                  {' '}(since {shiftHistory[shiftHistory.length - 1].effective_from})
+                </p>
+              )}
+              {shiftHistory.length === 0 && <p className="text-[11px] text-gray-500">No shift configured yet — late is judged against the company-wide default cutoff, week-off defaults to Sunday.</p>}
+              <div className="grid grid-cols-4 gap-2 items-end">
+                <div><label className="label text-[10px]">Shift Start</label><input className="input" type="time" value={shiftForm.shift_start} onChange={e => setShiftForm({ ...shiftForm, shift_start: e.target.value })} /></div>
+                <div><label className="label text-[10px]">Shift End</label><input className="input" type="time" value={shiftForm.shift_end} onChange={e => setShiftForm({ ...shiftForm, shift_end: e.target.value })} /></div>
+                <div><label className="label text-[10px]">Week Off</label>
+                  <select className="select" value={shiftForm.week_off_day} onChange={e => setShiftForm({ ...shiftForm, week_off_day: e.target.value })}>
+                    {WEEKDAYS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+                  </select>
+                </div>
+                <div><label className="label text-[10px]">Effective From</label><input className="input" type="date" value={shiftForm.effective_from} onChange={e => setShiftForm({ ...shiftForm, effective_from: e.target.value })} /></div>
+              </div>
+              <button type="button" onClick={saveShift} className="btn btn-secondary text-xs">Save Shift Change</button>
+              {shiftHistory.length > 0 && (
+                <div className="text-[10px] text-gray-500 space-y-0.5 pt-1 border-t">
+                  {shiftHistory.slice().reverse().map(h => (
+                    <div key={h.id}>{h.effective_from}: {h.shift_start || '—'}–{h.shift_end || '—'}, off {WEEKDAYS[h.week_off_day ?? 0]}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Mandatory KYC docs for new employees. When editing, the inputs
               show "Existing: view file" if a doc URL is already on file —

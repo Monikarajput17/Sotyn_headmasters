@@ -577,7 +577,7 @@ export default function Attendance() {
           </div>
 
           {/* Leave Request */}
-          <button onClick={() => { setForm({ leave_type: 'casual', from_date: '', to_date: '', reason: '' }); setModal('leave'); }} className="btn btn-secondary w-full text-sm">Apply for Leave</button>
+          <button onClick={() => { setForm({ leave_type: 'full_day', from_date: '', to_date: '', reason: '' }); setModal('leave'); }} className="btn btn-secondary w-full text-sm">Apply for Leave</button>
 
           {/* Daily Detail — last 15 working days with in/out times + any
               leave taken on that date. Mam: "where punch/punch out [...]
@@ -1372,12 +1372,14 @@ export default function Attendance() {
             <div>
               <label className="label">Type</label>
               <select className="select" value={leaveEditForm.leave_type || ''} onChange={e => setLeaveEditForm({ ...leaveEditForm, leave_type: e.target.value })}>
-                <option value="casual">Casual</option>
-                <option value="sick">Sick</option>
-                <option value="earned">Earned</option>
+                <option value="full_day">Full Day</option>
                 <option value="half_day">Half Day</option>
-                <option value="short_leave">Short Leave</option>
-                <option value="comp_off">Comp Off</option>
+                {/* Legacy types — only shown so old requests can still be edited; not offered on new Apply for Leave. */}
+                <option value="casual">Casual (legacy)</option>
+                <option value="sick">Sick (legacy)</option>
+                <option value="earned">Earned (legacy)</option>
+                <option value="short_leave">Short Leave (legacy)</option>
+                <option value="comp_off">Comp Off (legacy)</option>
               </select>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -1430,17 +1432,17 @@ export default function Attendance() {
           e.preventDefault();
           // Guard — common reason this form fails: To Date < From Date. Catch
           // it client-side so mam sees a clear message instead of a backend 500.
-          if (form.leave_type !== 'short_leave' && form.from_date && form.to_date && form.to_date < form.from_date) {
+          if (form.leave_type !== 'half_day' && form.from_date && form.to_date && form.to_date < form.from_date) {
             toast.error('To Date cannot be earlier than From Date');
             return;
           }
           try { await api.post('/attendance/leave', form); toast.success('Leave applied'); setModal(null); load(); }
           catch (err) { toast.error(err.response?.data?.error || 'Failed'); }
         }} className="space-y-4">
-          <div><label className="label">Leave Type</label><select className="select" value={form.leave_type} onChange={e => setForm({ ...form, leave_type: e.target.value })}><option value="casual">Casual Leave</option><option value="sick">Sick Leave</option><option value="earned">Earned Leave</option><option value="half_day">Half Day</option><option value="short_leave">Short Leave (max 4hrs/month)</option><option value="comp_off">Comp Off</option></select></div>
+          <div><label className="label">Leave Type</label><select className="select" value={form.leave_type} onChange={e => setForm({ ...form, leave_type: e.target.value })}><option value="full_day">Full Day</option><option value="half_day">Half Day</option></select></div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">From Date *</label>
+              <label className="label">{form.leave_type === 'half_day' ? 'Date *' : 'From Date *'}</label>
               <input
                 className="input"
                 type="date"
@@ -1458,7 +1460,7 @@ export default function Attendance() {
                 required
               />
             </div>
-            {form.leave_type !== 'short_leave' && (
+            {form.leave_type !== 'half_day' && (
               <div>
                 <label className="label">To Date *</label>
                 <input
@@ -1475,13 +1477,6 @@ export default function Attendance() {
               </div>
             )}
           </div>
-          {form.leave_type === 'short_leave' && (
-            <div className="grid grid-cols-2 gap-3 bg-amber-50 p-3 rounded">
-              <div><label className="label">From Time *</label><TimePicker value={form.from_time || ''} onChange={v => setForm({ ...form, from_time: v })} required /></div>
-              <div><label className="label">To Time *</label><TimePicker value={form.to_time || ''} onChange={v => setForm({ ...form, to_time: v })} required /></div>
-              <p className="col-span-2 text-xs text-amber-600">Monthly limit: 4 hours. Exceeding will be rejected.</p>
-            </div>
-          )}
           <div><label className="label">Reason</label><textarea className="input" rows="2" value={form.reason} onChange={e => setForm({ ...form, reason: e.target.value })} /></div>
           <div className="flex justify-end gap-3"><button type="button" onClick={() => setModal(null)} className="btn btn-secondary">Cancel</button><button type="submit" className="btn btn-primary">Apply</button></div>
         </form>

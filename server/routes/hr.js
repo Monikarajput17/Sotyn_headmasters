@@ -6,6 +6,7 @@ const XLSX = require('xlsx');
 const { getDb } = require('../db/schema');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { parseResume } = require('../utils/resumeParser');
+const { getShiftHistory } = require('../lib/shifts');
 const router = express.Router();
 router.use(authMiddleware);
 
@@ -698,18 +699,51 @@ const canSeeSalary = (userId, userRole) => {
 };
 
 router.get('/employees', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT e.*, u.name as linked_user_name, u.username as linked_username
-     FROM employees e LEFT JOIN users u ON u.id = e.user_id ORDER BY e.name COLLATE NOCASE`
-  ).all();
+  const db = getDb();
+  const today = new Date().toISOString().slice(0, 10);
+  const rows = db.prepare(
+    `SELECT e.*, u.name as linked_user_name, u.username as linked_username,
+            m1.name as reporting_manager_1_name, m2.name as reporting_manager_2_name,
+            (SELECT shift_start FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_start,
+            (SELECT shift_end   FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_end,
+            (SELECT week_off_day FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as week_off_day
+     FROM employees e
+     LEFT JOIN users u ON u.id = e.user_id
+     LEFT JOIN employees m1 ON m1.id = e.reporting_manager_id_1
+     LEFT JOIN employees m2 ON m2.id = e.reporting_manager_id_2
+     ORDER BY e.name COLLATE NOCASE`
+  ).all(today, today, today);
   if (canSeeSalary(req.user.id, req.user.role)) return res.json(rows);
   // Redact salary for everyone else
   res.json(rows.map(({ salary, ...rest }) => rest));
 });
 
+// Shift/week-off history for one employee — GET to list, POST to add a new
+// date-effective entry (never an UPDATE; see employee_shifts table comment
+// in schema.js — this is what keeps past attendance from being
+// retroactively reclassified when a shift or week-off day changes).
+router.get('/employees/:id/shifts', (req, res) => {
+  res.json(getShiftHistory(getDb(), +req.params.id));
+});
+
+router.post('/employees/:id/shifts', requirePermission('employees', 'edit'), (req, res) => {
+  const { effective_from, shift_start, shift_end, week_off_day } = req.body;
+  if (!effective_from) return res.status(400).json({ error: 'Effective from date is required' });
+  const db = getDb();
+  const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.id);
+  if (!emp) return res.status(404).json({ error: 'Employee not found' });
+  const r = db.prepare(
+    `INSERT INTO employee_shifts (employee_id, effective_from, shift_start, shift_end, week_off_day, created_by)
+     VALUES (?,?,?,?,?,?)`
+  ).run(req.params.id, effective_from, shift_start || null, shift_end || null,
+        (week_off_day === '' || week_off_day == null) ? null : +week_off_day, req.user.id);
+  res.status(201).json({ id: r.lastInsertRowid });
+});
+
 router.post('/employees', requirePermission('employees', 'create'), (req, res) => {
   const { name, phone, email, designation, department, join_date, salary,
-          aadhar_file, pan_file, qualification_file } = req.body;
+          aadhar_file, pan_file, qualification_file,
+          reporting_manager_id_1, reporting_manager_id_2 } = req.body;
   let { user_id } = req.body;
   const db = getDb();
   // Auto-link by email if user_id wasn't explicitly set
@@ -724,10 +758,12 @@ router.post('/employees', requirePermission('employees', 'create'), (req, res) =
   if (!qualification_file) return res.status(400).json({ error: 'Highest qualification certificate is required' });
   const r = db.prepare(`
     INSERT INTO employees (user_id,name,phone,email,designation,department,join_date,salary,
-                           aadhar_file, pan_file, qualification_file)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                           aadhar_file, pan_file, qualification_file,
+                           reporting_manager_id_1, reporting_manager_id_2)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(user_id || null, name, phone, email, designation, department, join_date, salary,
-        aadhar_file || null, pan_file || null, qualification_file || null);
+        aadhar_file || null, pan_file || null, qualification_file || null,
+        reporting_manager_id_1 || null, reporting_manager_id_2 || null);
   res.status(201).json({ id: r.lastInsertRowid, linked_user_id: user_id || null });
 });
 
@@ -768,7 +804,14 @@ router.post('/employees/bulk', requirePermission('employees', 'create'), (req, r
 
 router.put('/employees/:id', requirePermission('employees', 'edit'), (req, res) => {
   const { name, phone, email, designation, department, salary, status, user_id,
-          aadhar_file, pan_file, qualification_file } = req.body;
+          aadhar_file, pan_file, qualification_file,
+          reporting_manager_id_1, reporting_manager_id_2 } = req.body;
+  const empId = +req.params.id;
+  const mgr1 = reporting_manager_id_1 ? +reporting_manager_id_1 : null;
+  const mgr2 = reporting_manager_id_2 ? +reporting_manager_id_2 : null;
+  if (mgr1 === empId || mgr2 === empId) {
+    return res.status(400).json({ error: 'An employee cannot be their own reporting manager' });
+  }
   // COALESCE so passing undefined for a doc field doesn't wipe the existing
   // upload — frontend can edit other fields without re-uploading docs.
   getDb().prepare(`
@@ -776,10 +819,13 @@ router.put('/employees/:id', requirePermission('employees', 'edit'), (req, res) 
        SET name=?, phone=?, email=?, designation=?, department=?, salary=?, status=?, user_id=?,
            aadhar_file        = COALESCE(?, aadhar_file),
            pan_file           = COALESCE(?, pan_file),
-           qualification_file = COALESCE(?, qualification_file)
+           qualification_file = COALESCE(?, qualification_file),
+           reporting_manager_id_1 = ?,
+           reporting_manager_id_2 = ?
      WHERE id=?
   `).run(name, phone, email, designation, department, salary, status, user_id || null,
-        aadhar_file || null, pan_file || null, qualification_file || null, req.params.id);
+        aadhar_file || null, pan_file || null, qualification_file || null,
+        mgr1, mgr2, req.params.id);
   res.json({ message: 'Updated' });
 });
 

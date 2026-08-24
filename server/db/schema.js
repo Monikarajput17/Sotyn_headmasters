@@ -1593,6 +1593,23 @@ function initializeDatabase() {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- Per-employee shift start/end + weekly off day, DATE-EFFECTIVE (not a
+    -- plain mutable field on employees). "Late" and "week off" are always
+    -- resolved by picking the row with the latest effective_from <= the
+    -- attendance date being judged — so changing a shift/week-off from a
+    -- future date never retroactively reclassifies past attendance.
+    CREATE TABLE IF NOT EXISTS employee_shifts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      employee_id INTEGER NOT NULL REFERENCES employees(id),
+      effective_from DATE NOT NULL,
+      shift_start TEXT,        -- 'HH:MM', NULL = fall back to global late_after_time
+      shift_end TEXT,          -- 'HH:MM'
+      week_off_day INTEGER,    -- 0=Sun..6=Sat, NULL = fall back to Sunday
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      created_by INTEGER REFERENCES users(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_employee_shifts_emp_eff ON employee_shifts(employee_id, effective_from);
+
     -- Payroll settings (single-row config, id=1). Admin tunes every rule
     -- here so salary auto-calc isn't hardcoded — late cutoff, half-day
     -- cutoff, leave allowances, working days, OT rate, etc.
@@ -3051,6 +3068,11 @@ function initializeDatabase() {
     ['employees', 'cl_eligible INTEGER DEFAULT 1'],
     ['employees', 'ot_eligible INTEGER DEFAULT 0'],
     ['employees', 'cl_opening_balance REAL DEFAULT 0'],
+    // Up to 2 reporting managers per employee (picked from other employees).
+    // Plain mutable columns (unlike shift/week-off) — leave approval should
+    // route to whoever manages the person NOW, not a historical manager.
+    ['employees', 'reporting_manager_id_1 INTEGER REFERENCES employees(id)'],
+    ['employees', 'reporting_manager_id_2 INTEGER REFERENCES employees(id)'],
     // can_see_all on role_permissions: explicit per-role-per-module toggle
     // for "scope = ALL records" vs "scope = OWN only". Decoupled from
     // can_approve so admin can grant a role full visibility without giving
@@ -4274,6 +4296,36 @@ function initializeDatabase() {
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch (e2) {}
     console.error('[migration] leave_requests CHECK relax failed:', e.message);
+  }
+
+  // Relax leave_requests.leave_type CHECK to include 'full_day'. Leave is
+  // being simplified to just Full Day / Half Day going forward — old rows
+  // (casual/sick/earned/short_leave/comp_off) are left in the CHECK and in
+  // the DB untouched so historical payroll runs don't recompute differently;
+  // new leave requests simply stop being created with those types. Same
+  // table-rebuild pattern as the short_leave relax above.
+  try {
+    const row = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='leave_requests'").get();
+    if (row && !/full_day/.test(row.sql)) {
+      try { db.exec('DROP TABLE IF EXISTS leave_requests_new'); } catch (_) {}
+      db.exec('BEGIN');
+      const newSql = row.sql
+        .replace(/CREATE TABLE(\s+IF NOT EXISTS)?\s+leave_requests/i, 'CREATE TABLE leave_requests_new')
+        .replace(/CHECK\s*\(\s*leave_type\s+IN\s*\([^)]*\)\s*\)/i,
+                 "CHECK(leave_type IN ('casual','sick','earned','half_day','short_leave','comp_off','full_day'))");
+      db.exec(newSql);
+      const oldCols = db.prepare("PRAGMA table_info(leave_requests)").all().map(c => c.name);
+      const newCols = db.prepare("PRAGMA table_info(leave_requests_new)").all().map(c => c.name);
+      const shared = oldCols.filter(c => newCols.includes(c)).join(', ');
+      db.exec(`INSERT INTO leave_requests_new (${shared}) SELECT ${shared} FROM leave_requests`);
+      db.exec('DROP TABLE leave_requests');
+      db.exec('ALTER TABLE leave_requests_new RENAME TO leave_requests');
+      db.exec('COMMIT');
+      console.log('[migration] leave_requests.leave_type CHECK relaxed to allow full_day');
+    }
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch (e2) {}
+    console.error('[migration] leave_requests full_day CHECK relax failed:', e.message);
   }
 
   // Relax indents.status CHECK to allow 'l1_approved' — the intermediate

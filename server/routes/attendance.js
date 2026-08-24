@@ -8,20 +8,23 @@ const { getEmailConfig } = require('../lib/email');
 // they can never drift apart. See server/lib/geofence.js for the rule that
 // stops weak indoor phone-GPS from falsely blocking on-site staff.
 const { haversine, evaluateGeofence, geoSettings } = require('../lib/geofence');
+const { getShiftHistory, resolveShift, resolveShiftForDate, lateCutoffMinutes, weekOffDow, employeeIdForUser } = require('../lib/shifts');
 const atUserEmail = (db, id) => { try { return db.prepare('SELECT email FROM users WHERE id=?').get(id)?.email || null; } catch { return null; } };
 const atDirector = () => { try { return getEmailConfig().director; } catch { return null; } };
 const router = express.Router();
 router.use(authMiddleware);
 
-// Late detection — read cutoff from payroll_settings (admin-tunable), fall
-// back to 09:46 IST. Returns true if `whenIso` (ISO string in UTC) lies
-// AFTER the IST cutoff for that day.
+// Late detection — cutoff is the punching employee's OWN shift start (as
+// effective on the punch date), falling back to payroll_settings.late_after_time
+// (admin-tunable global default, 09:46 IST) when that employee has no shift
+// configured yet. Returns true if `whenIso` (ISO string in UTC) lies AFTER
+// the IST cutoff for that day.
 //
 // The original implementation called new Date().getHours() which returns
 // UTC hours. On a UTC-running VPS this meant 10:23 IST = 04:53 UTC, so
 // `4 > 9` was false → no one got flagged late before 15:15 IST. Bug
 // affected every attendance row since deploy.
-function isPunchLate(db, whenIso) {
+function isPunchLate(db, whenIso, userId) {
   let cutoffMin = 9 * 60 + 46; // default 09:46 IST
   try {
     const ps = db.prepare('SELECT late_after_time FROM payroll_settings WHERE id=1').get();
@@ -34,6 +37,14 @@ function isPunchLate(db, whenIso) {
   // the shifted Date — those values are now the actual IST time-of-day.
   const ist = new Date(new Date(whenIso || Date.now()).getTime() + 5.5 * 60 * 60 * 1000);
   const istMin = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const dateStr = ist.toISOString().slice(0, 10);
+  try {
+    const empId = employeeIdForUser(db, userId);
+    if (empId) {
+      const shift = resolveShiftForDate(db, empId, dateStr);
+      cutoffMin = lateCutoffMinutes(shift, cutoffMin);
+    }
+  } catch {}
   return istMin > cutoffMin;
 }
 
@@ -88,7 +99,9 @@ router.get('/my-month', (req, res) => {
   // Pull configured late-cutoff from payroll_settings so the dashboard
   // late-count reflects mam's actual policy (e.g. 09:30) instead of the
   // hard-coded 09:45 from the punch-in flow. Falls back to 09:45 if the
-  // settings table doesn't exist yet on a stale DB.
+  // settings table doesn't exist yet on a stale DB. This is only the
+  // FALLBACK now — per-employee shift, resolved per-day below, takes
+  // priority whenever that employee has a shift configured for that date.
   let lateCutoffMin = 9 * 60 + 46;
   try {
     const ps = db.prepare(`SELECT late_after_time FROM payroll_settings WHERE id=1`).get();
@@ -97,6 +110,12 @@ router.get('/my-month', (req, res) => {
       lateCutoffMin = h * 60 + (m || 0);
     }
   } catch {}
+
+  // Shift/week-off history for this user's employee record, resolved
+  // per-day below so a shift change (or week-off change) only applies from
+  // its effective_from date onward — past days keep whatever applied then.
+  const empId = employeeIdForUser(db, req.user.id);
+  const shiftHistory = getShiftHistory(db, empId);
 
   // Build a per-day map of status. Key = YYYY-MM-DD.
   // Order of precedence: attendance row wins; else leave; else (past weekdays) absent; future = blank.
@@ -110,7 +129,11 @@ router.get('/my-month', (req, res) => {
     const dateStr = `${year}-${pad(month)}-${pad(d)}`;
     const dObj = new Date(dateStr);
     const dow = dObj.getDay(); // 0=Sun 6=Sat
-    const isWeekend = dow === 0;
+    // Resolve THIS employee's shift/week-off as it stood on dateStr — not
+    // today's shift — so a later shift change never relabels past days.
+    const dayShift = resolveShift(shiftHistory, dateStr);
+    const isWeekend = dow === weekOffDow(dayShift);
+    const dayLateCutoff = lateCutoffMinutes(dayShift, lateCutoffMin);
     const att = attendance.find(a => a.date === dateStr);
     // Is this day inside any approved leave range?
     const onLeave = leaves.find(l => dateStr >= l.from_date && dateStr <= l.to_date && l.leave_type !== 'short_leave');
@@ -118,17 +141,16 @@ router.get('/my-month', (req, res) => {
     if (att) {
       status = att.status;
       totalHours += +att.total_hours || 0;
-      // Re-classify as 'late' based on the configured late_after_time.
+      // Re-classify as 'late' based on this employee's cutoff for that day.
       // CRITICAL: punch_in_time is stored as UTC ISO. To compare against
-      // the IST cutoff (09:45 IST), shift to IST first. Bug before this
-      // fix: getHours() returned UTC hours so 10:23 IST (= 04:53 UTC)
-      // was read as '4:53', never exceeded the 9:45 cutoff, dashboard
-      // showed Late=0 for everyone in the morning shift.
+      // the IST cutoff, shift to IST first. Bug before this fix: getHours()
+      // returned UTC hours so 10:23 IST (= 04:53 UTC) was read as '4:53',
+      // never exceeded the cutoff, dashboard showed Late=0 for everyone.
       if (status === 'present' && att.punch_in_time) {
         const piIst = new Date(new Date(att.punch_in_time).getTime() + 5.5 * 60 * 60 * 1000);
         if (!isNaN(piIst)) {
           const piMin = piIst.getUTCHours() * 60 + piIst.getUTCMinutes();
-          if (piMin > lateCutoffMin) status = 'late';
+          if (piMin > dayLateCutoff) status = 'late';
         }
       }
     } else if (onLeave) {
@@ -195,7 +217,7 @@ router.get('/my-month', (req, res) => {
     const d = new Date(weekStart); d.setDate(d.getDate() + i);
     const ds = d.toISOString().slice(0, 10);
     const dObj = new Date(ds);
-    const isWeekend = d.getDay() === 0;
+    const isWeekend = d.getDay() === weekOffDow(resolveShift(shiftHistory, ds));
     const att = weekAttendance.find(a => a.date === ds);
     const leave = weekLeaves.find(l => ds >= l.from_date && ds <= l.to_date);
     let status;
@@ -403,12 +425,22 @@ router.get('/grid', (req, res) => {
   for (let d = 1; d <= lastDay; d++) {
     const dateStr = `${month}-${gpad(d)}`;
     const dow = new Date(y, m - 1, d).getDay();
+    // `sunday` here is just the calendar-Sunday column highlight in the grid
+    // header — the actual per-employee week-off status used below is
+    // resolved per row/day since it now varies by employee.
     days.push({ date: dateStr, d, dow, sunday: dow === 0, future: dateStr > todayStr });
   }
 
   const employees = db.prepare(
     `SELECT id, name, user_id FROM employees WHERE (status IS NULL OR status='active') ORDER BY name`
   ).all();
+  // Shift/week-off history for every employee at once (one query, grouped
+  // in JS) so week-off is judged per-employee-per-day, not one global Sunday.
+  const shiftHistoryByEmp = new Map();
+  for (const row of db.prepare(`SELECT * FROM employee_shifts ORDER BY effective_from ASC, id ASC`).all()) {
+    if (!shiftHistoryByEmp.has(row.employee_id)) shiftHistoryByEmp.set(row.employee_id, []);
+    shiftHistoryByEmp.get(row.employee_id).push(row);
+  }
   const activeUsers = db.prepare(`SELECT id, name FROM users WHERE active=1`).all();
   const usersById = new Map(activeUsers.map(u => [u.id, u]));
   const linkedUserIds = new Set(employees.map(e => e.user_id).filter(Boolean));
@@ -443,17 +475,19 @@ router.get('/grid', (req, res) => {
 
   const rows = employees.map(e => {
     const cells = {};
+    const empHistory = shiftHistoryByEmp.get(e.id) || [];
     if (e.user_id) {
       const leaves = leavesByUser.get(e.user_id) || [];
       for (const day of days) {
         const att = attByUserDate.get(`${e.user_id}|${day.date}`);
+        const isWeekOff = day.dow === weekOffDow(resolveShift(empHistory, day.date));
         let status = '', source = '';
         if (att) {
           status = String(att.status || '').toLowerCase();
           source = att.admin_marked ? 'admin' : 'punch';
         } else if (leaves.some(l => day.date >= l.from_date && day.date <= l.to_date)) {
           status = 'leave'; source = 'leave';
-        } else if (day.sunday) {
+        } else if (isWeekOff) {
           status = 'sunday'; source = 'auto';
         } else if (!day.future) {
           status = 'absent'; source = 'implicit';
@@ -496,12 +530,15 @@ router.post('/admin-mark-bulk', (req, res) => {
     `INSERT INTO attendance (user_id, date, status, admin_marked, marked_by, total_hours) VALUES (?,?,?,1,?,?)`
   );
   const hrs = status === 'half_day' ? 4 : status === 'present' ? 8 : 0;
+  const empId = employeeIdForUser(db, user_id);
+  const shiftHistory = getShiftHistory(db, empId);
   let marked = 0;
   const tx = db.transaction(() => {
     for (let d = 1; d <= lastDay; d++) {
       const dateStr = `${month}-${gpad(d)}`;
       if (dateStr > todayStr) continue;
-      if (new Date(y, m - 1, d).getDay() === 0) continue;   // skip Sundays (auto-paid)
+      const dow = new Date(y, m - 1, d).getDay();
+      if (dow === weekOffDow(resolveShift(shiftHistory, dateStr))) continue; // skip this employee's week-off (auto-paid)
       if (existing.has(dateStr)) continue;                  // never overwrite a punch/admin row
       ins.run(user_id, dateStr, status, req.user.id, hrs);
       marked++;
@@ -562,7 +599,7 @@ router.post('/punch-in', (req, res) => {
   // Check if late — uses IST timezone + payroll_settings.late_after_time.
   // Fixes the UTC-vs-IST bug where 10:23 IST (04:53 UTC) was treated as
   // not-late because getHours() on UTC-running VPS returned 4.
-  const isLate = isPunchLate(db, now);
+  const isLate = isPunchLate(db, now, req.user.id);
 
   const r = db.prepare(`INSERT INTO attendance (user_id, date, punch_in_time, punch_in_lat, punch_in_lng, punch_in_address, punch_in_photo, site_name, status, punch_in_accuracy, location_verified)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(req.user.id, today, now, latitude, longitude, address, photo, matchedSite, isLate ? 'late' : 'present', accuracy || null, geo.verified);
@@ -861,43 +898,55 @@ router.get('/report', requirePermission('attendance', 'view'), (req, res) => {
   res.json(report);
 });
 
-// Leave requests (with short leave timing + monthly 4hr limit)
+// user_ids of the employees who report to managerUserId (via
+// reporting_manager_id_1/_2, resolved through employees.user_id).
+function getDirectReportUserIds(db, managerUserId) {
+  if (!managerUserId) return [];
+  const mgrEmp = db.prepare('SELECT id FROM employees WHERE user_id=?').get(managerUserId);
+  if (!mgrEmp) return [];
+  return db.prepare(
+    `SELECT user_id FROM employees WHERE user_id IS NOT NULL AND (reporting_manager_id_1=? OR reporting_manager_id_2=?)`
+  ).all(mgrEmp.id, mgrEmp.id).map(r => r.user_id);
+}
+
+function canApproveLeaves(db, userId) {
+  const r = db.prepare(`
+    SELECT MAX(CASE WHEN rp.can_approve = 1 THEN 1 ELSE 0 END) as ok
+    FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
+    WHERE ur.user_id = ? AND rp.module = 'attendance'
+  `).get(userId);
+  return !!r?.ok;
+}
+
+// Leave requests — simplified to Full Day / Half Day only (mam: "no casual
+// leave, no earned leave, no short leave. leave is only full day or half
+// day"). Historical rows of the old types stay untouched; new requests only
+// ever use these two.
 router.post('/leave', (req, res) => {
-  const { leave_type, from_date, to_date, from_time, to_time, reason } = req.body;
+  const { leave_type, from_date, reason } = req.body;
+  let { to_date } = req.body;
   if (!from_date) return res.status(400).json({ error: 'Date required' });
+  if (!['full_day', 'half_day'].includes(leave_type)) {
+    return res.status(400).json({ error: 'Leave type must be Full Day or Half Day' });
+  }
   const db = getDb();
 
-  let days = 1;
-  let hours = 0;
-  if (leave_type === 'short_leave') {
-    if (!from_time || !to_time) return res.status(400).json({ error: 'Time required for short leave' });
-    // Calculate hours
-    const [fh, fm] = from_time.split(':').map(Number);
-    const [th, tm] = to_time.split(':').map(Number);
-    hours = (th + tm / 60) - (fh + fm / 60);
-    if (hours <= 0) return res.status(400).json({ error: 'Invalid time range' });
-
-    // Check monthly limit (4 hours)
-    const monthStart = from_date.substring(0, 7) + '-01';
-    const monthEnd = from_date.substring(0, 7) + '-31';
-    const used = db.prepare("SELECT COALESCE(SUM(hours),0) as total FROM leave_requests WHERE user_id=? AND leave_type='short_leave' AND status != 'rejected' AND from_date BETWEEN ? AND ?")
-      .get(req.user.id, monthStart, monthEnd);
-    if ((used.total + hours) > 4) {
-      return res.status(400).json({ error: `Monthly short leave limit is 4 hours. You have used ${used.total}h. Remaining: ${Math.max(0, 4 - used.total)}h` });
-    }
-    days = 0;
+  let days;
+  if (leave_type === 'half_day') {
+    to_date = from_date; // half day is always a single day
+    days = 0.5;
   } else {
     if (!to_date) return res.status(400).json({ error: 'To date required' });
     days = Math.ceil((new Date(to_date) - new Date(from_date)) / (1000 * 60 * 60 * 24)) + 1;
   }
 
-  const r = db.prepare('INSERT INTO leave_requests (user_id, leave_type, from_date, to_date, days, hours, from_time, to_time, reason) VALUES (?,?,?,?,?,?,?,?,?)')
-    .run(req.user.id, leave_type || 'casual', from_date, to_date || from_date, days, hours, from_time, to_time, reason);
+  const r = db.prepare('INSERT INTO leave_requests (user_id, leave_type, from_date, to_date, days, hours, reason) VALUES (?,?,?,?,?,0,?)')
+    .run(req.user.id, leave_type, from_date, to_date, days, reason);
   fireEmailEvent('leave.requested', {
     employee: req.user.name || '',
-    leave_type: leave_type || 'casual',
+    leave_type,
     from_date: from_date,
-    to_date: to_date || from_date,
+    to_date: to_date,
     days: String(days),
     reason: reason || '',
     date: new Date().toISOString().slice(0, 10),
@@ -908,9 +957,11 @@ router.post('/leave', (req, res) => {
 });
 
 router.get('/leaves', requirePermission('attendance', 'view'), (req, res) => {
-  // Scope rule: approver / admin sees every leave request. Plain users
-  // (no can_approve on attendance) see only their own. Mam toggles this
-  // via "approve" checkbox in Roles & Permissions for the role.
+  // Scope rule: admin / anyone with attendance.can_approve or can_see_all
+  // sees every leave request. A reporting manager additionally sees their
+  // OWN direct reports' requests even without that blanket permission.
+  // Everyone else sees only their own. Mam: manager OR admin/HR can approve
+  // — both paths, not manager-only.
   const db = getDb();
   const isAdmin = req.user.role === 'admin';
   const canSeeAll = isAdmin || (() => {
@@ -921,8 +972,19 @@ router.get('/leaves', requirePermission('attendance', 'view'), (req, res) => {
     `).get(req.user.id);
     return !!r?.ok;
   })();
-  const where = canSeeAll ? '' : 'WHERE lr.user_id = ?';
-  const params = canSeeAll ? [] : [req.user.id];
+
+  let where = 'WHERE lr.user_id = ?';
+  let params = [req.user.id];
+  if (canSeeAll) {
+    where = ''; params = [];
+  } else {
+    const reportIds = getDirectReportUserIds(db, req.user.id);
+    if (reportIds.length) {
+      const ph = reportIds.map(() => '?').join(',');
+      where = `WHERE lr.user_id = ? OR lr.user_id IN (${ph})`;
+      params = [req.user.id, ...reportIds];
+    }
+  }
   res.json(db.prepare(`
     SELECT lr.*, u.name as user_name
       FROM leave_requests lr
@@ -932,12 +994,20 @@ router.get('/leaves', requirePermission('attendance', 'view'), (req, res) => {
   `).all(...params));
 });
 
-router.put('/leave/:id/approve', requirePermission('attendance', 'approve'), (req, res) => {
+router.put('/leave/:id/approve', (req, res) => {
   const { status, remarks } = req.body;
   const db = getDb();
+  const lr = db.prepare('SELECT lr.user_id, lr.leave_type, u.name FROM leave_requests lr LEFT JOIN users u ON u.id=lr.user_id WHERE lr.id=?').get(req.params.id);
+  if (!lr) return res.status(404).json({ error: 'Leave request not found' });
+
+  const isAdmin = req.user.role === 'admin';
+  const isManager = getDirectReportUserIds(db, req.user.id).includes(lr.user_id);
+  if (!isAdmin && !isManager && !canApproveLeaves(db, req.user.id)) {
+    return res.status(403).json({ error: 'Only the reporting manager or an attendance approver can decide this leave' });
+  }
+
   db.prepare('UPDATE leave_requests SET status=?, approved_by=?, remarks=? WHERE id=?')
     .run(status, req.user.id, remarks, req.params.id);
-  const lr = db.prepare('SELECT lr.user_id, lr.leave_type, u.name FROM leave_requests lr LEFT JOIN users u ON u.id=lr.user_id WHERE lr.id=?').get(req.params.id);
   fireEmailEvent('leave.decided', {
     employee: lr?.name || '',
     leave_type: lr?.leave_type || '',
@@ -1007,7 +1077,7 @@ function runAutoPunchCheck() {
 
     if (!attendance && allInside) {
       // Same IST-aware late check as manual punch-in.
-      const isLate = isPunchLate(db, now);
+      const isLate = isPunchLate(db, now, user_id);
       try {
         db.prepare(`INSERT INTO attendance
           (user_id, date, punch_in_time, punch_in_lat, punch_in_lng, punch_in_address, site_name, status, auto_punched_in)

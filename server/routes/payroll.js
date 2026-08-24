@@ -15,6 +15,7 @@ const express = require('express');
 const router = express.Router();
 const { getDb } = require('../db/schema');
 const { authMiddleware, requirePermission, adminOnly } = require('../middleware/auth');
+const { getShiftHistory, resolveShift, lateCutoffMinutes, weekOffDow } = require('../lib/shifts');
 
 router.use(authMiddleware);
 
@@ -246,12 +247,21 @@ function calculateForEmployee(db, settings, employee, month) {
   const breakdown = []; // per-day for slip
   const lateDays = []; // [{date, minutes_late, applies_penalty: bool}]
 
-  const lateAfter = timeToMinutes(settings.late_after_time);
+  const globalLateAfter = timeToMinutes(settings.late_after_time);
   const halfDayAfter = timeToMinutes(settings.half_day_after_time);
+  // This employee's shift/week-off history, resolved PER DAY below so a
+  // shift change only applies from its effective_from date onward — a past
+  // month's payroll never recomputes differently because the shift changed
+  // later.
+  const shiftHistory = getShiftHistory(db, employee.id);
 
   for (let day = 1; day <= lastDay; day++) {
     const dateStr = `${year}-${pad(mm)}-${pad(day)}`;
-    const sun = isSunday(year, mm, day);
+    const dayShift = resolveShift(shiftHistory, dateStr);
+    const lateAfter = lateCutoffMinutes(dayShift, globalLateAfter);
+    // This employee's own week-off day as of dateStr (defaults to Sunday
+    // when no shift/week-off has ever been configured for them).
+    const sun = new Date(year, mm - 1, day).getDay() === weekOffDow(dayShift);
     const att = attByDate[dateStr];
     const leaveType = leaveByDate[dateStr];
     const isShortLeave = !!shortLeaveByDate[dateStr];
@@ -259,7 +269,7 @@ function calculateForEmployee(db, settings, employee, month) {
     let dayLabel = 'absent';
     let dayPay = 0; // 1 = full, 0.5 = half, 0 = absent
 
-    // Sunday
+    // Week-off day (Sunday by default, or this employee's configured day)
     if (sun && !leaveType && !att) {
       if (settings.sundays_paid) {
         dayPay = 1;
@@ -268,7 +278,7 @@ function calculateForEmployee(db, settings, employee, month) {
       } else {
         dayLabel = 'sunday_unpaid';
       }
-      breakdown.push({ date: dateStr, day: 'Sun', label: dayLabel, pay: dayPay });
+      breakdown.push({ date: dateStr, day: dayName(year, mm, day), label: dayLabel, pay: dayPay });
       paidDays += dayPay;
       continue;
     }
@@ -276,8 +286,10 @@ function calculateForEmployee(db, settings, employee, month) {
     // Approved leave that day
     if (leaveType) {
       let paid = false;
-      if (leaveType === 'casual') {
-        // 1 paid casual leave per month per staff (mam 2026-06-09).
+      if (leaveType === 'casual' || leaveType === 'full_day') {
+        // 1 paid casual/full-day leave per month per staff (mam 2026-06-09).
+        // 'full_day' is the new leave-type name going forward — it draws
+        // from the same CL allowance 'casual' already used.
         if ((settings.cl_per_month || 0) > 0 && clUsed < settings.cl_per_month) { paid = true; clUsed += 1; }
       } else if (leaveType === 'sick') {
         if ((settings.sl_per_month || 0) > 0 && slUsed < settings.sl_per_month) { paid = true; slUsed += 1; }
