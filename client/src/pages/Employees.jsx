@@ -142,13 +142,6 @@ export default function Employees() {
       const url = await uploadFile(form._qualification_file); if (!url) return;
       payload.qualification_file = url;
     }
-    // Required-on-create — backend will also reject, but checking here lets
-    // mam see the error before the upload spinner spins.
-    if (!editing) {
-      if (!payload.aadhar_file)        return toast.error('Upload Aadhar card');
-      if (!payload.pan_file)           return toast.error('Upload PAN card');
-      if (!payload.qualification_file) return toast.error('Upload Highest qualification certificate');
-    }
     try {
       if (editing) {
         await api.put(`/hr/employees/${editing.id}`, payload);
@@ -486,16 +479,16 @@ export default function Employees() {
             </div>
           )}
 
-          {/* Mandatory KYC docs for new employees. When editing, the inputs
-              show "Existing: view file" if a doc URL is already on file —
-              uploading a new one replaces it. Three docs: Aadhar, PAN,
-              Highest qualification certificate. */}
+          {/* KYC docs — optional. When editing, the inputs show "Existing:
+              view file" if a doc URL is already on file — uploading a new
+              one replaces it. Three docs: Aadhar, PAN, Highest qualification
+              certificate. */}
           <div className="card p-3 bg-amber-50/40 border-l-4 border-amber-400 space-y-3">
-            <div className="text-xs font-semibold text-amber-800 uppercase tracking-wide">Mandatory documents{editing ? '' : ' *'}</div>
+            <div className="text-xs font-semibold text-amber-800 uppercase tracking-wide">Documents <span className="text-gray-400 font-normal normal-case">(optional)</span></div>
             {[
-              { key: 'aadhar_file',        slot: '_aadhar_file',        label: 'Aadhar Card *' },
-              { key: 'pan_file',           slot: '_pan_file',           label: 'PAN Card *' },
-              { key: 'qualification_file', slot: '_qualification_file', label: 'Highest Qualification Certificate *' },
+              { key: 'aadhar_file',        slot: '_aadhar_file',        label: 'Aadhar Card' },
+              { key: 'pan_file',           slot: '_pan_file',           label: 'PAN Card' },
+              { key: 'qualification_file', slot: '_qualification_file', label: 'Highest Qualification Certificate' },
             ].map(({ key, slot, label }) => (
               <div key={key}>
                 <label className="label">{label} <span className="text-gray-400 font-normal text-[10px]">(PDF / JPG / PNG, max 10 MB)</span></label>
@@ -503,7 +496,6 @@ export default function Employees() {
                   className="input"
                   type="file"
                   accept=".pdf,.jpg,.jpeg,.png"
-                  required={!editing && !form[key]}
                   onChange={e => setForm({ ...form, [slot]: e.target.files?.[0] || null })}
                 />
                 {/* Existing URL link when editing */}

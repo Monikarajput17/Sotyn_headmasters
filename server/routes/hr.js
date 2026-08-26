@@ -751,11 +751,8 @@ router.post('/employees', requirePermission('employees', 'create'), (req, res) =
     const u = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
     if (u) user_id = u.id;
   }
-  // Mandatory documents for NEW employees (not enforced on bulk import or
-  // legacy edits — those keep working without docs).
-  if (!aadhar_file)        return res.status(400).json({ error: 'Aadhar card is required' });
-  if (!pan_file)           return res.status(400).json({ error: 'PAN card is required' });
-  if (!qualification_file) return res.status(400).json({ error: 'Highest qualification certificate is required' });
+  // KYC docs (Aadhar/PAN/qualification) are optional — can be added later
+  // from Edit once the employee has time to bring them in.
   const r = db.prepare(`
     INSERT INTO employees (user_id,name,phone,email,designation,department,join_date,salary,
                            aadhar_file, pan_file, qualification_file,
