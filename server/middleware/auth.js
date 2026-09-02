@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 // JWT signing/verification secret — resolved ONCE and PERSISTED so it stays
 // identical across every restart and redeploy. It used to be read inline as
@@ -7,27 +7,43 @@ const { getDb } = require('../db/schema');
 // load .env (pm2 caches the env from the first `pm2 start`, or a boot fell
 // back to the default), the effective secret FLIPPED and every already-issued
 // token instantly became "Invalid token" → users were logged out after each
-// deploy (mam, repeatedly). We now store the secret in app_settings on first
-// boot and read it back forever, so the secret can never change underneath
-// live sessions, no matter how the process is started.
+// deploy (mam, repeatedly). The secret is stored in app_settings on first
+// boot and read back forever, so it can never change underneath live sessions.
+//
+// Supabase migration note: the persisted copy now lives in Postgres. Because
+// Postgres reads are async but getSecret() has synchronous callers (index.js
+// boot warm-up, chatSocket, backups), the sync getter returns the env seed
+// until the async warm-up below has fetched/persisted the authoritative
+// value. Both are identical in practice (the PG row was seeded from the same
+// .env), so the tiny warm-up window can't invalidate tokens.
 let _secret = null;
 function getSecret() {
-  if (_secret) return _secret;
-  const seed = process.env.JWT_SECRET || 'erp-secret-key-change-in-production';
-  try {
-    const db = getDb();
-    db.exec('CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)');
-    const row = db.prepare("SELECT value FROM app_settings WHERE key='jwt_secret'").get();
-    if (row && row.value) { _secret = row.value; return _secret; }
-    db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('jwt_secret', ?)").run(seed);
-    _secret = seed;
-    return _secret;
-  } catch (_) {
-    // DB not ready yet — use the seed for now and DON'T memoize, so the next
-    // call (once the DB is up) persists and locks it in.
-    return seed;
-  }
+  return _secret || process.env.JWT_SECRET || 'erp-secret-key-change-in-production';
 }
+
+let _warmPromise = null;
+function warmSecret() {
+  if (_warmPromise) return _warmPromise;
+  _warmPromise = (async () => {
+    const seed = process.env.JWT_SECRET || 'erp-secret-key-change-in-production';
+    try {
+      const row = await pg.get("SELECT value FROM app_settings WHERE key='jwt_secret'");
+      if (row && row.value) { _secret = row.value; return; }
+      await pg.run(
+        "INSERT INTO app_settings (key, value) VALUES ('jwt_secret', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        seed
+      );
+      _secret = seed;
+    } catch (e) {
+      // DB not reachable yet — keep serving the env seed; a later call may
+      // still lock in the persisted value.
+      _warmPromise = null;
+      console.warn('[auth] jwt secret warm-up from Postgres failed (using env seed):', e.message);
+    }
+  })();
+  return _warmPromise;
+}
+warmSecret();
 
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -39,7 +55,7 @@ function authMiddleware(req, res, next) {
     // ... very bad"). While the user is active, keep handing back a fresh
     // token once the current one is more than a day old, so an active user
     // never gets logged out. Only a session idle for the full token lifetime
-    // (7 days) expires. The client swaps the token in via the response header.
+    // expires. The client swaps the token in via the response header.
     try {
       const now = Math.floor(Date.now() / 1000);
       // Roll the token forward whenever it's more than a day old, so any active
@@ -61,8 +77,8 @@ function authMiddleware(req, res, next) {
     // Diagnostic (mam 2026-06-25, "Nitin Jain logs in then logs out"): record
     // WHY a token was rejected so a real production logout can be traced to its
     // exact cause instead of guessed at:
-    //   TokenExpiredError  → token genuinely aged past 7 days (sliding session
-    //                        not reaching this user — e.g. a long-idle tab)
+    //   TokenExpiredError  → token genuinely aged past its lifetime (sliding
+    //                        session not reaching this user — e.g. a long-idle tab)
     //   JsonWebTokenError  → bad signature = the token was signed with a
     //                        DIFFERENT secret (a stale browser token from
     //                        before the secret was persisted) → one clean
@@ -85,45 +101,49 @@ function adminOnly(req, res, next) {
   next();
 }
 
-// Permission check middleware factory
+// Permission check middleware factory (async since the Supabase migration —
+// Express handles async middleware fine; errors are caught and 500'd).
 function requirePermission(module, action) {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     // Admin role always has full access
     if (req.user.role === 'admin') return next();
+    try {
+      // Get user's role permissions
+      const perms = await pg.get(`
+        SELECT rp.* FROM role_permissions rp
+        JOIN user_roles ur ON rp.role_id = ur.role_id
+        WHERE ur.user_id = ? AND rp.module = ?
+      `, req.user.id, module);
 
-    const db = getDb();
-    // Get user's role permissions
-    const perms = db.prepare(`
-      SELECT rp.* FROM role_permissions rp
-      JOIN user_roles ur ON rp.role_id = ur.role_id
-      WHERE ur.user_id = ? AND rp.module = ?
-    `).get(req.user.id, module);
+      if (!perms) {
+        return res.status(403).json({ error: `No access to ${module}` });
+      }
 
-    if (!perms) {
-      return res.status(403).json({ error: `No access to ${module}` });
+      const actionMap = {
+        view: 'can_view',
+        create: 'can_create',
+        edit: 'can_edit',
+        delete: 'can_delete',
+        approve: 'can_approve',
+      };
+
+      const field = actionMap[action];
+      if (!field || !perms[field]) {
+        return res.status(403).json({ error: `No ${action} permission for ${module}` });
+      }
+
+      next();
+    } catch (e) {
+      console.error('[auth] permission check failed:', e.message);
+      res.status(500).json({ error: 'Permission check failed' });
     }
-
-    const actionMap = {
-      view: 'can_view',
-      create: 'can_create',
-      edit: 'can_edit',
-      delete: 'can_delete',
-      approve: 'can_approve',
-    };
-
-    const field = actionMap[action];
-    if (!field || !perms[field]) {
-      return res.status(403).json({ error: `No ${action} permission for ${module}` });
-    }
-
-    next();
   };
 }
 
-// Get all permissions for a user (used by frontend)
-function getUserPermissions(userId) {
-  const db = getDb();
-  const user = db.prepare('SELECT role FROM users WHERE id = ?').get(userId);
+// Get all permissions for a user (used by frontend). ASYNC since the
+// Supabase migration — no sync callers exist outside this module.
+async function getUserPermissions(userId) {
+  const user = await pg.get('SELECT role FROM users WHERE id = ?', userId);
 
   if (user?.role === 'admin') {
     // Admin gets everything
@@ -139,12 +159,12 @@ function getUserPermissions(userId) {
     return perms;
   }
 
-  const rows = db.prepare(`
+  const rows = await pg.all(`
     SELECT rp.module, rp.can_view, rp.can_create, rp.can_edit, rp.can_delete, rp.can_approve, rp.can_see_all
     FROM role_permissions rp
     JOIN user_roles ur ON rp.role_id = ur.role_id
     WHERE ur.user_id = ?
-  `).all(userId);
+  `, userId);
 
   const perms = {};
   for (const r of rows) {
