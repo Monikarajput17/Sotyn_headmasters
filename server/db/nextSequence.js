@@ -32,4 +32,27 @@ function nextSequence(db, table, column, prefix, { startFrom = 0, pad = 0 } = {}
   return pad > 0 ? `${prefix}${String(next).padStart(pad, '0')}` : `${prefix}${next}`;
 }
 
-module.exports = { nextSequence };
+// Async Postgres variant — same contract, takes the pg adapter (or a
+// tx-bound `t` from pg.tx) instead of the sqlite handle. Call it INSIDE the
+// same transaction as the insert so two concurrent creators can't both read
+// the same max (the row insert's UNIQUE constraint is the final guarantee).
+async function nextSequencePg(t, table, column, prefix, { startFrom = 0, pad = 0 } = {}) {
+  const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rows = await t.all(
+    `SELECT ${column} as v FROM ${table} WHERE ${column} IS NOT NULL AND ${column} LIKE ?`,
+    prefix + '%'
+  );
+  const re = new RegExp('^' + esc + '(\\d+)');
+  let maxNum = startFrom;
+  for (const r of rows) {
+    const m = String(r.v || '').match(re);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+  }
+  const next = maxNum + 1;
+  return pad > 0 ? `${prefix}${String(next).padStart(pad, '0')}` : `${prefix}${next}`;
+}
+
+module.exports = { nextSequence, nextSequencePg };

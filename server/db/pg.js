@@ -71,7 +71,11 @@ function toPositional(sql) {
     if (ch === '?') { out += '$' + (++n); continue; }
     out += ch;
   }
-  return out;
+  // SQLite let `SET some_text_col = CURRENT_TIMESTAMP` slide; Postgres
+  // refuses timestamptz→text assignment. All migrated datetime columns are
+  // text, so rewrite the keyword to the same UTC text the schema defaults
+  // produce ('YYYY-MM-DD HH:MM:SS', matching SQLite's format exactly).
+  return out.replace(/\bCURRENT_TIMESTAMP\b/gi, "to_char(now() at time zone 'utc', 'YYYY-MM-DD HH24:MI:SS')");
 }
 
 function normalize(e) {
