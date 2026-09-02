@@ -105,7 +105,7 @@ export const authMiddleware: Handler = async (req, res, next) => {
     }
     console.error("[auth] verification infrastructure error:", (e as Error).message);
     res.setHeader("Retry-After", "2");
-    res.status(503).json({ error: "Authentication temporarily unavailable — please retry" });
+    res.status(503).json({ error: "Authentication temporarily unavailable — please retry", detail: String((e as Error).message || e).slice(0, 200) });
   }
 };
 

@@ -13,9 +13,31 @@ import postgres from "postgres";
 const url = Deno.env.get("DB_POOL_URL") ?? Deno.env.get("SUPABASE_DB_URL") ?? "";
 if (!url) console.error("[pg] DB_POOL_URL / SUPABASE_DB_URL not set");
 
+// Concurrency gate. postgres.js on Deno loses queued queries when more
+// simple-protocol (parameter-less) queries are in flight than there are
+// connections (verified 2026-09-02: 14 parallel `select … limit 3` with
+// max=4 → only 4–10 ever resolve; forcing the extended protocol is 14/14).
+// So we never let it queue: at most POOL_MAX queries/transactions run at
+// once and the rest wait here, in our own FIFO, until a slot frees.
+const POOL_MAX = 6;
+let slots = POOL_MAX;
+const waiters: Array<() => void> = [];
+async function acquire(): Promise<() => void> {
+  if (slots > 0) { slots--; }
+  else await new Promise<void>((resolve) => waiters.push(resolve)).then(() => { slots--; });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    slots++;
+    const next = waiters.shift();
+    if (next) next();
+  };
+}
+
 const sql = postgres(url, {
   prepare: false,           // transaction pooler
-  max: 4,
+  max: POOL_MAX,
   idle_timeout: 20,
   connect_timeout: 15,
   ssl: "require",
@@ -84,9 +106,12 @@ let spCounter = 0;
 function makeApi(runner: any, inTx: boolean): Db {
   // deno-lint-ignore no-explicit-any
   const q = async (text: string, params: any[] = []) => {
+    // Inside a transaction the runner is a dedicated connection — no gate.
+    const release = inTx ? null : await acquire();
     try {
       return await runner.unsafe(toPositional(text), params.map((p) => (p === undefined ? null : p)));
     } catch (e) { throw normalize(e); }
+    finally { if (release) release(); }
   };
   const self: Db = {
     all: async (text, ...params) => Array.from(await q(text, params)),
@@ -124,8 +149,11 @@ function makeApi(runner: any, inTx: boolean): Db {
     },
     tx: async (fn) => {
       if (inTx) return fn(self); // nested → same tx
-      // deno-lint-ignore no-explicit-any
-      return await sql.begin(async (t: any) => fn(makeApi(t, true))) as Awaited<ReturnType<typeof fn>>;
+      const release = await acquire();   // a tx holds one connection for its whole life
+      try {
+        // deno-lint-ignore no-explicit-any
+        return await sql.begin(async (t: any) => fn(makeApi(t, true))) as Awaited<ReturnType<typeof fn>>;
+      } finally { release(); }
     },
   };
   return self;
