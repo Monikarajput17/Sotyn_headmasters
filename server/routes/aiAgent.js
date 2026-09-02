@@ -6,7 +6,7 @@
 //   (3) Ask ERP chatbot    — /ask (Claude + read-only SQL tool)
 
 const express = require('express');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const router = express.Router();
 router.use(authMiddleware);
@@ -15,13 +15,13 @@ router.use(authMiddleware);
 //   ai_provider  — 'anthropic' (only one for now)
 //   ai_api_key   — the secret (server-side only; masked in GET)
 //   ai_model     — model id (default claude-opus-4-7)
-function getSetting(key) {
-  const row = getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(key);
+async function getSetting(key) {
+  const row = await pg.get('SELECT value FROM app_settings WHERE key=?', key);
   return row?.value ?? null;
 }
-function setSetting(key, value) {
-  getDb().prepare(`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`).run(key, value);
+async function setSetting(key, value) {
+  await pg.run(`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`, key, value);
 }
 function adminOnly(req, res, next) {
   if (req.user?.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
@@ -32,43 +32,46 @@ function adminOnly(req, res, next) {
 // Returns last-quoted-to-this-client + 6-month stats across all clients.
 // Both null when no history exists for that item (UI hides the panel).
 // Gated by 'quotations' perms — the popup only renders inside the BOQ form.
-router.get('/rate-suggestion', requirePermission('quotations', 'view'), (req, res) => {
+router.get('/rate-suggestion', requirePermission('quotations', 'view'), async (req, res) => {
+  try {
   const itemId = +req.query.item_id;
   const leadId = req.query.lead_id ? +req.query.lead_id : null;
   if (!itemId) return res.status(400).json({ error: 'item_id required' });
-
-  const db = getDb();
 
   // Pull this client's company_name so we can match historical rows
   // even if a different lead from the same client quoted before.
   let companyName = null;
   if (leadId) {
-    const lead = db.prepare('SELECT company_name FROM leads WHERE id=?').get(leadId);
+    const lead = await pg.get('SELECT company_name FROM leads WHERE id=?', leadId);
     companyName = lead?.company_name || null;
   }
 
   const lastForClient = companyName
-    ? db.prepare(`SELECT rate, created_at, created_by_name, quantity
+    ? await pg.get(`SELECT rate, created_at, created_by_name, quantity
                   FROM item_price_history
                   WHERE item_id=? AND company_name=?
-                  ORDER BY created_at DESC LIMIT 1`).get(itemId, companyName)
+                  ORDER BY created_at DESC LIMIT 1`, itemId, companyName)
     : null;
 
-  // 6-month window across all clients
-  const stats = db.prepare(`SELECT
+  // 6-month window across all clients (cutoff computed in JS — UTC text,
+  // same format SQLite's datetime('now','-6 months') produced)
+  const sixMoAgo = new Date();
+  sixMoAgo.setUTCMonth(sixMoAgo.getUTCMonth() - 6);
+  const sixMoCutoff = sixMoAgo.toISOString().slice(0, 19).replace('T', ' ');
+  const stats = await pg.get(`SELECT
       COUNT(*) AS n,
       AVG(rate) AS avg_rate,
       MIN(rate) AS min_rate,
       MAX(rate) AS max_rate
     FROM item_price_history
-    WHERE item_id=? AND created_at >= datetime('now', '-6 months')`).get(itemId);
+    WHERE item_id=? AND created_at >= ?`, itemId, sixMoCutoff);
 
-  const lastOverall = db.prepare(`SELECT rate, created_at, created_by_name, company_name
+  const lastOverall = await pg.get(`SELECT rate, created_at, created_by_name, company_name
                                   FROM item_price_history
                                   WHERE item_id=?
-                                  ORDER BY created_at DESC LIMIT 1`).get(itemId);
+                                  ORDER BY created_at DESC LIMIT 1`, itemId);
 
-  const item = db.prepare('SELECT id, item_name, current_price FROM item_master WHERE id=?').get(itemId);
+  const item = await pg.get('SELECT id, item_name, current_price FROM item_master WHERE id=?', itemId);
 
   res.json({
     item,
@@ -82,22 +85,25 @@ router.get('/rate-suggestion', requirePermission('quotations', 'view'), (req, re
     } : null,
     company_name: companyName,
   });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET /api/ai-agent/item-history?item_id=&limit=20
 // Full historical log for an item — used by the AI Agent page (later)
 // and useful for "show me the rate trend" view.
-router.get('/item-history', requirePermission('quotations', 'view'), (req, res) => {
-  const itemId = +req.query.item_id;
-  const limit = Math.min(+req.query.limit || 20, 100);
-  if (!itemId) return res.status(400).json({ error: 'item_id required' });
-  const rows = getDb().prepare(`SELECT h.*, l.company_name AS lead_company
+router.get('/item-history', requirePermission('quotations', 'view'), async (req, res) => {
+  try {
+    const itemId = +req.query.item_id;
+    const limit = Math.min(+req.query.limit || 20, 100);
+    if (!itemId) return res.status(400).json({ error: 'item_id required' });
+    const rows = await pg.all(`SELECT h.*, l.company_name AS lead_company
                                 FROM item_price_history h
                                 LEFT JOIN leads l ON h.lead_id=l.id
                                 WHERE h.item_id=?
                                 ORDER BY h.created_at DESC
-                                LIMIT ?`).all(itemId, limit);
-  res.json(rows);
+                                LIMIT ?`, itemId, limit);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── AI Settings (admin) ─────────────────────────────────────────────
@@ -105,25 +111,29 @@ router.get('/item-history', requirePermission('quotations', 'view'), (req, res) 
 // GET returns a masked key so the UI can show "configured / not configured"
 // without ever sending the secret back to the browser.
 
-router.get('/settings', adminOnly, (req, res) => {
-  const key = getSetting('ai_api_key');
-  res.json({
-    provider: getSetting('ai_provider') || 'anthropic',
-    model: getSetting('ai_model') || 'claude-opus-4-7',
-    api_key_set: !!key,
-    api_key_masked: key ? `${key.slice(0, 7)}…${key.slice(-4)}` : null,
-  });
+router.get('/settings', adminOnly, async (req, res) => {
+  try {
+    const key = await getSetting('ai_api_key');
+    res.json({
+      provider: (await getSetting('ai_provider')) || 'anthropic',
+      model: (await getSetting('ai_model')) || 'claude-opus-4-7',
+      api_key_set: !!key,
+      api_key_masked: key ? `${key.slice(0, 7)}…${key.slice(-4)}` : null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/settings', adminOnly, (req, res) => {
-  const { provider, model, api_key } = req.body || {};
-  if (provider) setSetting('ai_provider', String(provider).trim() || 'anthropic');
-  if (model) setSetting('ai_model', String(model).trim() || 'claude-opus-4-7');
-  if (typeof api_key === 'string' && api_key.trim()) {
-    // Accept both bare keys and "sk-ant-..."; just trim and store.
-    setSetting('ai_api_key', api_key.trim());
-  }
-  res.json({ message: 'AI settings saved' });
+router.put('/settings', adminOnly, async (req, res) => {
+  try {
+    const { provider, model, api_key } = req.body || {};
+    if (provider) await setSetting('ai_provider', String(provider).trim() || 'anthropic');
+    if (model) await setSetting('ai_model', String(model).trim() || 'claude-opus-4-7');
+    if (typeof api_key === 'string' && api_key.trim()) {
+      // Accept both bare keys and "sk-ant-..."; just trim and store.
+      await setSetting('ai_api_key', api_key.trim());
+    }
+    res.json({ message: 'AI settings saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Email (SMTP) settings — also lives in app_settings. Admin-only;
@@ -131,37 +141,41 @@ router.put('/settings', adminOnly, (req, res) => {
 // so the UI can show two clear panels even though both go through this
 // router. Recipient defaults to director@securedengineers.com (mam's
 // loss-streak alert target).
-router.get('/email-settings', adminOnly, (req, res) => {
-  const host = getSetting('email_smtp_host');
-  const user = getSetting('email_smtp_user');
-  const pass = getSetting('email_smtp_pass');
-  res.json({
-    host: host || '',
-    port: getSetting('email_smtp_port') || '587',
-    secure: getSetting('email_smtp_secure') === '1',
-    user: user || '',
-    from: getSetting('email_from') || '',
-    director_to: getSetting('email_director_to') || 'director@securedengineers.com',
-    pass_set: !!pass,
-    pass_masked: pass ? `${'•'.repeat(8)}${pass.slice(-2)}` : null,
-  });
+router.get('/email-settings', adminOnly, async (req, res) => {
+  try {
+    const host = await getSetting('email_smtp_host');
+    const user = await getSetting('email_smtp_user');
+    const pass = await getSetting('email_smtp_pass');
+    res.json({
+      host: host || '',
+      port: (await getSetting('email_smtp_port')) || '587',
+      secure: (await getSetting('email_smtp_secure')) === '1',
+      user: user || '',
+      from: (await getSetting('email_from')) || '',
+      director_to: (await getSetting('email_director_to')) || 'director@securedengineers.com',
+      pass_set: !!pass,
+      pass_masked: pass ? `${'•'.repeat(8)}${pass.slice(-2)}` : null,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/email-settings', adminOnly, (req, res) => {
-  const b = req.body || {};
-  if (b.host !== undefined) setSetting('email_smtp_host', String(b.host).trim());
-  if (b.port !== undefined) setSetting('email_smtp_port', String(b.port).trim() || '587');
-  if (b.secure !== undefined) setSetting('email_smtp_secure', b.secure ? '1' : '0');
-  if (b.user !== undefined) setSetting('email_smtp_user', String(b.user).trim());
-  if (typeof b.pass === 'string' && b.pass.trim()) setSetting('email_smtp_pass', b.pass.trim());
-  if (b.from !== undefined) setSetting('email_from', String(b.from).trim());
-  if (b.director_to !== undefined) setSetting('email_director_to', String(b.director_to).trim());
-  res.json({ message: 'Email settings saved' });
+router.put('/email-settings', adminOnly, async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (b.host !== undefined) await setSetting('email_smtp_host', String(b.host).trim());
+    if (b.port !== undefined) await setSetting('email_smtp_port', String(b.port).trim() || '587');
+    if (b.secure !== undefined) await setSetting('email_smtp_secure', b.secure ? '1' : '0');
+    if (b.user !== undefined) await setSetting('email_smtp_user', String(b.user).trim());
+    if (typeof b.pass === 'string' && b.pass.trim()) await setSetting('email_smtp_pass', b.pass.trim());
+    if (b.from !== undefined) await setSetting('email_from', String(b.from).trim());
+    if (b.director_to !== undefined) await setSetting('email_director_to', String(b.director_to).trim());
+    res.json({ message: 'Email settings saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Send a test email to confirm SMTP works.
 router.post('/email-test', adminOnly, async (req, res) => {
-  const to = (req.body?.to || '').trim() || getSetting('email_director_to') || 'director@securedengineers.com';
+  const to = (req.body?.to || '').trim() || (await getSetting('email_director_to').catch(() => null)) || 'director@securedengineers.com';
   try {
     const { sendEmail } = require('../lib/email');
     const r = await sendEmail({
@@ -179,8 +193,10 @@ router.post('/email-test', adminOnly, async (req, res) => {
 
 // Lets users with ai_agent.view check if the chatbot is configured so
 // the floating bubble can render only for permitted users.
-router.get('/status', requirePermission('ai_agent', 'view'), (req, res) => {
-  res.json({ configured: !!getSetting('ai_api_key') });
+router.get('/status', requirePermission('ai_agent', 'view'), async (req, res) => {
+  try {
+    res.json({ configured: !!(await getSetting('ai_api_key')) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── Ask ERP (chatbot) ───────────────────────────────────────────────
@@ -216,13 +232,16 @@ const READABLE_TABLES = new Set([
   'installations', 'complaints', 'snags', 'sales_funnel', 'company_assets',
 ]);
 
-function buildSchemaDigest(db) {
+async function buildSchemaDigest() {
   // Compact "table(col TYPE, col TYPE)" lines for every readable table.
-  // Cached per process via getSchemaDigest below.
+  // Cached per process via getSchemaDigest below. (PRAGMA table_info has no
+  // Postgres equivalent — information_schema.columns replaces it.)
   const lines = [];
   for (const t of READABLE_TABLES) {
     try {
-      const cols = db.prepare(`PRAGMA table_info(${t})`).all();
+      const cols = await pg.all(
+        `SELECT column_name AS name, data_type AS type FROM information_schema.columns
+          WHERE table_schema='public' AND table_name=? ORDER BY ordinal_position`, t);
       if (!cols.length) continue;
       const colList = cols.map(c => `${c.name} ${c.type || ''}`.trim()).join(', ');
       lines.push(`${t}(${colList})`);
@@ -231,8 +250,8 @@ function buildSchemaDigest(db) {
   return lines.join('\n');
 }
 let _cachedDigest = null;
-function getSchemaDigest(db) {
-  if (!_cachedDigest) _cachedDigest = buildSchemaDigest(db);
+async function getSchemaDigest() {
+  if (!_cachedDigest) _cachedDigest = await buildSchemaDigest();
   return _cachedDigest;
 }
 
@@ -456,12 +475,11 @@ function capSql(sql) {
   return `${trimmed} LIMIT ${ROW_LIMIT + 1}`;
 }
 
-function safeRunQuery(db, sql) {
+async function safeRunQuery(sql) {
   const err = validateSelect(sql);
   if (err) return { error: err };
   try {
-    const stmt = db.prepare(capSql(sql));
-    const rows = stmt.all();
+    const rows = await pg.all(capSql(sql));
     const truncated = rows.length > ROW_LIMIT;
     return {
       row_count: rows.length,
@@ -479,7 +497,7 @@ function safeRunQuery(db, sql) {
 // grounding — so it can quote live MARKET RATES, not only ERP data (mam:
 // "not satisfied ... give me rate from market also"). Search grounding is
 // handled server-side by Gemini; we only execute our own function calls.
-async function runGeminiAgent({ apiKey, model, systemPrompt, history, question, db }) {
+async function runGeminiAgent({ apiKey, model, systemPrompt, history, question }) {
   if (typeof fetch !== 'function') {
     const e = new Error('This server\'s Node is too old for Gemini (needs Node 18+).'); e.status = 500; throw e;
   }
@@ -487,7 +505,7 @@ async function runGeminiAgent({ apiKey, model, systemPrompt, history, question, 
   const functionDeclarations = [
     {
       name: 'query_database',
-      description: 'Run a single read-only SQL query (SELECT or WITH only) against the ERP SQLite DB. Returns rows as JSON, max 500 rows.',
+      description: 'Run a single read-only SQL query (SELECT or WITH only) against the ERP PostgreSQL DB. Returns rows as JSON, max 500 rows.',
       parameters: { type: 'object', properties: { query: { type: 'string', description: 'A single SELECT/WITH query. No semicolons, no DDL/DML.' } }, required: ['query'] },
     },
     {
@@ -558,7 +576,7 @@ async function runGeminiAgent({ apiKey, model, systemPrompt, history, question, 
       const args = fc.args || {};
       let resultObj;
       if (fc.name === 'query_database') {
-        const result = safeRunQuery(db, args.query || '');
+        const result = await safeRunQuery(args.query || '');
         sqlRuns.push({ query: args.query, row_count: result.row_count ?? 0, error: result.error || null });
         resultObj = result;
       } else if (fc.name === 'get_module_guide') {
@@ -576,7 +594,9 @@ async function runGeminiAgent({ apiKey, model, systemPrompt, history, question, 
 }
 
 router.post('/ask', requirePermission('ai_agent', 'view'), async (req, res) => {
-  const apiKey = getSetting('ai_api_key');
+  let apiKey;
+  try { apiKey = await getSetting('ai_api_key'); }
+  catch (e) { return res.status(500).json({ error: e.message }); }
   if (!apiKey) {
     return res.status(400).json({
       error: 'AI Agent not configured. Ask an admin to paste an API key in Admin → AI Settings.',
@@ -626,9 +646,8 @@ router.post('/ask', requirePermission('ai_agent', 'view'), async (req, res) => {
   // "…" (mam 2026-07-06 "ai chat is not working"). This outer try guarantees we
   // always end the response with an answer or a readable error.
   try {
-  const db = getDb();
   const client = new Anthropic.default({ apiKey, timeout: ANTHROPIC_TIMEOUT_MS });
-  const model = getSetting('ai_model') || 'claude-opus-4-7';
+  const model = (await getSetting('ai_model')) || 'claude-opus-4-7';
   // Adaptive thinking + effort + Anthropic-server-side tools (web_search)
   // are Opus/Sonnet-4.6-only. Haiku 4.5 either 400s or pushes the request
   // past Nginx's 60s proxy_read_timeout. Used below to conditionally
@@ -642,8 +661,8 @@ router.post('/ask', requirePermission('ai_agent', 'view'), async (req, res) => {
   // their employee record gives the model concrete identity context.
   let currentUserBlock = '(unknown user)';
   try {
-    const u = db.prepare('SELECT id, name, email, username, role, department, phone FROM users WHERE id=?').get(req.user.id);
-    const emp = db.prepare('SELECT designation, department, phone, email, status FROM employees WHERE LOWER(name) = LOWER(?) OR user_id=? LIMIT 1').get(u?.name || '', req.user.id);
+    const u = await pg.get('SELECT id, name, email, username, role, department, phone FROM users WHERE id=?', req.user.id);
+    const emp = await pg.get('SELECT designation, department, phone, email, status FROM employees WHERE LOWER(name) = LOWER(?) OR user_id=? LIMIT 1', u?.name || '', req.user.id);
     if (u) {
       const parts = [
         `Name: ${u.name}`,
@@ -688,13 +707,14 @@ LANGUAGE — TRAINING REPLIES:
 
 Combine the tools when useful. Money is in Indian Rupees (Rs) — Indian-style formatting (e.g. "Rs 12,50,000"). Be specific: include names, numbers, dates. If a question is ambiguous, make one reasonable assumption and state it. Never invent data — only report what the tools return. When you cite a web-search number, mention the source briefly ("per IndiaMART today").
 
-Database schema (SQLite). Only SELECT/WITH queries are allowed; the tool will reject anything else.
+Database schema (PostgreSQL). Only SELECT/WITH queries are allowed; the tool will reject anything else.
+Date/time columns are TEXT in 'YYYY-MM-DD HH:MM:SS' (UTC) — compare them as strings, e.g. LEFT(created_at,10) >= '2026-01-01'.
 
-${getSchemaDigest(db)}
+${await getSchemaDigest()}
 
 Guidance:
 - Prefer JOINs over multiple round-trip queries when sensible.
-- Use date('now') / datetime('now', '-N days') for recency filters.
+- For recency filters use to_char(now() at time zone 'utc','YYYY-MM-DD') or to_char(now() - interval 'N days','YYYY-MM-DD') compared against LEFT(date_col,10). Use ILIKE for case-insensitive text search.
 - LIMIT large result sets (≤ 100 rows for display).
 - For "rates": ALWAYS read item_master.current_price + item_price_history AND web_search for the market price. Show both.
 - If they ask about overdue payments, sales_bills with payment_status='pending' or 'partial' is the first place to check; receivables also tracks this.
@@ -704,7 +724,7 @@ Guidance:
   const tools = [
     {
       name: 'query_database',
-      description: 'Run a single read-only SQL query (SELECT or WITH only) against the ERP SQLite database. Returns rows as JSON. Limited to 500 rows per query; the response indicates if truncated.',
+      description: 'Run a single read-only SQL query (SELECT or WITH only) against the ERP PostgreSQL database. Returns rows as JSON. Limited to 500 rows per query; the response indicates if truncated.',
       input_schema: {
         type: 'object',
         properties: {
@@ -748,13 +768,13 @@ Guidance:
   messages.push({ role: 'user', content: question });
 
   // ── Provider fork: Google Gemini (free) vs Anthropic ─────────────────────
-  const provider = (getSetting('ai_provider') || 'anthropic').toLowerCase();
+  const provider = ((await getSetting('ai_provider')) || 'anthropic').toLowerCase();
   if (provider === 'gemini' || provider === 'google') {
     const gStart = Date.now();
-    let gmodel = getSetting('ai_model');
+    let gmodel = await getSetting('ai_model');
     if (!gmodel || !/gemini/i.test(gmodel)) gmodel = 'gemini-2.0-flash';
     try {
-      const { answer, sqlRuns } = await runGeminiAgent({ apiKey, model: gmodel, systemPrompt, history: priorHistory, question, db });
+      const { answer, sqlRuns } = await runGeminiAgent({ apiKey, model: gmodel, systemPrompt, history: priorHistory, question });
       console.log(`[AI Agent /ask] ok ${gmodel} (gemini) elapsed=${Date.now() - gStart}ms sqlRuns=${sqlRuns.length}`);
       return sendJson(200, { answer, sql_runs: sqlRuns, model: gmodel });
     } catch (e) {
@@ -810,7 +830,7 @@ Guidance:
         if (block.type !== 'tool_use') continue;
         if (block.name === 'query_database') {
           const sql = block.input?.query || '';
-          const result = safeRunQuery(db, sql);
+          const result = await safeRunQuery(sql);
           sqlRuns.push({ query: sql, row_count: result.row_count ?? 0, error: result.error || null });
           toolResults.push({
             type: 'tool_result',

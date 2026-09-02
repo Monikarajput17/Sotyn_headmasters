@@ -10,41 +10,49 @@
 // the ERP doesn't capture yet (e.g. quote-loss reasons, plant performance
 // ratio), the field returns `null` and the frontend renders an "—" with
 // a "needs capture" tooltip rather than fabricating a number.
+//
+// `db` = the async Postgres adapter (server/db/pg.js) — every query is
+// awaited; date arithmetic that SQLite did with date('now', …) /
+// julianday() is now done on TEXT 'YYYY-MM-DD…' columns via LEFT(col,10)
+// against JS-computed ISO date params.
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => {
   const d = new Date(); d.setDate(d.getDate() - n);
   return d.toISOString().slice(0, 10);
 };
-const safeGet = (db, sql, ...p) => { try { return db.prepare(sql).get(...p); } catch { return null; } };
-const safeAll = (db, sql, ...p) => { try { return db.prepare(sql).all(...p); } catch { return []; } };
+const daysAhead = (n) => daysAgo(-n);
+const safeGet = async (db, sql, ...p) => { try { return await db.get(sql, ...p); } catch { return null; } };
+const safeAll = async (db, sql, ...p) => { try { return await db.all(sql, ...p); } catch { return []; } };
 const num = (v) => (v == null ? 0 : Number(v) || 0);
 
-function computeCmdDetail(db, daysRaw) {
+async function computeCmdDetail(db, daysRaw) {
   const started = Date.now();
   const days = Math.min(365, Math.max(7, parseInt(daysRaw, 10) || 90));
   const from = daysAgo(days);
   const today = TODAY();
+  // Whole-day age of a TEXT timestamp column as of today (was julianday('now') - julianday(col)).
+  const ageDays = (col) => `(?::date - LEFT(${col},10)::date)`;
 
   // ── PULSE NUMBERS ──────────────────────────────────────────────
-  const bank = safeGet(db,
+  const bank = await safeGet(db,
     `SELECT date, closing_balance FROM cash_flow_daily ORDER BY date DESC LIMIT 1`);
   const cashOnHand = num(bank?.closing_balance);
 
   // Free cash = bank − dues falling in next 30 days
-  const dues30 = num((safeGet(db, `
+  const dues30 = num((await safeGet(db, `
     SELECT COALESCE(SUM(total_amount),0) c
     FROM purchase_bills
     WHERE payment_status IN ('pending','partial')
-      AND date(bill_date) >= date('now', '-30 days')
-  `)?.c));
+      AND LEFT(bill_date,10) >= ?
+  `, daysAgo(30)))?.c);
   const freeCash = Math.max(0, cashOnHand - dues30);
 
   // Burn rate (avg daily outflow over last 30 days) → runway
-  const dailyBurn = num((safeGet(db, `
+  const dailyBurn = num((await safeGet(db, `
     SELECT COALESCE(SUM(amount), 0) / 30.0 c FROM cash_flow_entries
-    WHERE type='outflow' AND date(date) >= date('now', '-30 days')
-  `)?.c));
+    WHERE type='outflow' AND LEFT(date,10) >= ?
+  `, daysAgo(30)))?.c);
   const runwayDays = dailyBurn > 0 ? Math.round(cashOnHand / dailyBurn) : null;
 
   // Active sites / order book / revenue MTD / open snags
@@ -53,105 +61,105 @@ function computeCmdDetail(db, daysRaw) {
   // re-uploads (same project, stray-quote name variants) that inflate the
   // count (was 81). Dedupe by the linked business_book project; active
   // sites with no BB link fall back to a normalized name.
-  const activeSites = num(safeGet(db, `
+  const activeSites = num((await safeGet(db, `
     SELECT COUNT(*) c FROM (
       SELECT DISTINCT CAST(business_book_id AS TEXT) k
         FROM sites WHERE status='active' AND business_book_id IS NOT NULL
       UNION
       SELECT DISTINCT 'name:' || TRIM(LOWER(name)) k
         FROM sites WHERE status='active' AND COALESCE(business_book_id,0)=0
-    )
-  `)?.c);
-  const orderBook = num(safeGet(db, `
+    ) uniq_sites
+  `))?.c);
+  const orderBook = num((await safeGet(db, `
     SELECT COALESCE(SUM(total_amount),0) c FROM purchase_orders WHERE status NOT IN ('completed','rejected')
-  `)?.c);
-  const orderBookCount = num(safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE status NOT IN ('completed','rejected')`)?.c);
+  `))?.c);
+  const orderBookCount = num((await safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE status NOT IN ('completed','rejected')`))?.c);
 
   const monthStart = new Date(); monthStart.setDate(1);
   const monthStartIso = monthStart.toISOString().slice(0, 10);
-  const revenueMTD = num(safeGet(db, `
-    SELECT COALESCE(SUM(total_amount), 0) c FROM sales_bills WHERE date(bill_date) >= ?
-  `, monthStartIso)?.c);
+  const revenueMTD = num((await safeGet(db, `
+    SELECT COALESCE(SUM(total_amount), 0) c FROM sales_bills WHERE LEFT(bill_date,10) >= ?
+  `, monthStartIso))?.c);
 
-  const openSnags = num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open'`)?.c);
-  const oldestSnag = safeGet(db, `
-    SELECT julianday('now') - julianday(raised_at) days
+  const openSnags = num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open'`))?.c);
+  const oldestSnag = await safeGet(db, `
+    SELECT ${ageDays('raised_at')} days
     FROM snags WHERE status='open' ORDER BY raised_at ASC LIMIT 1
-  `);
+  `, today);
   const oldestSnagDays = oldestSnag ? Math.round(oldestSnag.days) : null;
 
   // DPR adherence today = sites with DPR today / active sites
-  const dprToday = num(safeGet(db, `SELECT COUNT(DISTINCT site_id) c FROM dpr WHERE report_date=?`, today)?.c);
+  const dprToday = num((await safeGet(db, `SELECT COUNT(DISTINCT site_id) c FROM dpr WHERE report_date=?`, today))?.c);
   const dprAdherencePct = activeSites > 0 ? Math.round((dprToday / activeSites) * 100) : null;
 
   // CCC components
-  const salesWin = num(safeGet(db, `SELECT COALESCE(SUM(total_amount),0) c FROM sales_bills WHERE date(bill_date) >= ?`, from)?.c);
-  const purchasesWin = num(safeGet(db, `SELECT COALESCE(SUM(total_amount),0) c FROM purchase_bills WHERE date(bill_date) >= ?`, from)?.c);
-  const arOutstanding = num(safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables`)?.c);
-  const apOutstanding = num(safeGet(db, `
+  const salesWin = num((await safeGet(db, `SELECT COALESCE(SUM(total_amount),0) c FROM sales_bills WHERE LEFT(bill_date,10) >= ?`, from))?.c);
+  const purchasesWin = num((await safeGet(db, `SELECT COALESCE(SUM(total_amount),0) c FROM purchase_bills WHERE LEFT(bill_date,10) >= ?`, from))?.c);
+  const arOutstanding = num((await safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables`))?.c);
+  const apOutstanding = num((await safeGet(db, `
     SELECT COALESCE(SUM(total_amount - COALESCE(received_amount, 0)),0) c FROM purchase_bills
     WHERE payment_status IN ('pending','partial')
-  `)?.c);
+  `))?.c);
   const dso = salesWin > 0 ? Math.round((arOutstanding / salesWin) * days) : null;
   const dpo = purchasesWin > 0 ? Math.round((apOutstanding / purchasesWin) * days) : null;
-  const inventoryTotal = num(safeGet(db, `
+  const inventoryTotal = num((await safeGet(db, `
     SELECT COALESCE(SUM(quantity * avg_rate), 0) c FROM stock_balance WHERE quantity > 0
-  `)?.c);
+  `))?.c);
   const dio = purchasesWin > 0 ? Math.round((inventoryTotal / purchasesWin) * days) : null;
   const ccc = (dso != null && dio != null && dpo != null) ? (dso + dio - dpo) : null;
 
   // Inventory split
-  const inventoryFree = num(safeGet(db, `
+  const inventoryFree = num((await safeGet(db, `
     SELECT COALESCE(SUM(s.quantity * s.avg_rate), 0) c
     FROM stock_balance s JOIN warehouses w ON s.warehouse_id = w.id
     WHERE w.type = 'office' AND s.quantity > 0
-  `)?.c);
-  const inventoryReserved = num(safeGet(db, `
+  `))?.c);
+  const inventoryReserved = num((await safeGet(db, `
     SELECT COALESCE(SUM(s.quantity * s.avg_rate), 0) c
     FROM stock_balance s JOIN warehouses w ON s.warehouse_id = w.id
     WHERE w.type = 'site_store' AND s.quantity > 0
-  `)?.c);
+  `))?.c);
   // Slow / dead: based on last movement.  If stock_movements has rows
   // older than 180/365 days for an item, the remaining balance is
   // considered slow/dead.  Best-effort proxy until a proper aging job.
-  const slowMoving = num(safeGet(db, `
+  const slowMoving = num((await safeGet(db, `
     SELECT COALESCE(SUM(s.quantity * s.avg_rate), 0) c
     FROM stock_balance s
     WHERE s.quantity > 0
       AND NOT EXISTS (
         SELECT 1 FROM stock_movements m
         WHERE m.item_master_id = s.item_master_id
-          AND date(m.created_at) >= date('now', '-180 days')
+          AND LEFT(m.created_at,10) >= ?
       )
-  `)?.c);
-  const deadStock = num(safeGet(db, `
+  `, daysAgo(180)))?.c);
+  const deadStock = num((await safeGet(db, `
     SELECT COALESCE(SUM(s.quantity * s.avg_rate), 0) c
     FROM stock_balance s
     WHERE s.quantity > 0
       AND NOT EXISTS (
         SELECT 1 FROM stock_movements m
         WHERE m.item_master_id = s.item_master_id
-          AND date(m.created_at) >= date('now', '-365 days')
+          AND LEFT(m.created_at,10) >= ?
       )
-  `)?.c);
+  `, daysAgo(365)))?.c);
 
   // WIP locked = sum of PO totals where status='in_progress' minus billed
-  const wipBookValue = num(safeGet(db, `
+  const wipBookValue = num((await safeGet(db, `
     SELECT COALESCE(SUM(total_amount), 0) c FROM purchase_orders WHERE status='in_progress'
-  `)?.c);
-  const wipBilled = num(safeGet(db, `
+  `))?.c);
+  const wipBilled = num((await safeGet(db, `
     SELECT COALESCE(SUM(sb.total_amount), 0) c FROM sales_bills sb
     JOIN purchase_orders po ON sb.po_id = po.id WHERE po.status='in_progress'
-  `)?.c);
+  `))?.c);
 
   // ── AR / Cash ──────────────────────────────────────────────────
   const arAging = {
-    bucket_0_30:    num(safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='0-30'`)?.c),
-    bucket_31_60:   num(safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='31-60'`)?.c),
-    bucket_61_90:   num(safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='61-90'`)?.c),
-    bucket_90_plus: num(safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='90+'`)?.c),
+    bucket_0_30:    num((await safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='0-30'`))?.c),
+    bucket_31_60:   num((await safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='31-60'`))?.c),
+    bucket_61_90:   num((await safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='61-90'`))?.c),
+    bucket_90_plus: num((await safeGet(db, `SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables WHERE ageing_bucket='90+'`))?.c),
   };
-  const topDebtorsRaw = safeAll(db, `
+  const topDebtorsRaw = await safeAll(db, `
     SELECT id, client_name, project_name, invoice_number,
            outstanding_amount amt, ageing_days days, follow_up_status status, owner_id
     FROM receivables
@@ -176,15 +184,17 @@ function computeCmdDetail(db, daysRaw) {
   let runningCash = cashOnHand;
   for (let i = 0; i <= 30; i += 2) {
     const dateIso = (() => { const d = new Date(); d.setDate(d.getDate() + i); return d.toISOString().slice(0,10); })();
-    const expectIn = num(safeGet(db, `
+    // bill_date + 30 days <= dateIso  ⇔  bill_date <= dateIso − 30 days
+    const dateIsoMinus30 = (() => { const d = new Date(); d.setDate(d.getDate() + i - 30); return d.toISOString().slice(0,10); })();
+    const expectIn = num((await safeGet(db, `
       SELECT COALESCE(SUM(outstanding_amount),0) c FROM receivables
-      WHERE date(due_date) <= ? AND date(due_date) > date('now', '-1 day')
-    `, dateIso)?.c);
-    const expectOut = num(safeGet(db, `
+      WHERE LEFT(due_date,10) <= ? AND LEFT(due_date,10) > ?
+    `, dateIso, daysAgo(1)))?.c);
+    const expectOut = num((await safeGet(db, `
       SELECT COALESCE(SUM(total_amount - COALESCE(received_amount,0)),0) c FROM purchase_bills
       WHERE payment_status IN ('pending','partial')
-        AND date(bill_date, '+30 days') <= ?
-    `, dateIso)?.c);
+        AND LEFT(bill_date,10) <= ?
+    `, dateIsoMinus30))?.c);
     cashForecast.push({ day: `D${i}`, no_action: Math.round((cashOnHand - expectOut * i / 30) / 100000), with_actions: Math.round((cashOnHand + expectIn * 0.6 - expectOut * 0.4) / 100000) });
   }
 
@@ -197,7 +207,7 @@ function computeCmdDetail(db, daysRaw) {
   const _todayD = new Date();
   const _thisMonth = _todayD.getMonth();
   const _thisYear = _todayD.getFullYear();
-  const statRows = safeAll(db,
+  const statRows = await safeAll(db,
     `SELECT label, due_day, amount FROM statutory_dues_calendar
       WHERE active = 1 ORDER BY due_day, label`);
   const statutoryDues = [
@@ -229,30 +239,30 @@ function computeCmdDetail(db, daysRaw) {
   // near-empty legacy `leads` table instead of the real funnel. "won" here
   // = funnel deals reaching contract_signed / won.
   const WON_STAGES = "('contract_signed','won')";
-  const leadsCount = num(safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE date(created_at) >= ?`, from)?.c);
-  const qualifiedCount = num(safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE date(created_at) >= ? AND is_qualified = 1`, from)?.c);
-  const wonCount = num(safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE date(created_at) >= ? AND current_stage IN ${WON_STAGES}`, from)?.c);
-  const quotedCount = num(safeGet(db, `SELECT COUNT(*) c FROM quotations WHERE date(created_at) >= ?`, from)?.c);
-  const negotiationCount = num(safeGet(db, `SELECT COUNT(*) c FROM crm_funnel WHERE date(created_at) >= ? AND quotation_submitted = 1 AND (final_status IS NULL OR final_status='')`, from)?.c);
-  const billedCount = num(safeGet(db, `SELECT COUNT(*) c FROM sales_bills WHERE date(bill_date) >= ?`, from)?.c);
-  const collectedCount = num(safeGet(db, `SELECT COUNT(*) c FROM sales_bills WHERE date(bill_date) >= ? AND payment_status='paid'`, from)?.c);
+  const leadsCount = num((await safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE LEFT(created_at,10) >= ?`, from))?.c);
+  const qualifiedCount = num((await safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE LEFT(created_at,10) >= ? AND is_qualified = 1`, from))?.c);
+  const wonCount = num((await safeGet(db, `SELECT COUNT(*) c FROM sales_funnel WHERE LEFT(created_at,10) >= ? AND current_stage IN ${WON_STAGES}`, from))?.c);
+  const quotedCount = num((await safeGet(db, `SELECT COUNT(*) c FROM quotations WHERE LEFT(created_at,10) >= ?`, from))?.c);
+  const negotiationCount = num((await safeGet(db, `SELECT COUNT(*) c FROM crm_funnel WHERE LEFT(created_at,10) >= ? AND quotation_submitted = 1 AND (final_status IS NULL OR final_status='')`, from))?.c);
+  const billedCount = num((await safeGet(db, `SELECT COUNT(*) c FROM sales_bills WHERE LEFT(bill_date,10) >= ?`, from))?.c);
+  const collectedCount = num((await safeGet(db, `SELECT COUNT(*) c FROM sales_bills WHERE LEFT(bill_date,10) >= ? AND payment_status='paid'`, from))?.c);
   const funnel = {
     leads: leadsCount,
     qualified: qualifiedCount,  // live sales_funnel.is_qualified count
     quoted: quotedCount,
-    pos: num(safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE date(created_at) >= ?`, from)?.c),
-    in_execution: num(safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE status='in_progress'`)?.c),
+    pos: num((await safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE LEFT(created_at,10) >= ?`, from))?.c),
+    in_execution: num((await safeGet(db, `SELECT COUNT(*) c FROM purchase_orders WHERE status='in_progress'`))?.c),
     billed: billedCount,
     collected: collectedCount,
   };
 
   // Quote lead time
-  const quoteLT = safeAll(db, `
-    SELECT (julianday(q.created_at) - julianday(l.created_at)) days
+  const quoteLT = (await safeAll(db, `
+    SELECT (LEFT(q.created_at,10)::date - LEFT(l.created_at,10)::date) days
     FROM leads l JOIN quotations q ON q.lead_id = l.id
     WHERE l.created_at IS NOT NULL AND q.created_at IS NOT NULL
-      AND date(q.created_at) >= ?
-  `, from).map(r => r.days).filter(x => x != null && x >= 0);
+      AND LEFT(q.created_at,10) >= ?
+  `, from)).map(r => r.days).filter(x => x != null && x >= 0);
   const qltSorted = [...quoteLT].sort((a, b) => a - b);
   const median = qltSorted.length ? qltSorted[Math.floor(qltSorted.length / 2)] : null;
   const p90 = qltSorted.length ? qltSorted[Math.floor(qltSorted.length * 0.9)] : null;
@@ -274,18 +284,18 @@ function computeCmdDetail(db, daysRaw) {
   };
 
   // Quote-loss reasons — from sales_funnel.lost_reason / crm_funnel.loss_reason
-  const lossReasons = safeAll(db, `
+  const lossReasons = await safeAll(db, `
     SELECT loss_reason reason, COUNT(*) c FROM crm_funnel
     WHERE final_status='loss' AND loss_reason IS NOT NULL
     GROUP BY loss_reason ORDER BY c DESC LIMIT 10
   `);
 
   // Pending quotes — quotations not yet linked to a PO
-  const pendingQuotes = safeAll(db, `
+  const pendingQuotes = await safeAll(db, `
     SELECT q.id, q.quotation_number, q.created_at,
            COALESCE(c.company_name, l.contact_person, l.company_name) client,
-           q.final_amount value,
-           CAST(julianday('now') - julianday(q.created_at) AS INTEGER) days_open
+           q.final_amount AS value,
+           ${ageDays('q.created_at')} days_open
     FROM quotations q
     LEFT JOIN leads l ON q.lead_id = l.id
     -- Mam (2026-05-30 audit): try a name-match against customers so a
@@ -296,19 +306,19 @@ function computeCmdDetail(db, daysRaw) {
     WHERE NOT EXISTS (SELECT 1 FROM purchase_orders po WHERE po.quotation_id = q.id)
       AND q.status NOT IN ('rejected', 'won')
     ORDER BY q.created_at ASC LIMIT 8
-  `);
+  `, today);
 
   // Conversion by source — from the LIVE sales_funnel (source text column),
   // won = stage reached contract_signed / won.
-  const conversionBySource = safeAll(db, `
+  const conversionBySource = (await safeAll(db, `
     SELECT COALESCE(NULLIF(TRIM(source),''),'Unknown') source,
            COUNT(*) total,
            SUM(CASE WHEN current_stage IN ${WON_STAGES} THEN 1 ELSE 0 END) won
     FROM sales_funnel
-    WHERE date(created_at) >= ?
-    GROUP BY COALESCE(NULLIF(TRIM(source),''),'Unknown') HAVING total > 0
-    ORDER BY (1.0 * won / total) DESC
-  `, from).map(r => ({
+    WHERE LEFT(created_at,10) >= ?
+    GROUP BY COALESCE(NULLIF(TRIM(source),''),'Unknown') HAVING COUNT(*) > 0
+    ORDER BY (1.0 * SUM(CASE WHEN current_stage IN ${WON_STAGES} THEN 1 ELSE 0 END) / COUNT(*)) DESC
+  `, from)).map(r => ({
     source: r.source, total: r.total, won: r.won,
     conversion_pct: r.total > 0 ? Math.round((r.won / r.total) * 100) : 0,
   }));
@@ -318,21 +328,21 @@ function computeCmdDetail(db, daysRaw) {
   for (let w = 11; w >= 0; w--) {
     const wStart = (() => { const d = new Date(); d.setDate(d.getDate() - (w + 1) * 7); return d.toISOString().slice(0,10); })();
     const wEnd = (() => { const d = new Date(); d.setDate(d.getDate() - w * 7); return d.toISOString().slice(0,10); })();
-    const mepf = num(safeGet(db, `
+    const mepf = num((await safeGet(db, `
       SELECT COALESCE(SUM(po_amount), 0) c FROM business_book
-      WHERE date(po_date) >= ? AND date(po_date) < ?
+      WHERE LEFT(po_date,10) >= ? AND LEFT(po_date,10) < ?
         AND (LOWER(category) LIKE '%mepf%' OR LOWER(category) LIKE '%mep%' OR LOWER(category) LIKE '%fire%' OR LOWER(category) LIKE '%hvac%' OR LOWER(category) LIKE '%plumbing%' OR LOWER(category) LIKE '%electrical%')
-    `, wStart, wEnd)?.c);
-    const solar = num(safeGet(db, `
+    `, wStart, wEnd))?.c);
+    const solar = num((await safeGet(db, `
       SELECT COALESCE(SUM(po_amount), 0) c FROM business_book
-      WHERE date(po_date) >= ? AND date(po_date) < ?
+      WHERE LEFT(po_date,10) >= ? AND LEFT(po_date,10) < ?
         AND LOWER(category) LIKE '%solar%'
-    `, wStart, wEnd)?.c);
+    `, wStart, wEnd))?.c);
     bookingTrend.push({ week: `W-${w}`, mepf: Math.round(mepf / 100000), solar: Math.round(solar / 100000) });
   }
 
   // Top 5 customers by order book share
-  const topCustomers = safeAll(db, `
+  const topCustomers = await safeAll(db, `
     SELECT bb.client_name client,
            bb.company_name company,
            COALESCE(SUM(bb.po_amount), 0) total_order
@@ -345,36 +355,37 @@ function computeCmdDetail(db, daysRaw) {
   topCustomers.forEach(r => { r.share_pct = Math.round((num(r.total_order) / totalOrderBookSum) * 100); });
 
   // Pipeline by stage (PO statuses)
-  const pipelineByStage = safeAll(db, `
-    SELECT status stage, COUNT(*) cnt, COALESCE(SUM(total_amount), 0) value
+  const pipelineByStage = await safeAll(db, `
+    SELECT status stage, COUNT(*) cnt, COALESCE(SUM(total_amount), 0) AS value
     FROM purchase_orders GROUP BY status ORDER BY value DESC
   `);
 
   // ── Vertical mix from business_book.category ───────────────────
-  const verticalMix = safeAll(db, `
-    SELECT category, COUNT(*) cnt, COALESCE(SUM(po_amount), 0) value
+  const verticalMix = await safeAll(db, `
+    SELECT category, COUNT(*) cnt, COALESCE(SUM(po_amount), 0) AS value
     FROM business_book WHERE po_amount > 0
     GROUP BY category ORDER BY value DESC LIMIT 6
   `);
 
   // Lead source mix — live sales_funnel.source
-  const leadSourceMix = safeAll(db, `
+  const leadSourceMix = await safeAll(db, `
     SELECT COALESCE(NULLIF(TRIM(source),''),'Unknown') source, COUNT(*) cnt
     FROM sales_funnel
-    WHERE date(created_at) >= ?
+    WHERE LEFT(created_at,10) >= ?
     GROUP BY COALESCE(NULLIF(TRIM(source),''),'Unknown') ORDER BY cnt DESC
   `, from);
 
   // ── Site execution ────────────────────────────────────────────
-  const snagsByPriority = safeAll(db, `
+  const snagsByPriority = await safeAll(db, `
     SELECT priority, COUNT(*) cnt FROM snags WHERE status='open' GROUP BY priority
   `);
+  const snagAge = ageDays('raised_at');
   const snagAging = [
-    { bucket: '0-3d',   count: num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND julianday('now') - julianday(raised_at) <= 3`)?.c) },
-    { bucket: '4-7d',   count: num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND julianday('now') - julianday(raised_at) > 3 AND julianday('now') - julianday(raised_at) <= 7`)?.c) },
-    { bucket: '8-14d',  count: num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND julianday('now') - julianday(raised_at) > 7 AND julianday('now') - julianday(raised_at) <= 14`)?.c) },
-    { bucket: '15-21d', count: num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND julianday('now') - julianday(raised_at) > 14 AND julianday('now') - julianday(raised_at) <= 21`)?.c) },
-    { bucket: '>21d',   count: num(safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND julianday('now') - julianday(raised_at) > 21`)?.c) },
+    { bucket: '0-3d',   count: num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND ${snagAge} <= 3`, today))?.c) },
+    { bucket: '4-7d',   count: num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND ${snagAge} > 3 AND ${snagAge} <= 7`, today, today))?.c) },
+    { bucket: '8-14d',  count: num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND ${snagAge} > 7 AND ${snagAge} <= 14`, today, today))?.c) },
+    { bucket: '15-21d', count: num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND ${snagAge} > 14 AND ${snagAge} <= 21`, today, today))?.c) },
+    { bucket: '>21d',   count: num((await safeGet(db, `SELECT COUNT(*) c FROM snags WHERE status='open' AND ${snagAge} > 21`, today))?.c) },
   ];
 
   // DPR adherence today
@@ -387,8 +398,8 @@ function computeCmdDetail(db, daysRaw) {
   };
 
   // On-time milestone proxy (DPR overall_status)
-  const dprMilestoneStats = safeAll(db, `
-    SELECT overall_status status, COUNT(*) c FROM dpr WHERE date(report_date) >= ? GROUP BY overall_status
+  const dprMilestoneStats = await safeAll(db, `
+    SELECT overall_status status, COUNT(*) c FROM dpr WHERE LEFT(report_date,10) >= ? GROUP BY overall_status
   `, from);
   const dprTotal2 = dprMilestoneStats.reduce((s, r) => s + r.c, 0);
   const onTimePct = dprTotal2 > 0
@@ -396,28 +407,28 @@ function computeCmdDetail(db, daysRaw) {
     : null;
 
   // Sites past target close date (committed_completion_date < today, PO still in_progress)
-  const sitesPastTarget = safeAll(db, `
+  const sitesPastTarget = await safeAll(db, `
     SELECT po.id, po.po_number project, bb.client_name client,
-           CAST(julianday('now') - julianday(bb.committed_completion_date) AS INTEGER) slip_days,
-           po.total_amount value
+           ${ageDays('bb.committed_completion_date')} slip_days,
+           po.total_amount AS value
     FROM purchase_orders po
     JOIN business_book bb ON po.business_book_id = bb.id
     WHERE po.status = 'in_progress'
       AND bb.committed_completion_date IS NOT NULL
-      AND date(bb.committed_completion_date) < date('now')
+      AND LEFT(bb.committed_completion_date,10) < ?
     ORDER BY slip_days DESC LIMIT 8
-  `);
+  `, today, today);
 
   // ── Procurement ───────────────────────────────────────────────
-  const topVendors = safeAll(db, `
+  const topVendors = await safeAll(db, `
     SELECT v.id, v.name,
            COUNT(pb.id) bill_count,
            COALESCE(SUM(pb.total_amount), 0) total_spend,
            AVG(CASE WHEN pb.payment_status='paid' THEN 1.0 ELSE 0 END) * 100 paid_pct
     FROM vendors v
     LEFT JOIN purchase_bills pb ON pb.vendor_id = v.id
-      AND date(pb.created_at) >= ?
-    GROUP BY v.id, v.name HAVING bill_count > 0
+      AND LEFT(pb.created_at,10) >= ?
+    GROUP BY v.id, v.name HAVING COUNT(pb.id) > 0
     ORDER BY total_spend DESC LIMIT 5
   `, from);
 
@@ -431,7 +442,7 @@ function computeCmdDetail(db, daysRaw) {
   // Same "sales-billed" definition the Dispatch tab uses (doc='sales_bill' OR
   // sales_bill_number present). Gap = sale − cost (the margin recovered so far;
   // negative or zero where the PO is not yet sales-billed).
-  const pvsRaw = safeAll(db, `
+  const pvsRaw = await safeAll(db, `
     SELECT vp.id, vp.po_number, vp.total_amount AS po_cost,
            COALESCE(vp.po_date, vp.created_at) AS po_date,
            vp.indent_id AS indent_id,
@@ -445,9 +456,10 @@ function computeCmdDetail(db, daysRaw) {
       LEFT JOIN indents i        ON i.id = vp.indent_id
       LEFT JOIN delivery_notes dn ON dn.vendor_po_id = vp.id
      WHERE COALESCE(vp.cancelled, 0) = 0
-       AND date(COALESCE(vp.po_date, vp.created_at)) >= ?
-     GROUP BY vp.id
-     ORDER BY date(COALESCE(vp.po_date, vp.created_at)) DESC, vp.id DESC
+       AND LEFT(COALESCE(vp.po_date, vp.created_at),10) >= ?
+     GROUP BY vp.id, vp.po_number, vp.total_amount, vp.po_date, vp.created_at, vp.indent_id,
+              v.name, i.indent_number, i.site_name
+     ORDER BY LEFT(COALESCE(vp.po_date, vp.created_at),10) DESC, vp.id DESC
      LIMIT 200
   `, from);
 
@@ -463,7 +475,7 @@ function computeCmdDetail(db, daysRaw) {
   const poIds = pvsRaw.map(r => r.id);
   if (poIds.length) {
     const ph = poIds.map(() => '?').join(',');
-    for (const b of safeAll(db, `
+    for (const b of await safeAll(db, `
       SELECT vpi.vendor_po_id AS po_id,
              SUM(COALESCE(vpi.quantity, 0) * COALESCE(poi.rate, 0)) AS budget
         FROM vendor_po_items vpi
@@ -512,12 +524,12 @@ function computeCmdDetail(db, daysRaw) {
     ? Math.round((pvsTotals.sales_bill / pvsTotals.po_cost) * 1000) / 10 : null;
 
   // ── People ────────────────────────────────────────────────────
-  const headcount = safeAll(db, `
+  const headcount = await safeAll(db, `
     SELECT department, COUNT(*) cnt
     FROM employees WHERE status='active' AND department IS NOT NULL
     GROUP BY department ORDER BY cnt DESC
   `);
-  const activeFte = num(safeGet(db, `SELECT COUNT(*) c FROM employees WHERE status='active'`)?.c);
+  const activeFte = num((await safeGet(db, `SELECT COUNT(*) c FROM employees WHERE status='active'`))?.c);
   const revPerFte = activeFte > 0 ? Math.round(salesWin / activeFte) : null;
   const revPerFteByDept = headcount.map(d => ({
     department: d.department,
@@ -526,22 +538,22 @@ function computeCmdDetail(db, daysRaw) {
   }));
 
   // Attendance today — counts from attendance table
-  const attTodayPresent = num(safeGet(db, `SELECT COUNT(*) c FROM attendance WHERE date=? AND status IN ('present','late','half_day','short_day')`, today)?.c);
-  const attTodayLate = num(safeGet(db, `SELECT COUNT(*) c FROM attendance WHERE date=? AND status='late'`, today)?.c);
-  const attTodayLeave = num(safeGet(db, `SELECT COUNT(*) c FROM leave_requests WHERE status='approved' AND date(start_date) <= ? AND date(end_date) >= ?`, today, today)?.c);
+  const attTodayPresent = num((await safeGet(db, `SELECT COUNT(*) c FROM attendance WHERE date=? AND status IN ('present','late','half_day','short_day')`, today))?.c);
+  const attTodayLate = num((await safeGet(db, `SELECT COUNT(*) c FROM attendance WHERE date=? AND status='late'`, today))?.c);
+  const attTodayLeave = num((await safeGet(db, `SELECT COUNT(*) c FROM leave_requests WHERE status='approved' AND LEFT(start_date,10) <= ? AND LEFT(end_date,10) >= ?`, today, today))?.c);
   const attTodayAbsent = Math.max(0, activeFte - attTodayPresent - attTodayLeave);
 
   // KPI top/bottom — best-effort from score_entries.  If empty, returns null.
-  const kpiEntries = safeAll(db, `
+  const kpiEntries = await safeAll(db, `
     SELECT u.id user_id, u.name user_name,
            AVG(se.score) avg_score, COUNT(*) entry_count
     FROM score_entries se
     JOIN users u ON se.user_id = u.id
-    WHERE date(se.entry_date) >= date('now', '-30 days')
+    WHERE LEFT(se.entry_date,10) >= ?
     GROUP BY u.id, u.name
-    HAVING entry_count >= 2
+    HAVING COUNT(*) >= 2
     ORDER BY avg_score DESC
-  `);
+  `, daysAgo(30));
   const kpiTop = kpiEntries.slice(0, 3).map(r => ({
     user: r.user_name, pct: Math.round(r.avg_score),
   }));
@@ -550,7 +562,7 @@ function computeCmdDetail(db, daysRaw) {
   }));
 
   // ── Customer voice ─────────────────────────────────────────────
-  const complaintsByPriority = safeAll(db, `
+  const complaintsByPriority = await safeAll(db, `
     SELECT priority, COUNT(*) cnt FROM complaints
     WHERE status NOT IN ('resolved', 'closed')
     GROUP BY priority
@@ -559,24 +571,24 @@ function computeCmdDetail(db, daysRaw) {
   // Predictive flags — simple rule-based, returns top 6
   const predictiveFlags = [];
   // Slip risk: sites with committed_completion_date < today + 14 and DPR shows delayed/blocked
-  safeAll(db, `
+  (await safeAll(db, `
     SELECT po.po_number ref, bb.client_name client,
-           CAST(julianday(bb.committed_completion_date) - julianday('now') AS INTEGER) due_in,
-           bb.po_amount value
+           (LEFT(bb.committed_completion_date,10)::date - ?::date) due_in,
+           bb.po_amount AS value
     FROM purchase_orders po JOIN business_book bb ON po.business_book_id = bb.id
     WHERE po.status='in_progress'
       AND bb.committed_completion_date IS NOT NULL
-      AND date(bb.committed_completion_date) BETWEEN date('now') AND date('now', '+14 days')
+      AND LEFT(bb.committed_completion_date,10) BETWEEN ? AND ?
     ORDER BY due_in ASC LIMIT 3
-  `).forEach(r => predictiveFlags.push({
+  `, today, today, daysAhead(14))).forEach(r => predictiveFlags.push({
     kind: 'slip_risk', label: `${r.ref} slip risk · ${r.client}`,
     severity: r.due_in <= 7 ? 'red' : 'amber',
     detail: `due in ${r.due_in}d · ₹${Math.round(r.value/100000)}L`,
   }));
-  safeAll(db, `
+  (await safeAll(db, `
     SELECT client_name, SUM(outstanding_amount) total FROM receivables
     WHERE ageing_bucket='90+' GROUP BY client_name ORDER BY total DESC LIMIT 2
-  `).forEach(r => predictiveFlags.push({
+  `)).forEach(r => predictiveFlags.push({
     kind: 'churn_risk', label: `${r.client_name} churn risk`,
     severity: 'red', detail: `90+ overdue ₹${Math.round(num(r.total)/100000)}L`,
   }));
@@ -598,12 +610,12 @@ function computeCmdDetail(db, daysRaw) {
       AND (TRIM(po_number) = ''
            OR po_number IN ('5252525','141414','1111111111','00','0','1234567890')
            OR length(TRIM(po_number)) < 10)`;
-  const junkPos = safeAll(db, `
+  const junkPos = await safeAll(db, `
     SELECT lead_no, client_name, po_number, po_amount FROM business_book
     WHERE ${junkWhere}
     ORDER BY po_amount DESC LIMIT 10
   `);
-  const junkAgg = safeGet(db, `
+  const junkAgg = await safeGet(db, `
     SELECT COUNT(*) c, COALESCE(SUM(po_amount), 0) total FROM business_book
     WHERE ${junkWhere}
   `);
@@ -620,18 +632,18 @@ function computeCmdDetail(db, daysRaw) {
   // ── Live counts that War Room COO view used to show as "—" ───────
   // Mam (2026-05-30 audit): Material-in-Transit and Tools-Out tiles
   // were rendering literal em-dashes.  Now sourced live.
-  const materialsInTransit = num(safeGet(db, `
+  const materialsInTransit = num((await safeGet(db, `
     SELECT COUNT(*) c FROM indents WHERE status IN ('po_sent','dispatched')
-  `)?.c);
-  const toolsOut = num(safeGet(db, `
+  `))?.c);
+  const toolsOut = num((await safeGet(db, `
     SELECT COUNT(*) c FROM tools WHERE status='in_use'
-  `)?.c);
+  `))?.c);
 
   // ── IT systems status (sentry, etc.) ─────────────────────────────
   // Mam (2026-05-30 audit): War Room "Systems" traffic light used to
   // be hardcoded amber.  Live boolean now: green if Sentry DSN is
   // configured in app_settings, amber otherwise.
-  const sentryDsn = safeGet(db, `SELECT value FROM app_settings WHERE key='sentry_dsn'`);
+  const sentryDsn = await safeGet(db, `SELECT value FROM app_settings WHERE key='sentry_dsn'`);
   const itStatus = {
     sentry_active: !!(sentryDsn && sentryDsn.value && String(sentryDsn.value).trim().length > 0),
   };

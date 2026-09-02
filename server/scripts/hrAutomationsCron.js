@@ -19,7 +19,7 @@
 //
 // Skip cron via ERP_DISABLE_HR_CRON=1.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 let sendEmailFn = null;
 try { sendEmailFn = require('../lib/email').sendEmail; } catch (_) {}
 
@@ -27,19 +27,19 @@ const INTERVAL_MS = 30 * 60 * 1000;     // 30 min
 const OFFER_EXPIRY_DAYS = 7;
 const PENDING_APPROVAL_HRS = 24;
 
-function notify(db, { user_id, type, title, body, link_url, dedupe_key, sendEmailTo }) {
+async function notify({ user_id, type, title, body, link_url, dedupe_key, sendEmailTo }) {
   if (!user_id) return false;
   // Skip if we've already created this notification (dedupe_key match).
   if (dedupe_key) {
-    const existing = db.prepare('SELECT id FROM notifications WHERE user_id = ? AND dedupe_key = ?').get(user_id, dedupe_key);
+    const existing = await pg.get('SELECT id FROM notifications WHERE user_id = ? AND dedupe_key = ?', user_id, dedupe_key);
     if (existing) return false;
   }
   const channels = ['in_app'];
-  db.prepare(`INSERT INTO notifications
+  await pg.run(`INSERT INTO notifications
                 (user_id, type, title, body, link_url, channel_sent, dedupe_key)
-              VALUES (?,?,?,?,?,?,?)`)
-    .run(user_id, type, title, body || null, link_url || null,
-         channels.join(','), dedupe_key || null);
+              VALUES (?,?,?,?,?,?,?)`,
+    user_id, type, title, body || null, link_url || null,
+    channels.join(','), dedupe_key || null);
   // Best-effort email — never let SMTP failure block the in-app path.
   if (sendEmailFn && sendEmailTo) {
     sendEmailFn({
@@ -47,11 +47,11 @@ function notify(db, { user_id, type, title, body, link_url, dedupe_key, sendEmai
       subject: `[SEPL ERP] ${title}`,
       text: `${title}\n\n${body || ''}\n\n${link_url ? 'Open: ' + link_url : ''}`,
       html: `<h3>${escapeHtml(title)}</h3><p>${escapeHtml(body || '')}</p>${link_url ? `<p><a href="${escapeHtml(link_url)}">Open in ERP</a></p>` : ''}`,
-    }).then(r => {
+    }).then(async (r) => {
       if (r && r.skipped) return;
       // Patch the row to record the email channel got sent.
-      db.prepare('UPDATE notifications SET channel_sent = ? WHERE user_id = ? AND dedupe_key = ?')
-        .run('in_app,email', user_id, dedupe_key);
+      await pg.run('UPDATE notifications SET channel_sent = ? WHERE user_id = ? AND dedupe_key = ?',
+        'in_app,email', user_id, dedupe_key);
     }).catch(e => console.warn('[hr-cron] email send failed:', e.message));
   }
   return true;
@@ -62,11 +62,13 @@ function escapeHtml(s) {
 }
 
 // ── Scanners ────────────────────────────────────────────────────
-function scanInterviewReminders(db) {
+async function scanInterviewReminders() {
   // Candidates with interview_date in next 24h, status interview_scheduled.
   // Notify the interviewer (employee.user_id) — they're the one who needs
   // to prep.
-  const rows = db.prepare(`
+  const nowUtc = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const plus1Day = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const rows = await pg.all(`
     SELECT c.id, c.name, c.interview_date,
            e.id AS interviewer_emp_id, u.id AS interviewer_user_id, u.email AS interviewer_email
       FROM candidates c
@@ -74,14 +76,14 @@ function scanInterviewReminders(db) {
       LEFT JOIN users u     ON u.id = e.user_id
      WHERE c.status = 'interview_scheduled'
        AND c.interview_date IS NOT NULL
-       AND datetime(c.interview_date) BETWEEN datetime('now') AND datetime('now','+1 day')
-  `).all();
+       AND c.interview_date BETWEEN ? AND ?
+  `, nowUtc, plus1Day);
   let made = 0;
   for (const r of rows) {
     if (!r.interviewer_user_id) continue;
     const dateOnly = r.interview_date?.slice(0, 10);
     const dedupe = `interview_reminder:${r.id}:${dateOnly}`;
-    const ok = notify(db, {
+    const ok = await notify({
       user_id: r.interviewer_user_id,
       type: 'interview_reminder',
       title: `Interview tomorrow — ${r.name}`,
@@ -95,24 +97,25 @@ function scanInterviewReminders(db) {
   return made;
 }
 
-function scanOfferExpiries(db) {
+async function scanOfferExpiries() {
   // Offers sent >7 days ago, no candidate response yet.  Notify ALL
   // HR users so someone follows up.
-  const stale = db.prepare(`
+  const cutoff = new Date(Date.now() - OFFER_EXPIRY_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const stale = await pg.all(`
     SELECT id, name, offer_sent_at FROM candidates
      WHERE status = 'offer_sent'
        AND offer_sent_at IS NOT NULL
        AND offer_accepted_at IS NULL
        AND offer_declined_at IS NULL
-       AND julianday('now') - julianday(offer_sent_at) >= ?
-  `).all(OFFER_EXPIRY_DAYS);
+       AND offer_sent_at <= ?
+  `, cutoff);
   if (stale.length === 0) return 0;
-  const hrUsers = findHrUsers(db);
+  const hrUsers = await findHrUsers();
   let made = 0;
   for (const c of stale) {
     for (const u of hrUsers) {
       const dedupe = `offer_expiry:${c.id}:${Math.floor(Date.now() / (1000 * 60 * 60 * 24))}`;  // re-trigger daily
-      if (notify(db, {
+      if (await notify({
         user_id: u.id,
         type: 'offer_expiry',
         title: `Offer pending response — ${c.name}`,
@@ -126,24 +129,25 @@ function scanOfferExpiries(db) {
   return made;
 }
 
-function scanPendingApprovals(db) {
+async function scanPendingApprovals() {
   // Hiring requests still 'pending' after 24h.  Notify HR users
   // (separation of duties means the original requester can't approve).
-  const stale = db.prepare(`
+  const cutoff = new Date(Date.now() - PENDING_APPROVAL_HRS * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+  const stale = await pg.all(`
     SELECT id, position_title, department, requested_by, requested_by_name, created_at
       FROM hiring_requests
      WHERE status = 'pending'
-       AND julianday('now') - julianday(created_at) >= (? / 24.0)
-  `).all(PENDING_APPROVAL_HRS);
+       AND created_at <= ?
+  `, cutoff);
   if (stale.length === 0) return 0;
-  const hrUsers = findHrUsers(db);
+  const hrUsers = await findHrUsers();
   let made = 0;
   for (const r of stale) {
     for (const u of hrUsers) {
       // Don't notify the requester themselves — they already know.
       if (u.id === r.requested_by) continue;
       const dedupe = `approval_pending:${r.id}:${Math.floor(Date.now() / (1000 * 60 * 60 * 24))}`;
-      if (notify(db, {
+      if (await notify({
         user_id: u.id,
         type: 'approval_pending',
         title: `Hiring Request awaiting approval — ${r.position_title}`,
@@ -158,8 +162,8 @@ function scanPendingApprovals(db) {
 }
 
 // HR users = admin OR users with department/role containing "hr".
-function findHrUsers(db) {
-  return db.prepare(`
+async function findHrUsers() {
+  return pg.all(`
     SELECT DISTINCT u.id, u.email
       FROM users u
       LEFT JOIN user_roles ur ON ur.user_id = u.id
@@ -171,16 +175,15 @@ function findHrUsers(db) {
          OR LOWER(COALESCE(u.department, '')) LIKE '%hr%'
          OR LOWER(COALESCE(r.name, '')) LIKE '%hr%'
        )
-  `).all();
+  `);
 }
 
-function runOnce() {
+async function runOnce() {
   if (process.env.ERP_DISABLE_HR_CRON === '1') return;
   try {
-    const db = getDb();
-    const a = scanInterviewReminders(db);
-    const b = scanOfferExpiries(db);
-    const c = scanPendingApprovals(db);
+    const a = await scanInterviewReminders();
+    const b = await scanOfferExpiries();
+    const c = await scanPendingApprovals();
     if (a + b + c > 0) {
       console.log(`[hr-cron] notifications created · interview=${a} offer_expiry=${b} approval_pending=${c}`);
     }

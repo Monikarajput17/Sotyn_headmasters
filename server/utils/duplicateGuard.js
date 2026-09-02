@@ -17,7 +17,8 @@
 // entry.  NULL / blank input fields are ignored (so an empty optional
 // field doesn't accidentally match every NULL row).
 
-function findDuplicate(db, opts) {
+// `db` = the async pg adapter (or a tx client `t`) — callers `await` this.
+async function findDuplicate(db, opts) {
   const {
     table,
     fields,                 // { col_name: value, ... }
@@ -38,7 +39,7 @@ function findDuplicate(db, opts) {
   if (entries.length === 0) return null;
 
   const where = entries
-    .map(([k]) => `LOWER(TRIM(COALESCE(${k}, ''))) = LOWER(TRIM(?))`)
+    .map(([k]) => `LOWER(TRIM(COALESCE(${k}::text, ''))) = LOWER(TRIM(?))`)
     .join(' AND ');
   const params = entries.map(([_, v]) => String(v));
 
@@ -48,7 +49,7 @@ function findDuplicate(db, opts) {
 
   let row;
   try {
-    row = db.prepare(sql).get(...params);
+    row = await db.get(sql, ...params);
   } catch (e) {
     // Malformed table / column — fail open (don't block submission on
     // our bug); just log so we can fix the call-site.

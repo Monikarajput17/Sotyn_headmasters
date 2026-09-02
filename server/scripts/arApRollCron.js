@@ -5,13 +5,13 @@
 // every still-'planned', not-settled entry whose date has passed onto the next
 // collection day for its kind. Each move is logged in the AR/AP change log, so
 // it's auditable and reversible. Skip via ERP_DISABLE_ARAP_ROLL=1.
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
-function runOnce() {
+async function runOnce() {
   try {
     const { rollOverdue } = require('../routes/arApTracker');
     if (typeof rollOverdue !== 'function') return;
-    const n = rollOverdue(getDb(), { name: 'System (auto-roll)' });
+    const n = await rollOverdue(pg, { name: 'System (auto-roll)' });
     if (n) console.log(`[arap-roll] rolled ${n} overdue AR entr${n === 1 ? 'y' : 'ies'} to the next Mon/Thu`);
   } catch (e) {
     console.error('[arap-roll] run failed:', e.message);
@@ -24,9 +24,9 @@ function scheduleAt(hour, minute, fn, label) {
   next.setHours(hour, minute, 0, 0);
   if (next <= now) next.setDate(next.getDate() + 1);
   console.log(`[arap-roll] ${label} scheduled for ${next.toLocaleString()}`);
-  setTimeout(() => {
-    try { fn(); } catch (e) { console.error('[arap-roll]', e.message); }
-    setInterval(() => { try { fn(); } catch (e) { console.error('[arap-roll]', e.message); } }, 24 * 60 * 60 * 1000);
+  setTimeout(async () => {
+    try { await fn(); } catch (e) { console.error('[arap-roll]', e.message); }
+    setInterval(async () => { try { await fn(); } catch (e) { console.error('[arap-roll]', e.message); } }, 24 * 60 * 60 * 1000);
   }, next - now);
 }
 

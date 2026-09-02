@@ -21,26 +21,28 @@
 // doesn't inherit hr.js's authMiddleware).
 
 const express = require('express');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const router = express.Router();
 
 // ── GET /api/public/offer/:token ─────────────────────────────────
 // Returns just enough for the public offer page to render the
 // letter and show Accept / Decline buttons.
-router.get('/offer/:token', (req, res) => {
-  const token = String(req.params.token || '');
-  if (!token || token.length < 16) return res.status(400).json({ error: 'Invalid offer link' });
-  const c = getDb().prepare(
-    `SELECT id, name, email, phone, address,
-            position, offered_position, offered_salary, joining_date,
-            reporting_to, salary_breakup, offer_sent_at, status,
-            offer_accepted_at, offer_declined_at, offer_response_note
-       FROM candidates WHERE offer_token = ?`
-  ).get(token);
-  if (!c) return res.status(404).json({ error: 'Offer not found or has been revoked' });
-  // Note: we return status so the frontend can show a "this offer
-  // was already accepted on X" message rather than the action buttons.
-  res.json({ ok: true, offer: c });
+router.get('/offer/:token', async (req, res) => {
+  try {
+    const token = String(req.params.token || '');
+    if (!token || token.length < 16) return res.status(400).json({ error: 'Invalid offer link' });
+    const c = await pg.get(
+      `SELECT id, name, email, phone, address,
+              position, offered_position, offered_salary, joining_date,
+              reporting_to, salary_breakup, offer_sent_at, status,
+              offer_accepted_at, offer_declined_at, offer_response_note
+         FROM candidates WHERE offer_token = ?`,
+      token);
+    if (!c) return res.status(404).json({ error: 'Offer not found or has been revoked' });
+    // Note: we return status so the frontend can show a "this offer
+    // was already accepted on X" message rather than the action buttons.
+    res.json({ ok: true, offer: c });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── POST /api/public/offer/:token/respond ────────────────────────
@@ -48,15 +50,15 @@ router.get('/offer/:token', (req, res) => {
 // Marks the candidate accepted or rejected.  Idempotency: if the
 // candidate has already responded, returns 409 with the previous
 // decision so the public page can show a clear message.
-router.post('/offer/:token/respond', (req, res) => {
+router.post('/offer/:token/respond', async (req, res) => {
+  try {
   const token = String(req.params.token || '');
   if (!token || token.length < 16) return res.status(400).json({ error: 'Invalid offer link' });
   const { decision, note } = req.body || {};
   if (!['accept','decline'].includes(decision)) {
     return res.status(400).json({ error: 'decision must be accept or decline' });
   }
-  const db = getDb();
-  const c = db.prepare('SELECT id, status, offer_accepted_at, offer_declined_at FROM candidates WHERE offer_token = ?').get(token);
+  const c = await pg.get('SELECT id, status, offer_accepted_at, offer_declined_at FROM candidates WHERE offer_token = ?', token);
   if (!c) return res.status(404).json({ error: 'Offer not found' });
   if (c.offer_accepted_at) return res.status(409).json({ error: 'This offer was already accepted', responded_at: c.offer_accepted_at });
   if (c.offer_declined_at) return res.status(409).json({ error: 'This offer was already declined', responded_at: c.offer_declined_at });
@@ -67,26 +69,27 @@ router.post('/offer/:token/respond', (req, res) => {
   const isAccept = decision === 'accept';
   const newStatus = isAccept ? 'accepted' : 'rejected';
   const nowField  = isAccept ? 'offer_accepted_at' : 'offer_declined_at';
-  db.prepare(`UPDATE candidates SET
+  await pg.run(`UPDATE candidates SET
                 ${nowField} = CURRENT_TIMESTAMP,
                 offer_response_note = ?,
                 status = ?
-              WHERE id = ?`)
-    .run(note || null, newStatus, c.id);
+              WHERE id = ?`,
+    note || null, newStatus, c.id);
 
   // Log to candidate_events (best-effort — we have no req.user here,
   // so user_id stays NULL; user_name is the candidate's own name).
   try {
-    const name = db.prepare('SELECT name FROM candidates WHERE id=?').get(c.id)?.name;
-    db.prepare(`INSERT INTO candidate_events
+    const name = (await pg.get('SELECT name FROM candidates WHERE id=?', c.id))?.name;
+    await pg.run(`INSERT INTO candidate_events
                   (candidate_id, event_type, to_status, note, user_name)
-                VALUES (?,?,?,?,?)`)
-      .run(c.id, isAccept ? 'offer_accepted' : 'offer_declined', newStatus,
-           `Candidate ${isAccept ? 'accepted' : 'declined'} via public link${note ? ' — ' + note : ''}`,
-           `${name || 'Candidate'} (via offer link)`);
+                VALUES (?,?,?,?,?)`,
+      c.id, isAccept ? 'offer_accepted' : 'offer_declined', newStatus,
+      `Candidate ${isAccept ? 'accepted' : 'declined'} via public link${note ? ' — ' + note : ''}`,
+      `${name || 'Candidate'} (via offer link)`);
   } catch (e) { console.warn('[publicHr] event log skipped:', e.message); }
 
   res.json({ ok: true, decision, status: newStatus });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

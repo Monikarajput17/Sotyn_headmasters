@@ -23,70 +23,26 @@
 // ============================================================================
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, adminOnly } = require('../middleware/auth');
 const { computeScorecard } = require('./scoring');
 
 router.use(authMiddleware);
 
-// ---- tables (idempotent, self-creating — same pattern as raci.js) ----------
-try {
-  getDb().exec(`
-    CREATE TABLE IF NOT EXISTS gam_team (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      motto TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS gam_team_member (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      team_id INTEGER REFERENCES gam_team(id) ON DELETE CASCADE,
-      user_id INTEGER UNIQUE,             -- a user belongs to at most one pod
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS gam_config (
-      key TEXT PRIMARY KEY,
-      value TEXT
-    );
-    -- Phase 3 (created now so the schema is stable):
-    CREATE TABLE IF NOT EXISTS gam_kudos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      from_user INTEGER, to_user INTEGER,
-      points REAL DEFAULT 1, note TEXT,
-      period_key TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS gam_bonus (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER, points REAL DEFAULT 0, note TEXT,
-      awarded_by INTEGER, period_key TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS gam_award (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      period_type TEXT NOT NULL,          -- week | month | quarter | year
-      period_key TEXT NOT NULL,           -- e.g. 2026-06-22 / 2026-06 / 2026-Q2 / 2026
-      scope TEXT NOT NULL,                -- individual | team
-      winner_id INTEGER,                  -- user_id or team_id
-      winner_name TEXT,
-      score REAL,
-      title TEXT,
-      locked_by INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE(period_type, period_key, scope)
-    );
-  `);
-} catch (e) { /* ignore — tables may already exist */ }
+// ---- tables ----------------------------------------------------------------
+// gam_team / gam_team_member / gam_config / gam_kudos / gam_bonus / gam_award
+// now live in the migrated Postgres schema — the old module-load CREATE TABLE
+// block is gone.
 
 // ---- config (admin-tunable, no code change needed) -------------------------
 const CONFIG_DEFAULTS = {
   min_activity: '1',                  // work units a week needs to count
   league_name: 'Champions League',
 };
-function getConfig() {
+async function getConfig() {
   const out = { ...CONFIG_DEFAULTS };
   try {
-    for (const r of getDb().prepare('SELECT key, value FROM gam_config').all()) out[r.key] = r.value;
+    for (const r of await pg.all('SELECT key, value FROM gam_config')) out[r.key] = r.value;
   } catch (_) {}
   return out;
 }
@@ -147,13 +103,13 @@ function weekStartsIn(start, end) {
 // ---- the scoring core ------------------------------------------------------
 // Average the weekly Champions Scores for one user across `weeks`, counting
 // only the weeks where they were active enough to qualify.
-function userPeriodScore(db, userId, weeks, minActivity, cache) {
+async function userPeriodScore(db, userId, weeks, minActivity, cache) {
   let sum = 0, n = 0, hasTemplate = false, totalActivity = 0;
   for (const wk of weeks) {
     const ck = userId + '|' + wk;
     let sc = cache.get(ck);
     if (sc === undefined) {
-      try { sc = computeScorecard(db, userId, wk); } catch (_) { sc = null; }
+      try { sc = await computeScorecard(db, userId, wk); } catch (_) { sc = null; }
       cache.set(ck, sc);
     }
     if (!sc || !sc.template || sc.total_weight <= 0) continue;
@@ -178,7 +134,7 @@ const LB_TTL_MS = 90 * 1000;
 
 // ---- GET /gamification/leaderboard ----------------------------------------
 //   ?period=week|month|quarter|year & ?date=YYYY-MM-DD (defaults to today IST)
-router.get('/leaderboard', (req, res) => {
+router.get('/leaderboard', async (req, res) => {
   try {
     const period = ['week', 'month', 'quarter', 'year'].includes(req.query.period) ? req.query.period : 'month';
     const date = /^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') ? req.query.date : istTodayYMD();
@@ -186,28 +142,27 @@ router.get('/leaderboard', (req, res) => {
     const hit = lbCache.get(cacheKey);
     if (hit && (Date.now() - hit.t) < LB_TTL_MS) return res.json(hit.v);
 
-    const db = getDb();
-    const cfg = getConfig();
+    const cfg = await getConfig();
     const minActivity = Math.max(0, parseFloat(cfg.min_activity) || 0);
     const bounds = periodBounds(period, date);
     const weeks = weekStartsIn(bounds.start, bounds.end);
 
-    const users = db.prepare(`
+    const users = await pg.all(`
       SELECT id, name, role, department FROM users
-      WHERE COALESCE(active, 1) = 1 ORDER BY name`).all();
+      WHERE COALESCE(active, 1) = 1 ORDER BY name`);
 
     // user_id -> {team_id, team_name}
     const teamOf = {};
-    for (const r of db.prepare(`
+    for (const r of await pg.all(`
       SELECT tm.user_id, tm.team_id, t.name AS team_name, t.motto
-      FROM gam_team_member tm JOIN gam_team t ON t.id = tm.team_id`).all()) {
+      FROM gam_team_member tm JOIN gam_team t ON t.id = tm.team_id`)) {
       teamOf[r.user_id] = r;
     }
 
     const scCache = new Map();
     const qualified = [], notQualified = [];
     for (const u of users) {
-      const r = userPeriodScore(db, u.id, weeks, minActivity, scCache);
+      const r = await userPeriodScore(pg, u.id, weeks, minActivity, scCache);
       if (!r.hasTemplate) continue;            // no scorecard set up → not a player yet
       const row = {
         user_id: u.id, name: u.name, role: u.role, department: u.department,
@@ -220,12 +175,12 @@ router.get('/leaderboard', (req, res) => {
     qualified.forEach((r, i) => { r.rank = i + 1; });
 
     // Teams = average of qualified members' scores
-    const teams = db.prepare('SELECT t.id, t.name, t.motto, COUNT(tm.user_id) AS member_count FROM gam_team t LEFT JOIN gam_team_member tm ON tm.team_id = t.id GROUP BY t.id ORDER BY t.name').all();
+    const teams = await pg.all('SELECT t.id, t.name, t.motto, COUNT(tm.user_id) AS member_count FROM gam_team t LEFT JOIN gam_team_member tm ON tm.team_id = t.id GROUP BY t.id ORDER BY t.name');
     const rankByUser = {}; qualified.forEach(r => { rankByUser[r.user_id] = { rank: r.rank, score: r.score }; });
     // Full roster per team — so the dashboard can show every member with their
     // team (e.g. "Ankit Raj · Naye Nawab") and rank, even those without a score.
     const membersByTeam = {};
-    for (const m of db.prepare('SELECT tm.team_id, tm.user_id, u.name FROM gam_team_member tm JOIN users u ON u.id = tm.user_id WHERE COALESCE(u.active,1)=1').all()) {
+    for (const m of await pg.all('SELECT tm.team_id, tm.user_id, u.name FROM gam_team_member tm JOIN users u ON u.id = tm.user_id WHERE COALESCE(u.active,1)=1')) {
       (membersByTeam[m.team_id] = membersByTeam[m.team_id] || []).push({ user_id: m.user_id, name: m.name, rank: rankByUser[m.user_id]?.rank ?? null, score: rankByUser[m.user_id]?.score ?? null });
     }
     const teamRows = teams.map(t => {
@@ -260,59 +215,69 @@ router.get('/leaderboard', (req, res) => {
 });
 
 // ---- TEAMS -----------------------------------------------------------------
-router.get('/teams', (req, res) => {
-  const db = getDb();
-  const teams = db.prepare('SELECT * FROM gam_team ORDER BY name').all();
-  const members = db.prepare(`
-    SELECT tm.team_id, tm.user_id, u.name, u.role, u.department
-    FROM gam_team_member tm JOIN users u ON u.id = tm.user_id ORDER BY u.name`).all();
-  const byTeam = {};
-  for (const m of members) (byTeam[m.team_id] = byTeam[m.team_id] || []).push(m);
-  // Active scorable users not yet on a team (so the admin can place them)
-  const assigned = new Set(members.map(m => m.user_id));
-  const unassigned = db.prepare('SELECT id, name, role, department FROM users WHERE COALESCE(active,1)=1 ORDER BY name')
-    .all().filter(u => !assigned.has(u.id));
-  res.json({ teams: teams.map(t => ({ ...t, members: byTeam[t.id] || [] })), unassigned });
+router.get('/teams', async (req, res) => {
+  try {
+    const teams = await pg.all('SELECT * FROM gam_team ORDER BY name');
+    const members = await pg.all(`
+      SELECT tm.team_id, tm.user_id, u.name, u.role, u.department
+      FROM gam_team_member tm JOIN users u ON u.id = tm.user_id ORDER BY u.name`);
+    const byTeam = {};
+    for (const m of members) (byTeam[m.team_id] = byTeam[m.team_id] || []).push(m);
+    // Active scorable users not yet on a team (so the admin can place them)
+    const assigned = new Set(members.map(m => m.user_id));
+    const unassigned = (await pg.all('SELECT id, name, role, department FROM users WHERE COALESCE(active,1)=1 ORDER BY name'))
+      .filter(u => !assigned.has(u.id));
+    res.json({ teams: teams.map(t => ({ ...t, members: byTeam[t.id] || [] })), unassigned });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/teams', adminOnly, (req, res) => {
-  const { name, motto } = req.body || {};
-  if (!name || !String(name).trim()) return res.status(400).json({ error: 'Team name required' });
-  const r = getDb().prepare('INSERT INTO gam_team (name, motto) VALUES (?, ?)').run(String(name).trim(), motto || null);
-  lbCache.clear();
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/teams', adminOnly, async (req, res) => {
+  try {
+    const { name, motto } = req.body || {};
+    if (!name || !String(name).trim()) return res.status(400).json({ error: 'Team name required' });
+    const r = await pg.run('INSERT INTO gam_team (name, motto) VALUES (?, ?)', String(name).trim(), motto || null);
+    lbCache.clear();
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/teams/:id', adminOnly, (req, res) => {
-  const { name, motto } = req.body || {};
-  getDb().prepare('UPDATE gam_team SET name=COALESCE(?,name), motto=COALESCE(?,motto) WHERE id=?')
-    .run(name ? String(name).trim() : null, motto !== undefined ? motto : null, req.params.id);
-  lbCache.clear();
-  res.json({ message: 'Saved' });
+router.put('/teams/:id', adminOnly, async (req, res) => {
+  try {
+    const { name, motto } = req.body || {};
+    await pg.run('UPDATE gam_team SET name=COALESCE(?,name), motto=COALESCE(?,motto) WHERE id=?',
+      name ? String(name).trim() : null, motto !== undefined ? motto : null, req.params.id);
+    lbCache.clear();
+    res.json({ message: 'Saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/teams/:id', adminOnly, (req, res) => {
-  const db = getDb();
-  db.prepare('DELETE FROM gam_team_member WHERE team_id=?').run(req.params.id);
-  db.prepare('DELETE FROM gam_team WHERE id=?').run(req.params.id);
-  lbCache.clear();
-  res.json({ message: 'Deleted' });
+router.delete('/teams/:id', adminOnly, async (req, res) => {
+  try {
+    await pg.run('DELETE FROM gam_team_member WHERE team_id=?', req.params.id);
+    await pg.run('DELETE FROM gam_team WHERE id=?', req.params.id);
+    lbCache.clear();
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Assign / move a user into a team (user is unique → moves out of any old pod)
-router.post('/teams/:id/members', adminOnly, (req, res) => {
-  const userId = parseInt(req.body?.user_id, 10);
-  if (!userId) return res.status(400).json({ error: 'user_id required' });
-  getDb().prepare(`INSERT INTO gam_team_member (team_id, user_id) VALUES (?, ?)
-    ON CONFLICT(user_id) DO UPDATE SET team_id=excluded.team_id`).run(req.params.id, userId);
-  lbCache.clear();
-  res.json({ message: 'Added' });
+router.post('/teams/:id/members', adminOnly, async (req, res) => {
+  try {
+    const userId = parseInt(req.body?.user_id, 10);
+    if (!userId) return res.status(400).json({ error: 'user_id required' });
+    await pg.run(`INSERT INTO gam_team_member (team_id, user_id) VALUES (?, ?)
+      ON CONFLICT(user_id) DO UPDATE SET team_id=excluded.team_id`, req.params.id, userId);
+    lbCache.clear();
+    res.json({ message: 'Added' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/teams/:id/members/:userId', adminOnly, (req, res) => {
-  getDb().prepare('DELETE FROM gam_team_member WHERE team_id=? AND user_id=?').run(req.params.id, req.params.userId);
-  lbCache.clear();
-  res.json({ message: 'Removed' });
+router.delete('/teams/:id/members/:userId', adminOnly, async (req, res) => {
+  try {
+    await pg.run('DELETE FROM gam_team_member WHERE team_id=? AND user_id=?', req.params.id, req.params.userId);
+    lbCache.clear();
+    res.json({ message: 'Removed' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---- AUTO-BALANCE — the headline "make fair teams" feature ------------------
@@ -320,46 +285,45 @@ router.delete('/teams/:id/members/:userId', adminOnly, (req, res) => {
 // snake draft on their CURRENT score: rank players, then deal 1→N, N→1,
 // 1→N… so each team gets a comparable mix of strong and developing players.
 const TEAM_NAME_POOL = ['Titans', 'Vanguard', 'Apex', 'Falcons', 'Dynamos', 'Pinnacle', 'Spartans', 'Trailblazers', 'Phoenix', 'Olympians'];
-router.post('/teams/auto-balance', adminOnly, (req, res) => {
+router.post('/teams/auto-balance', adminOnly, async (req, res) => {
   try {
-    const db = getDb();
     const count = Math.max(2, Math.min(10, parseInt(req.body?.count, 10) || 4));
     const date = /^\d{4}-\d{2}-\d{2}$/.test(req.body?.date || '') ? req.body.date : istTodayYMD();
     const bounds = periodBounds('month', date);
     const weeks = weekStartsIn(bounds.start, bounds.end);
-    const cfg = getConfig();
+    const cfg = await getConfig();
     const minActivity = Math.max(0, parseFloat(cfg.min_activity) || 0);
 
     // Rank scorable users by current monthly score (unscored sink to the end).
-    const users = db.prepare('SELECT id, name FROM users WHERE COALESCE(active,1)=1').all();
+    const users = await pg.all('SELECT id, name FROM users WHERE COALESCE(active,1)=1');
     const scCache = new Map();
-    const ranked = users
-      .map(u => ({ ...u, sc: userPeriodScore(db, u.id, weeks, minActivity, scCache) }))
+    const ranked = [];
+    for (const u of users) ranked.push({ ...u, sc: await userPeriodScore(pg, u.id, weeks, minActivity, scCache) });
+    const players = ranked
       .filter(u => u.sc.hasTemplate)
       .sort((a, b) => (b.sc.score ?? -1) - (a.sc.score ?? -1));
-    if (!ranked.length) return res.status(400).json({ error: 'No scorable employees found (assign Performance templates first).' });
+    if (!players.length) return res.status(400).json({ error: 'No scorable employees found (assign Performance templates first).' });
 
     // Fresh teams
-    db.prepare('DELETE FROM gam_team_member').run();
-    db.prepare('DELETE FROM gam_team').run();
+    await pg.run('DELETE FROM gam_team_member');
+    await pg.run('DELETE FROM gam_team');
     const teamIds = [];
     for (let i = 0; i < count; i++) {
       const name = TEAM_NAME_POOL[i] || `Team ${i + 1}`;
-      teamIds.push(db.prepare('INSERT INTO gam_team (name) VALUES (?)').run(name).lastInsertRowid);
+      teamIds.push((await pg.run('INSERT INTO gam_team (name) VALUES (?)', name)).lastInsertRowid);
     }
     // Snake draft
-    const addMember = db.prepare('INSERT INTO gam_team_member (team_id, user_id) VALUES (?, ?)');
-    const tx = db.transaction(() => {
-      ranked.forEach((u, idx) => {
+    await pg.tx(async (t) => {
+      for (let idx = 0; idx < players.length; idx++) {
+        const u = players[idx];
         const round = Math.floor(idx / count);
         const pos = idx % count;
         const teamIdx = round % 2 === 0 ? pos : (count - 1 - pos);
-        addMember.run(teamIds[teamIdx], u.id);
-      });
+        await t.run('INSERT INTO gam_team_member (team_id, user_id) VALUES (?, ?)', teamIds[teamIdx], u.id);
+      }
     });
-    tx();
     lbCache.clear();
-    res.json({ message: `Created ${count} balanced teams from ${ranked.length} players`, teams: count, players: ranked.length });
+    res.json({ message: `Created ${count} balanced teams from ${players.length} players`, teams: count, players: players.length });
   } catch (err) {
     console.error('auto-balance error', err);
     res.status(500).json({ error: err.message });
@@ -367,15 +331,20 @@ router.post('/teams/auto-balance', adminOnly, (req, res) => {
 });
 
 // ---- CONFIG ----------------------------------------------------------------
-router.get('/config', (req, res) => res.json(getConfig()));
-router.put('/config', adminOnly, (req, res) => {
-  const db = getDb();
-  const up = db.prepare('INSERT INTO gam_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-  for (const k of Object.keys(CONFIG_DEFAULTS)) {
-    if (req.body && req.body[k] !== undefined && req.body[k] !== null) up.run(k, String(req.body[k]));
-  }
-  lbCache.clear();
-  res.json(getConfig());
+router.get('/config', async (req, res) => {
+  try { res.json(await getConfig()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/config', adminOnly, async (req, res) => {
+  try {
+    for (const k of Object.keys(CONFIG_DEFAULTS)) {
+      if (req.body && req.body[k] !== undefined && req.body[k] !== null) {
+        await pg.run('INSERT INTO gam_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, String(req.body[k]));
+      }
+    }
+    lbCache.clear();
+    res.json(await getConfig());
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

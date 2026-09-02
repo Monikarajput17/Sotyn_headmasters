@@ -13,7 +13,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission, adminOnly } = require('../middleware/auth');
 const { getShiftHistory, resolveShift, lateCutoffMinutes, weekOffDow } = require('../lib/shifts');
 
@@ -21,16 +21,16 @@ router.use(authMiddleware);
 
 // ---------- helpers ----------
 
-function ensureSettingsRow(db) {
-  const row = db.prepare('SELECT id FROM payroll_settings WHERE id=1').get();
+async function ensureSettingsRow() {
+  const row = await pg.get('SELECT id FROM payroll_settings WHERE id=1');
   if (!row) {
-    db.prepare(`INSERT INTO payroll_settings (id) VALUES (1)`).run();
+    await pg.run(`INSERT INTO payroll_settings (id) VALUES (1)`);
   }
 }
 
-function getSettings(db) {
-  ensureSettingsRow(db);
-  return db.prepare('SELECT * FROM payroll_settings WHERE id=1').get();
+async function getSettings() {
+  await ensureSettingsRow();
+  return pg.get('SELECT * FROM payroll_settings WHERE id=1');
 }
 
 function daysInMonth(month) {
@@ -67,51 +67,54 @@ function timeToMinutes(t) {
 // ---------- routes ----------
 
 // GET current settings
-router.get('/settings', (req, res) => {
+router.get('/settings', async (req, res) => {
   try {
-    res.json(getSettings(getDb()));
+    res.json(await getSettings());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // PUT update settings (admin only)
-router.put('/settings', adminOnly, (req, res) => {
-  const db = getDb();
-  ensureSettingsRow(db);
-  const fields = [
-    'late_after_time','half_day_after_time','min_hours_full_day','min_hours_half_day',
-    'skip_half_day_if_short_leave','lates_to_absent','late_grace_count','late_per_minute_rate',
-    'working_days_per_month','sundays_paid',
-    'cl_per_month','sl_per_month','pl_per_month','short_leave_per_month',
-    'ot_threshold_hours','ot_rate_multiplier','pay_cycle_start_day',
-    'basic_pct','conveyance_pct','hra_pct','adhoc_pct','misc_pct'
-  ];
-  const sets = [];
-  const vals = [];
-  for (const f of fields) {
-    if (req.body[f] !== undefined) {
-      sets.push(`${f} = ?`);
-      vals.push(req.body[f]);
+router.put('/settings', adminOnly, async (req, res) => {
+  try {
+    await ensureSettingsRow();
+    const fields = [
+      'late_after_time','half_day_after_time','min_hours_full_day','min_hours_half_day',
+      'skip_half_day_if_short_leave','lates_to_absent','late_grace_count','late_per_minute_rate',
+      'working_days_per_month','sundays_paid',
+      'cl_per_month','sl_per_month','pl_per_month','short_leave_per_month',
+      'ot_threshold_hours','ot_rate_multiplier','pay_cycle_start_day',
+      'basic_pct','conveyance_pct','hra_pct','adhoc_pct','misc_pct'
+    ];
+    const sets = [];
+    const vals = [];
+    for (const f of fields) {
+      if (req.body[f] !== undefined) {
+        sets.push(`${f} = ?`);
+        vals.push(req.body[f]);
+      }
     }
+    if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
+    sets.push('updated_at = CURRENT_TIMESTAMP', 'updated_by = ?');
+    vals.push(req.user.id);
+    await pg.run(`UPDATE payroll_settings SET ${sets.join(', ')} WHERE id = 1`, ...vals);
+    res.json({ message: 'Settings updated', settings: await getSettings() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
-  sets.push('updated_at = CURRENT_TIMESTAMP', 'updated_by = ?');
-  vals.push(req.user.id);
-  db.prepare(`UPDATE payroll_settings SET ${sets.join(', ')} WHERE id = 1`).run(...vals);
-  res.json({ message: 'Settings updated', settings: getSettings(db) });
 });
 
 // Core calculator — runs for one employee for one month, returns full breakdown.
-function calculateForEmployee(db, settings, employee, month) {
+async function calculateForEmployee(settings, employee, month) {
   const [year, mm] = month.split('-').map(Number);
   const totalDays = daysInMonth(month);
 
   // Advance salary taken this month (deducted from net pay) + a food
   // allowance (ADDED to net pay) — both entered by admin on the payroll
   // screen and stored on the same monthly row (mam 2026-06-12).
-  const adjRow = db.prepare('SELECT amount, food, paid_days_override, cl_override, late_penalty_override FROM payroll_advances WHERE month=? AND employee_id=?')
-    .get(month, employee.id) || {};
+  const adjRow = await pg.get('SELECT amount, food, paid_days_override, cl_override, late_penalty_override FROM payroll_advances WHERE month=? AND employee_id=?',
+    month, employee.id) || {};
   const advance = round2(adjRow.amount || 0);
   const food = round2(adjRow.food || 0);
 
@@ -194,12 +197,12 @@ function calculateForEmployee(db, settings, employee, month) {
   // linkage so the next run is fast.
   let userId = employee.user_id;
   if (!userId && employee.name) {
-    const nameMatch = db.prepare(
-      `SELECT id FROM users WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND active != 0 LIMIT 1`
-    ).get(employee.name);
+    const nameMatch = await pg.get(
+      `SELECT id FROM users WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) AND active != 0 LIMIT 1`,
+      employee.name);
     if (nameMatch) {
       userId = nameMatch.id;
-      try { db.prepare('UPDATE employees SET user_id = ? WHERE id = ?').run(userId, employee.id); } catch (e) { /* ignore */ }
+      try { await pg.run('UPDATE employees SET user_id = ? WHERE id = ?', userId, employee.id); } catch (e) { /* ignore */ }
     }
   }
 
@@ -207,18 +210,18 @@ function calculateForEmployee(db, settings, employee, month) {
   const startDate = `${month}-01`;
   const endDate = `${month}-${pad(totalDays)}`;
   const attRows = userId
-    ? db.prepare(`SELECT date, punch_in_time, punch_out_time, total_hours, status, admin_marked
-                  FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?`).all(userId, startDate, endDate)
+    ? await pg.all(`SELECT date, punch_in_time, punch_out_time, total_hours, status, admin_marked
+                  FROM attendance WHERE user_id = ? AND date BETWEEN ? AND ?`, userId, startDate, endDate)
     : [];
   const attByDate = {};
   for (const r of attRows) attByDate[r.date] = r;
 
   // Pull approved leaves overlapping this month
   const leaveRows = userId
-    ? db.prepare(`SELECT leave_type, from_date, to_date, days, hours
+    ? await pg.all(`SELECT leave_type, from_date, to_date, days, hours
                   FROM leave_requests
                   WHERE user_id = ? AND status='approved'
-                    AND NOT (to_date < ? OR from_date > ?)`).all(userId, startDate, endDate)
+                    AND NOT (to_date < ? OR from_date > ?)`, userId, startDate, endDate)
     : [];
 
   // Track allowance usage
@@ -253,7 +256,7 @@ function calculateForEmployee(db, settings, employee, month) {
   // shift change only applies from its effective_from date onward — a past
   // month's payroll never recomputes differently because the shift changed
   // later.
-  const shiftHistory = getShiftHistory(db, employee.id);
+  const shiftHistory = await getShiftHistory(pg, employee.id);
 
   for (let day = 1; day <= lastDay; day++) {
     const dateStr = `${year}-${pad(mm)}-${pad(day)}`;
@@ -594,30 +597,29 @@ function dayName(y, m, d) {
 }
 
 // GET monthly payroll for ALL employees
-router.get('/calculate', requirePermission('payroll', 'view'), (req, res) => {
+router.get('/calculate', requirePermission('payroll', 'view'), async (req, res) => {
   try {
     const month = req.query.month;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
-    const db = getDb();
-    const settings = getSettings(db);
-    const employees = db.prepare(`SELECT id, user_id, name, department, designation, join_date, salary, ot_eligible, cl_eligible, cl_opening_balance FROM employees WHERE status='active' AND salary > 0`).all();
+    const settings = await getSettings();
+    const employees = await pg.all(`SELECT id, user_id, name, department, designation, join_date, salary, ot_eligible, cl_eligible, cl_opening_balance FROM employees WHERE status='active' AND salary > 0`);
     // Active employees with NO salary set are silently excluded from payroll —
     // surface them so admin knows who's missing and why (mam 2026-06-12:
     // "X not in payroll even they present").  Salary, not attendance, gates
     // inclusion.
-    const excludedNoSalary = db.prepare(
-      `SELECT id, name FROM employees WHERE status='active' AND (salary IS NULL OR salary <= 0) ORDER BY name COLLATE NOCASE`
-    ).all();
+    const excludedNoSalary = await pg.all(
+      `SELECT id, name FROM employees WHERE status='active' AND (salary IS NULL OR salary <= 0) ORDER BY LOWER(name)`);
 
     // If a run is finalised for this month, return saved snapshots; else live-calc
-    const finalised = db.prepare('SELECT COUNT(*) as c FROM payroll_runs WHERE month=? AND status=?').get(month, 'finalised').c;
-    const out = employees.map(emp => {
+    const finalised = (await pg.get('SELECT COUNT(*) as c FROM payroll_runs WHERE month=? AND status=?', month, 'finalised')).c;
+    const out = [];
+    for (const emp of employees) {
       if (finalised) {
-        const snap = db.prepare('SELECT * FROM payroll_runs WHERE month=? AND employee_id=?').get(month, emp.id);
-        if (snap) return { ...snap, locked: true };
+        const snap = await pg.get('SELECT * FROM payroll_runs WHERE month=? AND employee_id=?', month, emp.id);
+        if (snap) { out.push({ ...snap, locked: true }); continue; }
       }
-      return calculateForEmployee(db, settings, emp, month);
-    });
+      out.push(await calculateForEmployee(settings, emp, month));
+    }
 
     res.json({ month, settings, employees: out, excluded_no_salary: excludedNoSalary });
   } catch (err) {
@@ -627,15 +629,14 @@ router.get('/calculate', requirePermission('payroll', 'view'), (req, res) => {
 });
 
 // GET single employee detail (with breakdown)
-router.get('/calculate/:employee_id', requirePermission('payroll', 'view'), (req, res) => {
+router.get('/calculate/:employee_id', requirePermission('payroll', 'view'), async (req, res) => {
   try {
     const month = req.query.month;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
-    const db = getDb();
-    const settings = getSettings(db);
-    const emp = db.prepare('SELECT * FROM employees WHERE id=?').get(req.params.employee_id);
+    const settings = await getSettings();
+    const emp = await pg.get('SELECT * FROM employees WHERE id=?', req.params.employee_id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
-    const result = calculateForEmployee(db, settings, emp, month);
+    const result = await calculateForEmployee(settings, emp, month);
     res.json({ month, settings, ...result });
   } catch (err) {
     console.error('payroll detail error', err);
@@ -644,26 +645,38 @@ router.get('/calculate/:employee_id', requirePermission('payroll', 'view'), (req
 });
 
 // POST finalise a month — locks the snapshot for all employees
-router.post('/finalise', requirePermission('payroll', 'approve'), (req, res) => {
+router.post('/finalise', requirePermission('payroll', 'approve'), async (req, res) => {
   try {
     const { month } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month required' });
-    const db = getDb();
-    const settings = getSettings(db);
-    const employees = db.prepare(`SELECT * FROM employees WHERE status='active' AND salary > 0`).all();
+    const settings = await getSettings();
+    const employees = await pg.all(`SELECT * FROM employees WHERE status='active' AND salary > 0`);
 
-    const ins = db.prepare(`INSERT OR REPLACE INTO payroll_runs (
+    const insSql = `INSERT INTO payroll_runs (
       month, employee_id, employee_name, base_salary, working_days, paid_days, half_days,
       absent_days, late_marks, lates_converted_absent, late_penalty, paid_leaves, unpaid_leaves, sundays,
       ot_hours, gross_earned, ot_pay, deductions, net_pay,
       basic_pay, conveyance, hra, adhoc, misc, advance,
       breakdown_json, status, finalised_by, finalised_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)`);
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+    ON CONFLICT (month, employee_id) DO UPDATE SET
+      employee_name = EXCLUDED.employee_name, base_salary = EXCLUDED.base_salary,
+      working_days = EXCLUDED.working_days, paid_days = EXCLUDED.paid_days,
+      half_days = EXCLUDED.half_days, absent_days = EXCLUDED.absent_days,
+      late_marks = EXCLUDED.late_marks, lates_converted_absent = EXCLUDED.lates_converted_absent,
+      late_penalty = EXCLUDED.late_penalty, paid_leaves = EXCLUDED.paid_leaves,
+      unpaid_leaves = EXCLUDED.unpaid_leaves, sundays = EXCLUDED.sundays,
+      ot_hours = EXCLUDED.ot_hours, gross_earned = EXCLUDED.gross_earned,
+      ot_pay = EXCLUDED.ot_pay, deductions = EXCLUDED.deductions, net_pay = EXCLUDED.net_pay,
+      basic_pay = EXCLUDED.basic_pay, conveyance = EXCLUDED.conveyance, hra = EXCLUDED.hra,
+      adhoc = EXCLUDED.adhoc, misc = EXCLUDED.misc, advance = EXCLUDED.advance,
+      breakdown_json = EXCLUDED.breakdown_json, status = EXCLUDED.status,
+      finalised_by = EXCLUDED.finalised_by, finalised_at = EXCLUDED.finalised_at`;
 
-    const tx = db.transaction(() => {
+    await pg.tx(async (t) => {
       for (const emp of employees) {
-        const r = calculateForEmployee(db, settings, emp, month);
-        ins.run(
+        const r = await calculateForEmployee(settings, emp, month);
+        await t.run(insSql,
           month, emp.id, emp.name, r.base_salary, r.working_days, r.paid_days, r.half_days,
           r.absent_days, r.late_marks, r.lates_converted_absent, r.late_penalty, r.paid_leaves, r.unpaid_leaves, r.sunday_count,
           r.ot_hours, r.gross_earned, r.ot_pay, r.deductions, r.net_pay,
@@ -672,7 +685,6 @@ router.post('/finalise', requirePermission('payroll', 'approve'), (req, res) => 
         );
       }
     });
-    tx();
     res.json({ message: `Payroll finalised for ${month}`, count: employees.length });
   } catch (err) {
     console.error('payroll finalise error', err);
@@ -684,18 +696,17 @@ router.post('/finalise', requirePermission('payroll', 'approve'), (req, res) => 
 // "after account will give option paid ... if we dont pay someone that is in
 // our record").  Only works once the month is finalised — the snapshot row
 // must exist.  Gated by payroll edit (Accounts); admins always pass.
-router.put('/paid/:employee_id', requirePermission('payroll', 'edit'), (req, res) => {
+router.put('/paid/:employee_id', requirePermission('payroll', 'edit'), async (req, res) => {
   try {
-    const db = getDb();
     const { month } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
     const paid = req.body.paid ? 1 : 0;
-    const row = db.prepare('SELECT id FROM payroll_runs WHERE month=? AND employee_id=?').get(month, req.params.employee_id);
+    const row = await pg.get('SELECT id FROM payroll_runs WHERE month=? AND employee_id=?', month, req.params.employee_id);
     if (!row) return res.status(409).json({ error: `Finalise ${month} first — you can only mark salary paid after it's finalised.` });
     if (paid) {
-      db.prepare('UPDATE payroll_runs SET paid=1, paid_at=CURRENT_TIMESTAMP, paid_by=? WHERE id=?').run(req.user.id, row.id);
+      await pg.run('UPDATE payroll_runs SET paid=1, paid_at=CURRENT_TIMESTAMP, paid_by=? WHERE id=?', req.user.id, row.id);
     } else {
-      db.prepare('UPDATE payroll_runs SET paid=0, paid_at=NULL, paid_by=NULL WHERE id=?').run(row.id);
+      await pg.run('UPDATE payroll_runs SET paid=0, paid_at=NULL, paid_by=NULL WHERE id=?', row.id);
     }
     res.json({ message: paid ? 'Marked paid' : 'Marked unpaid', paid: !!paid });
   } catch (err) {
@@ -705,35 +716,37 @@ router.put('/paid/:employee_id', requirePermission('payroll', 'edit'), (req, res
 });
 
 // POST unlock a finalised month (admin only — for corrections)
-router.post('/unlock', adminOnly, (req, res) => {
-  const { month } = req.body;
-  const db = getDb();
-  db.prepare('DELETE FROM payroll_runs WHERE month=? AND status != ?').run(month, 'disbursed');
-  res.json({ message: `Unlocked ${month}` });
+router.post('/unlock', adminOnly, async (req, res) => {
+  try {
+    const { month } = req.body;
+    await pg.run('DELETE FROM payroll_runs WHERE month=? AND status != ?', month, 'disbursed');
+    res.json({ message: `Unlocked ${month}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // PUT an employee's advance-salary amount for a month (admin). Deducted
 // from that month's net pay. Blocked once the month is finalised.
-router.put('/advance/:employee_id', adminOnly, (req, res) => {
+router.put('/advance/:employee_id', adminOnly, async (req, res) => {
   try {
-    const db = getDb();
     const { month } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
     const amount = Number(req.body.amount);
     if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ error: 'amount must be a non-negative number' });
 
-    const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.employee_id);
+    const emp = await pg.get('SELECT id FROM employees WHERE id=?', req.params.employee_id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
-    const locked = db.prepare('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?').get(month, 'finalised').c;
+    const locked = (await pg.get('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?', month, 'finalised')).c;
     if (locked) return res.status(409).json({ error: `${month} is finalised — unlock it first to change an advance.` });
 
-    db.prepare(
+    await pg.run(
       `INSERT INTO payroll_advances (month, employee_id, amount, updated_by, updated_at)
        VALUES (?,?,?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(month, employee_id) DO UPDATE SET
-         amount = excluded.amount, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
-    ).run(month, emp.id, round2(amount), req.user.id);
+         amount = excluded.amount, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`,
+      month, emp.id, round2(amount), req.user.id);
 
     res.json({ message: 'Advance saved', amount: round2(amount) });
   } catch (err) {
@@ -745,26 +758,25 @@ router.put('/advance/:employee_id', adminOnly, (req, res) => {
 // PUT an employee's food allowance for a month (admin). ADDED to that
 // month's net pay. Blocked once the month is finalised. Stored on the same
 // payroll_advances row as the advance (mam 2026-06-12).
-router.put('/food/:employee_id', adminOnly, (req, res) => {
+router.put('/food/:employee_id', adminOnly, async (req, res) => {
   try {
-    const db = getDb();
     const { month } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
     const amount = Number(req.body.amount);
     if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ error: 'amount must be a non-negative number' });
 
-    const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.employee_id);
+    const emp = await pg.get('SELECT id FROM employees WHERE id=?', req.params.employee_id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
-    const locked = db.prepare('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?').get(month, 'finalised').c;
+    const locked = (await pg.get('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?', month, 'finalised')).c;
     if (locked) return res.status(409).json({ error: `${month} is finalised — unlock it first to change food.` });
 
-    db.prepare(
+    await pg.run(
       `INSERT INTO payroll_advances (month, employee_id, food, updated_by, updated_at)
        VALUES (?,?,?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(month, employee_id) DO UPDATE SET
-         food = excluded.food, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
-    ).run(month, emp.id, round2(amount), req.user.id);
+         food = excluded.food, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`,
+      month, emp.id, round2(amount), req.user.id);
 
     res.json({ message: 'Food saved', amount: round2(amount) });
   } catch (err) {
@@ -777,9 +789,8 @@ router.put('/food/:employee_id', adminOnly, (req, res) => {
 // 2026-06-13: "give me edit option on days, CL, late so i can give salary
 // now").  field ∈ paid_days | cl | late_penalty.  A blank / null value RESETS
 // to the auto-calculated number.  Blocked once the month is finalised.
-router.put('/override/:employee_id', adminOnly, (req, res) => {
+router.put('/override/:employee_id', adminOnly, async (req, res) => {
   try {
-    const db = getDb();
     const { month, field } = req.body;
     if (!month || !/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month=YYYY-MM required' });
     const COLS = { paid_days: 'paid_days_override', cl: 'cl_override', late_penalty: 'late_penalty_override' };
@@ -801,18 +812,18 @@ router.put('/override/:employee_id', adminOnly, (req, res) => {
       value = round2(value);
     }
 
-    const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.employee_id);
+    const emp = await pg.get('SELECT id FROM employees WHERE id=?', req.params.employee_id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
-    const locked = db.prepare('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?').get(month, 'finalised').c;
+    const locked = (await pg.get('SELECT COUNT(*) AS c FROM payroll_runs WHERE month=? AND status=?', month, 'finalised')).c;
     if (locked) return res.status(409).json({ error: `${month} is finalised — unlock it first to edit it.` });
 
-    db.prepare(
+    await pg.run(
       `INSERT INTO payroll_advances (month, employee_id, ${col}, updated_by, updated_at)
        VALUES (?,?,?,?,CURRENT_TIMESTAMP)
        ON CONFLICT(month, employee_id) DO UPDATE SET
-         ${col} = excluded.${col}, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`
-    ).run(month, emp.id, value, req.user.id);
+         ${col} = excluded.${col}, updated_by = excluded.updated_by, updated_at = CURRENT_TIMESTAMP`,
+      month, emp.id, value, req.user.id);
 
     res.json({ message: reset ? 'Reset to auto' : 'Override saved', value });
   } catch (err) {
@@ -835,8 +846,8 @@ router.put('/override/:employee_id', adminOnly, (req, res) => {
 // months_elapsed = 12 for a past year, current calendar month for the
 // running year, 0 for a future year. Per-employee cl_eligible=0 → no accrual.
 
-function computeLeaveBalances(db, year) {
-  const settings = getSettings(db);
+async function computeLeaveBalances(year) {
+  const settings = await getSettings();
   const clPerMonth = +settings.cl_per_month || 0;
 
   const now = new Date();
@@ -847,30 +858,29 @@ function computeLeaveBalances(db, year) {
   const yStart = `${year}-01-01`;
   const yEnd = `${year}-12-31`;
 
-  const employees = db.prepare(
+  const employees = await pg.all(
     `SELECT id, user_id, name, department, designation,
             COALESCE(cl_eligible, 1) AS cl_eligible,
             COALESCE(ot_eligible, 0) AS ot_eligible,
             COALESCE(cl_opening_balance, 0) AS cl_opening_balance
-       FROM employees WHERE status='active' ORDER BY name COLLATE NOCASE`
-  ).all();
+       FROM employees WHERE status='active' ORDER BY LOWER(name)`);
 
   // CL days taken this year per user (approved casual leaves whose start
   // falls in the year). days defaults to 1 when the column is null.
-  const usedStmt = db.prepare(
+  const usedSql =
     `SELECT COALESCE(SUM(COALESCE(days, 1)), 0) AS used
        FROM leave_requests
       WHERE user_id = ? AND leave_type = 'casual' AND status = 'approved'
-        AND from_date BETWEEN ? AND ?`
-  );
+        AND from_date BETWEEN ? AND ?`;
 
-  return employees.map(e => {
+  const out = [];
+  for (const e of employees) {
     const eligible = e.cl_eligible ? 1 : 0;
     const opening = round2(e.cl_opening_balance);
     const accrued = eligible ? round2(clPerMonth * monthsElapsed) : 0;
-    const used = e.user_id ? round2(usedStmt.get(e.user_id, yStart, yEnd).used) : 0;
+    const used = e.user_id ? round2((await pg.get(usedSql, e.user_id, yStart, yEnd)).used) : 0;
     const remaining = round2(opening + accrued - used);
-    return {
+    out.push({
       employee_id: e.id,
       employee_name: e.name,
       department: e.department || null,
@@ -884,16 +894,16 @@ function computeLeaveBalances(db, year) {
       used,
       remaining,
       user_linked: !!e.user_id,
-    };
-  });
+    });
+  }
+  return out;
 }
 
 // GET annual CL balance sheet for all employees.
-router.get('/leave-balances', requirePermission('payroll', 'view'), (req, res) => {
+router.get('/leave-balances', requirePermission('payroll', 'view'), async (req, res) => {
   try {
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
-    const db = getDb();
-    res.json({ year, cl_per_month: +getSettings(db).cl_per_month || 0, rows: computeLeaveBalances(db, year) });
+    res.json({ year, cl_per_month: +(await getSettings()).cl_per_month || 0, rows: await computeLeaveBalances(year) });
   } catch (err) {
     console.error('leave-balances error', err);
     res.status(500).json({ error: err.message });
@@ -901,10 +911,9 @@ router.get('/leave-balances', requirePermission('payroll', 'view'), (req, res) =
 });
 
 // PUT one employee's carry-forward opening balance + CL eligibility (admin).
-router.put('/leave-balance/:employee_id', adminOnly, (req, res) => {
+router.put('/leave-balance/:employee_id', adminOnly, async (req, res) => {
   try {
-    const db = getDb();
-    const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.employee_id);
+    const emp = await pg.get('SELECT id FROM employees WHERE id=?', req.params.employee_id);
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
     const sets = [];
     const vals = [];
@@ -921,7 +930,7 @@ router.put('/leave-balance/:employee_id', adminOnly, (req, res) => {
     }
     if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
     vals.push(emp.id);
-    db.prepare(`UPDATE employees SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+    await pg.run(`UPDATE employees SET ${sets.join(', ')} WHERE id = ?`, ...vals);
     res.json({ message: 'Updated' });
   } catch (err) {
     console.error('leave-balance update error', err);
@@ -934,17 +943,14 @@ router.put('/leave-balance/:employee_id', adminOnly, (req, res) => {
 // effect only if re-run on the SAME source year — re-running after CL is
 // taken in the new year would double count, so the UI guards it to the
 // completed year.
-router.post('/leave-balances/rollover', adminOnly, (req, res) => {
+router.post('/leave-balances/rollover', adminOnly, async (req, res) => {
   try {
     const year = parseInt(req.body.year, 10);
     if (!year) return res.status(400).json({ error: 'year required' });
-    const db = getDb();
-    const rows = computeLeaveBalances(db, year);
-    const upd = db.prepare('UPDATE employees SET cl_opening_balance = ? WHERE id = ?');
-    const tx = db.transaction(() => {
-      for (const r of rows) upd.run(Math.max(0, r.remaining), r.employee_id);
+    const rows = await computeLeaveBalances(year);
+    await pg.tx(async (t) => {
+      for (const r of rows) await t.run('UPDATE employees SET cl_opening_balance = ? WHERE id = ?', Math.max(0, r.remaining), r.employee_id);
     });
-    tx();
     res.json({ message: `Rolled ${year} leftover CL into opening balance for ${rows.length} employees`, count: rows.length });
   } catch (err) {
     console.error('leave-balances rollover error', err);

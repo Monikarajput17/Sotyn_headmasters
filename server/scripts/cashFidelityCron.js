@@ -16,14 +16,13 @@
 //
 // Disable in dev via ERP_DISABLE_CASH_CRON=1.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { ensureTodayCashFlowDaily, refreshAllAgeing } = require('../lib/cashSync');
 
-function rollOverCashFlowDaily() {
+async function rollOverCashFlowDaily() {
   if (process.env.ERP_DISABLE_CASH_CRON === '1') return;
   try {
-    const db = getDb();
-    const r = ensureTodayCashFlowDaily(db);
+    const r = await ensureTodayCashFlowDaily(pg);
     if (r.created) {
       console.log(`[cash-fidelity] rolled over cash_flow_daily: new row for ${new Date().toISOString().slice(0,10)} opening=${r.opening_balance}`);
     }
@@ -32,11 +31,10 @@ function rollOverCashFlowDaily() {
   }
 }
 
-function refreshAgeingNow() {
+async function refreshAgeingNow() {
   if (process.env.ERP_DISABLE_CASH_CRON === '1') return;
   try {
-    const db = getDb();
-    const r = refreshAllAgeing(db);
+    const r = await refreshAllAgeing(pg);
     console.log(`[cash-fidelity] receivables ageing refreshed: ${r.updated}/${r.total} rows`);
   } catch (e) {
     console.error('[cash-fidelity] ageing refresh failed:', e.message);
@@ -50,9 +48,9 @@ function scheduleAt(hour, minute, fn, label) {
   if (next <= now) next.setDate(next.getDate() + 1);
   const msUntil = next - now;
   console.log(`[cash-fidelity] ${label} scheduled for ${next.toLocaleString()} (in ${Math.round(msUntil / 60000)} min)`);
-  setTimeout(() => {
-    fn();
-    setInterval(fn, 24 * 60 * 60 * 1000);
+  setTimeout(async () => {
+    try { await fn(); } catch (e) { console.error('[cash-fidelity]', e.message); }
+    setInterval(async () => { try { await fn(); } catch (e) { console.error('[cash-fidelity]', e.message); } }, 24 * 60 * 60 * 1000);
   }, msUntil);
 }
 

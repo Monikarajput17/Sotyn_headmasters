@@ -33,7 +33,7 @@
 // only runs once per database.  Mam can re-run by deleting the
 // flag row.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 const UNIT_MAP = {
   'MTRS': 'MTR', 'METERS': 'MTR', 'METER': 'MTR', 'MTS': 'MTR', 'M': 'MTR', 'RMT': 'MTR',
@@ -68,29 +68,30 @@ function normaliseText(raw) {
     .trim() || null;
 }
 
-function runCleanup(db) {
+async function runCleanup() {
   // Idempotency guard
-  try { db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
-  const already = db.prepare(`SELECT value FROM app_settings WHERE key=?`).get('item_master_cleanup_v1');
+  try { await pg.run(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
+  const already = await pg.get(`SELECT value FROM app_settings WHERE key=?`, 'item_master_cleanup_v1');
   if (already) return { skipped: true, reason: 'already_ran' };
 
   const stats = { units_changed: 0, text_changed: 0, dupes_merged: 0, dupes_deleted: 0, scanned: 0 };
 
   // Ensure the table exists before reading from it; if not, no-op.
   try {
-    const tableCheck = db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='item_master'`).get();
+    const tableCheck = await pg.get(`SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' AND table_name='item_master'`);
     if (!tableCheck) {
-      db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`).run('item_master_cleanup_v1', new Date().toISOString());
+      await pg.run(`INSERT INTO app_settings (key, value) VALUES (?, ?)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, 'item_master_cleanup_v1', new Date().toISOString());
       return { skipped: true, reason: 'no_item_master_table' };
     }
   } catch (_) { /* fall through */ }
 
-  const txn = db.transaction(() => {
+  await pg.tx(async (t) => {
     // Pass 1+2: normalise unit + spelling on every row.  Column name
     // is `uom` (not `unit`) — verified against the actual schema.
-    const rows = db.prepare(`SELECT id, item_name, specification, make, uom FROM item_master`).all();
+    const rows = await t.all(`SELECT id, item_name, specification, make, uom FROM item_master`);
     stats.scanned = rows.length;
-    const updateRow = db.prepare(`UPDATE item_master SET item_name=?, specification=?, make=?, uom=? WHERE id=?`);
+    const updateRowSql = `UPDATE item_master SET item_name=?, specification=?, make=?, uom=? WHERE id=?`;
     for (const r of rows) {
       const newName  = normaliseText(r.item_name);
       const newSpec  = normaliseText(r.specification);
@@ -99,25 +100,25 @@ function runCleanup(db) {
       const textChanged = newName !== r.item_name || newSpec !== r.specification || newMake !== r.make;
       const uomChanged  = newUom !== r.uom;
       if (textChanged || uomChanged) {
-        updateRow.run(newName, newSpec, newMake, newUom, r.id);
+        await t.run(updateRowSql, newName, newSpec, newMake, newUom, r.id);
         if (textChanged) stats.text_changed++;
         if (uomChanged)  stats.units_changed++;
       }
     }
 
     // Pass 3: duplicate merge.  Group by normalised key; keep MIN(id).
-    const groups = db.prepare(`
+    const groups = await t.all(`
       SELECT MIN(id) as keeper_id,
              COUNT(*) as cnt,
-             GROUP_CONCAT(id) as ids,
+             STRING_AGG(id::text, ',') as ids,
              UPPER(TRIM(COALESCE(item_name,''))) as k1,
              UPPER(TRIM(COALESCE(specification,''))) as k2,
              UPPER(TRIM(COALESCE(make,''))) as k3
       FROM item_master
       WHERE item_name IS NOT NULL AND TRIM(item_name) != ''
       GROUP BY k1, k2, k3
-      HAVING cnt > 1
-    `).all();
+      HAVING COUNT(*) > 1
+    `);
 
     // Re-point ALL tables that reference item_master.id from the
     // deletables to the keeper, then delete.  Boot log showed
@@ -126,28 +127,30 @@ function runCleanup(db) {
     // (via indent_items) ALSO reference item_master.  Each table
     // is checked for existence first so this is safe on fresh
     // installs or partial schemas.
-    const tableExists = (name) => {
-      try { return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name); }
+    const tableExists = async (name) => {
+      try { return !!(await t.get(`SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' AND table_name=?`, name)); }
       catch (_) { return false; }
     };
     const repointers = [];
-    if (tableExists('po_items')) {
-      repointers.push(db.prepare(`UPDATE po_items SET item_master_id=? WHERE item_master_id=?`));
+    if (await tableExists('po_items')) {
+      repointers.push(`UPDATE po_items SET item_master_id=? WHERE item_master_id=?`);
     }
-    if (tableExists('indent_items')) {
-      repointers.push(db.prepare(`UPDATE indent_items SET item_master_id=? WHERE item_master_id=?`));
+    if (await tableExists('indent_items')) {
+      repointers.push(`UPDATE indent_items SET item_master_id=? WHERE item_master_id=?`);
     }
     // Surface ANY remaining FK references so the error message in the
     // catch shows the actual offending table instead of generic "FK
-    // constraint failed".  PRAGMA foreign_key_list is read at runtime.
-    const deleteStmt = db.prepare(`DELETE FROM item_master WHERE id=?`);
+    // constraint failed".
+    const deleteSql = `DELETE FROM item_master WHERE id=?`;
     const failed = [];
     for (const g of groups) {
       const ids = String(g.ids || '').split(',').map(Number).filter(n => n !== g.keeper_id);
       for (const dupId of ids) {
-        for (const stmt of repointers) stmt.run(g.keeper_id, dupId);
+        for (const sql of repointers) await t.run(sql, g.keeper_id, dupId);
         try {
-          deleteStmt.run(dupId);
+          // savepoint so a single FK-blocked delete doesn't poison
+          // the whole transaction (SQLite tolerated this natively).
+          await t.savepoint(() => t.run(deleteSql, dupId));
           stats.dupes_deleted++;
         } catch (e) {
           // Don't blow up the whole transaction — collect the failure
@@ -164,10 +167,10 @@ function runCleanup(db) {
     }
 
     // Stamp the idempotency flag last so a mid-flight crash retries
-    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`)
-      .run('item_master_cleanup_v1', new Date().toISOString());
+    await t.run(`INSERT INTO app_settings (key, value) VALUES (?, ?)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      'item_master_cleanup_v1', new Date().toISOString());
   });
-  txn();
   return { skipped: false, ...stats };
 }
 
@@ -177,48 +180,49 @@ function runCleanup(db) {
 // Touches:
 //   - po_items.unit       when po_items.item_master_id is set
 //   - indent_items.unit   when indent_items.item_master_id is set
-function runUnitPropagation(db) {
-  try { db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
-  const already = db.prepare(`SELECT value FROM app_settings WHERE key=?`).get('item_master_uom_propagation_v1');
+async function runUnitPropagation() {
+  try { await pg.run(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
+  const already = await pg.get(`SELECT value FROM app_settings WHERE key=?`, 'item_master_uom_propagation_v1');
   if (already) return { skipped: true, reason: 'already_ran' };
 
   const stats = { po_items_unit_updated: 0, indent_items_unit_updated: 0 };
-  const hasTable = (name) => {
-    try { return !!db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(name); }
+  const hasTable = async (name) => {
+    try { return !!(await pg.get(`SELECT table_name AS name FROM information_schema.tables WHERE table_schema='public' AND table_name=?`, name)); }
     catch (_) { return false; }
   };
+  const hasPoItems = await hasTable('po_items');
+  const hasIndentItems = await hasTable('indent_items');
 
-  const txn = db.transaction(() => {
-    if (hasTable('po_items')) {
-      const r = db.prepare(`
+  await pg.tx(async (t) => {
+    if (hasPoItems) {
+      const r = await t.run(`
         UPDATE po_items
         SET unit = LOWER((SELECT uom FROM item_master WHERE item_master.id = po_items.item_master_id))
         WHERE item_master_id IS NOT NULL
           AND EXISTS (SELECT 1 FROM item_master WHERE item_master.id = po_items.item_master_id AND uom IS NOT NULL)
-      `).run();
+      `);
       stats.po_items_unit_updated = r.changes;
     }
-    if (hasTable('indent_items')) {
-      const r = db.prepare(`
+    if (hasIndentItems) {
+      const r = await t.run(`
         UPDATE indent_items
         SET unit = LOWER((SELECT uom FROM item_master WHERE item_master.id = indent_items.item_master_id))
         WHERE item_master_id IS NOT NULL
           AND EXISTS (SELECT 1 FROM item_master WHERE item_master.id = indent_items.item_master_id AND uom IS NOT NULL)
-      `).run();
+      `);
       stats.indent_items_unit_updated = r.changes;
     }
-    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`)
-      .run('item_master_uom_propagation_v1', new Date().toISOString());
+    await t.run(`INSERT INTO app_settings (key, value) VALUES (?, ?)
+                 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      'item_master_uom_propagation_v1', new Date().toISOString());
   });
-  txn();
   return { skipped: false, ...stats };
 }
 
-function runOnce() {
+async function runOnce() {
   if (process.env.ERP_DISABLE_ITEM_CLEANUP === '1') return;
   try {
-    const db = getDb();
-    const r = runCleanup(db);
+    const r = await runCleanup();
     if (r.skipped) {
       console.log(`[item-master-cleanup] cleanup skipped: ${r.reason}`);
     } else {
@@ -226,7 +230,7 @@ function runOnce() {
     }
     // Separate propagation pass — runs the first time even if v1
     // already ran on an earlier deploy.
-    const p = runUnitPropagation(db);
+    const p = await runUnitPropagation();
     if (p.skipped) {
       console.log(`[item-master-cleanup] uom propagation skipped: ${p.reason}`);
     } else {

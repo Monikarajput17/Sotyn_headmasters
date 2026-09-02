@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware } = require('../middleware/auth');
 const router = express.Router();
 router.use(authMiddleware);
@@ -39,8 +39,8 @@ function scoreMatch(lineSet, itemTokens) {
 }
 
 // Read an app_settings value (AI key/model live there, set via AI Settings UI).
-function aiSetting(key) {
-  try { const r = getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(key); return r ? r.value : null; }
+async function aiSetting(key) {
+  try { const r = await pg.get('SELECT value FROM app_settings WHERE key=?', key); return r ? r.value : null; }
   catch (e) { return null; }
 }
 
@@ -48,11 +48,11 @@ function aiSetting(key) {
 // shortlist, or null for composite WORK items that have no single catalog
 // match. Returns an array indexed by line, or null if AI isn't configured.
 async function llmRefine(ranked) {
-  const apiKey = aiSetting('ai_api_key');
+  const apiKey = await aiSetting('ai_api_key');
   if (!apiKey) return null;
   let Anthropic;
   try { Anthropic = require('@anthropic-ai/sdk'); } catch (e) { return null; }
-  const model = aiSetting('ai_model') || 'claude-opus-4-7';
+  const model = (await aiSetting('ai_model')) || 'claude-opus-4-7';
   const client = new Anthropic.default({ apiKey, timeout: 55000 });
   const blocks = ranked.map((r, i) => {
     const cands = r.scored.slice(0, 8).map(s =>
@@ -104,10 +104,10 @@ function textToLines(text) {
 // groups multi-line descriptions (name + spec + make) into one item and skips
 // headers/notes/totals. Returns [{description, qty}] or null if AI not set up.
 async function llmExtractItems(text) {
-  const apiKey = aiSetting('ai_api_key');
+  const apiKey = await aiSetting('ai_api_key');
   if (!apiKey || !text) return null;
   let Anthropic; try { Anthropic = require('@anthropic-ai/sdk'); } catch (e) { return null; }
-  const model = aiSetting('ai_model') || 'claude-opus-4-7';
+  const model = (await aiSetting('ai_model')) || 'claude-opus-4-7';
   const client = new Anthropic.default({ apiKey, timeout: 55000 });
   const prompt = `Extract the BOQ / requirement line items from this client document text.
 Each item may span SEVERAL lines (item name, long description, "Make: ...", size) — COMBINE those into ONE item's description.
@@ -187,14 +187,14 @@ async function matchBoqFile(filePath, originalName) {
 
     // Match the client BOQ against OUR PO items only (the ones quoted, with
     // PO/FOC kits) — mam 2026-06-10. FOC/consumables aren't quoted as lines.
-    const items = getDb().prepare(`SELECT id, item_code, department, item_name, specification, size, uom, make, current_price FROM item_master WHERE type='PO'`).all();
+    const items = await pg.all(`SELECT id, item_code, department, item_name, specification, size, uom, make, current_price FROM item_master WHERE type='PO'`);
     const itemById = new Map(items.map(it => [it.id, it]));
     const itemTok = items.map(it => ({ it, toks: tokens([it.item_name, it.specification, it.size].filter(Boolean).join(' ')) }));
 
     // PO/FOC kits keyed by po_item_id (approved preferred) — so a matched item
     // carries its PP rate + labour + FOC straight to the quotation line.
     const kitById = new Map();
-    for (const k of getDb().prepare('SELECT po_item_id, po_rate, labour, focs_json, status FROM po_foc_entries WHERE po_item_id IS NOT NULL').all()) {
+    for (const k of await pg.all('SELECT po_item_id, po_rate, labour, focs_json, status FROM po_foc_entries WHERE po_item_id IS NOT NULL')) {
       if (!kitById.has(k.po_item_id) || k.status === 'approved') kitById.set(k.po_item_id, k);
     }
 
@@ -276,41 +276,40 @@ router.post('/auto-match-boq', upload.single('file'), async (req, res) => {
 // and run the same matcher. lead_id comes from the /leads dropdown.
 router.get('/client-boq', async (req, res) => {
   try {
-    const db = getDb();
     const id = req.query.funnel_id || req.query.lead_id;
     if (!id) return res.status(400).json({ error: 'client id required' });
     // The Estimator's Client dropdown IS the Sales Funnel, so look the row up
     // directly by id and take its BOQ file (revised first, then original).
     let name = '', link = null;
-    const sfRow = db.prepare('SELECT client_name, company_name, revised_boq_file_link, boq_file_link FROM sales_funnel WHERE id=?').get(id);
+    const sfRow = await pg.get('SELECT client_name, company_name, revised_boq_file_link, boq_file_link FROM sales_funnel WHERE id=?', id);
     if (sfRow) {
       name = (sfRow.company_name || sfRow.client_name || '').trim();
       link = sfRow.revised_boq_file_link || sfRow.boq_file_link || null;
       // The denormalized column can be stale/null while the funnel's BOQ history
       // (the "BOQs (N)" list) holds the actual file — check that too.
       if (!link) {
-        const b = db.prepare(`SELECT boq_file_link FROM sales_funnel_boqs
+        const b = await pg.get(`SELECT boq_file_link FROM sales_funnel_boqs
                               WHERE funnel_id=? AND COALESCE(boq_file_link,'')<>''
-                              ORDER BY created_at DESC, id DESC LIMIT 1`).get(id);
+                              ORDER BY created_at DESC, id DESC LIMIT 1`, id);
         if (b?.boq_file_link) link = b.boq_file_link;
       }
     } else {
       // Legacy fallback: a leads-table id → match the funnel by company name.
-      const lead = db.prepare('SELECT company_name FROM leads WHERE id=?').get(id);
+      const lead = await pg.get('SELECT company_name FROM leads WHERE id=?', id);
       name = (lead?.company_name || '').trim();
     }
     // Still no link? Try matching sales_funnel / crm_funnel by the company name.
     if (!link && name) {
-      const sf = db.prepare(`SELECT COALESCE(NULLIF(revised_boq_file_link,''), NULLIF(boq_file_link,'')) AS link
+      const sf = await pg.get(`SELECT COALESCE(NULLIF(revised_boq_file_link,''), NULLIF(boq_file_link,'')) AS link
                        FROM sales_funnel WHERE (company_name=? OR client_name=?)
                          AND (COALESCE(revised_boq_file_link,'')<>'' OR COALESCE(boq_file_link,'')<>'')
-                       ORDER BY id DESC LIMIT 1`).get(name, name);
+                       ORDER BY id DESC LIMIT 1`, name, name);
       if (sf?.link) link = sf.link;
       if (!link) {
-        const cf = db.prepare(`SELECT COALESCE(NULLIF(cust_boq_link,''), NULLIF(boq_file_link,'')) AS link
+        const cf = await pg.get(`SELECT COALESCE(NULLIF(cust_boq_link,''), NULLIF(boq_file_link,'')) AS link
                          FROM crm_funnel WHERE (company_name=? OR client_name=?)
                            AND (COALESCE(cust_boq_link,'')<>'' OR COALESCE(boq_file_link,'')<>'')
-                         ORDER BY id DESC LIMIT 1`).get(name, name);
+                         ORDER BY id DESC LIMIT 1`, name, name);
         if (cf?.link) link = cf.link;
       }
     }
@@ -331,87 +330,98 @@ router.get('/client-boq', async (req, res) => {
 });
 
 // BOQ
-router.get('/boq', (req, res) => {
-  res.json(getDb().prepare(`SELECT b.*, l.company_name, u.name as created_by_name FROM boq b
-    LEFT JOIN leads l ON b.lead_id=l.id LEFT JOIN users u ON b.created_by=u.id ORDER BY b.created_at DESC`).all());
+router.get('/boq', async (req, res) => {
+  try {
+    res.json(await pg.all(`SELECT b.*, l.company_name, u.name as created_by_name FROM boq b
+      LEFT JOIN leads l ON b.lead_id=l.id LEFT JOIN users u ON b.created_by=u.id ORDER BY b.created_at DESC`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/boq', (req, res) => {
-  const { lead_id, title, drawing_required, items } = req.body;
-  const db = getDb();
-  const total = (items || []).reduce((s, i) => s + (i.quantity * i.rate), 0);
-  const r = db.prepare('INSERT INTO boq (lead_id, title, drawing_required, total_amount, created_by) VALUES (?,?,?,?,?)')
-    .run(lead_id, title, drawing_required ? 1 : 0, total, req.user.id);
-  const insertItem = db.prepare('INSERT INTO boq_items (boq_id, description, quantity, unit, rate, amount, item_id) VALUES (?,?,?,?,?,?,?)');
+router.post('/boq', async (req, res) => {
+  try {
+    const { lead_id, title, drawing_required, items } = req.body;
+    const total = (items || []).reduce((s, i) => s + (i.quantity * i.rate), 0);
+    const r = await pg.run('INSERT INTO boq (lead_id, title, drawing_required, total_amount, created_by) VALUES (?,?,?,?,?)',
+      lead_id, title, drawing_required ? 1 : 0, total, req.user.id);
 
-  // AI Agent: when a line item is linked to a catalogue item AND has a
-  // rate > 0, log it to item_price_history so everyone sees this rate
-  // as a suggestion next time. Also bump item_master.current_price to
-  // reflect the latest market rate the team is actually quoting.
-  const insertHistory = db.prepare(`INSERT INTO item_price_history
-    (item_id, rate, quantity, lead_id, company_name, boq_id, source, created_by, created_by_name)
-    VALUES (?,?,?,?,?,?,?,?,?)`);
-  const updateItemPrice = db.prepare('UPDATE item_master SET current_price=?, updated_at=CURRENT_TIMESTAMP WHERE id=?');
-  const lead = lead_id ? db.prepare('SELECT company_name FROM leads WHERE id=?').get(lead_id) : null;
-  const companyName = lead?.company_name || null;
+    // AI Agent: when a line item is linked to a catalogue item AND has a
+    // rate > 0, log it to item_price_history so everyone sees this rate
+    // as a suggestion next time. Also bump item_master.current_price to
+    // reflect the latest market rate the team is actually quoting.
+    const lead = lead_id ? await pg.get('SELECT company_name FROM leads WHERE id=?', lead_id) : null;
+    const companyName = lead?.company_name || null;
 
-  for (const i of (items || [])) {
-    const itemId = i.item_id ? +i.item_id : null;
-    insertItem.run(r.lastInsertRowid, i.description, i.quantity, i.unit, i.rate, i.quantity * i.rate, itemId);
-    if (itemId && i.rate > 0) {
-      insertHistory.run(itemId, i.rate, i.quantity || 0, lead_id || null, companyName, r.lastInsertRowid, 'boq', req.user.id, req.user.name || null);
-      updateItemPrice.run(i.rate, itemId);
+    for (const i of (items || [])) {
+      const itemId = i.item_id ? +i.item_id : null;
+      await pg.run('INSERT INTO boq_items (boq_id, description, quantity, unit, rate, amount, item_id) VALUES (?,?,?,?,?,?,?)',
+        r.lastInsertRowid, i.description, i.quantity, i.unit, i.rate, i.quantity * i.rate, itemId);
+      if (itemId && i.rate > 0) {
+        await pg.run(`INSERT INTO item_price_history
+          (item_id, rate, quantity, lead_id, company_name, boq_id, source, created_by, created_by_name)
+          VALUES (?,?,?,?,?,?,?,?,?)`,
+          itemId, i.rate, i.quantity || 0, lead_id || null, companyName, r.lastInsertRowid, 'boq', req.user.id, req.user.name || null);
+        await pg.run('UPDATE item_master SET current_price=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', i.rate, itemId);
+      }
     }
-  }
-  res.status(201).json({ id: r.lastInsertRowid });
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/boq/:id', (req, res) => {
-  const boq = getDb().prepare('SELECT * FROM boq WHERE id=?').get(req.params.id);
-  if (!boq) return res.status(404).json({ error: 'Not found' });
-  boq.items = getDb().prepare('SELECT * FROM boq_items WHERE boq_id=?').all(req.params.id);
-  res.json(boq);
+router.get('/boq/:id', async (req, res) => {
+  try {
+    const boq = await pg.get('SELECT * FROM boq WHERE id=?', req.params.id);
+    if (!boq) return res.status(404).json({ error: 'Not found' });
+    boq.items = await pg.all('SELECT * FROM boq_items WHERE boq_id=?', req.params.id);
+    res.json(boq);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Quotations
-router.get('/', (req, res) => {
-  res.json(getDb().prepare(`SELECT q.*, l.company_name, u.name as created_by_name FROM quotations q
-    LEFT JOIN leads l ON q.lead_id=l.id LEFT JOIN users u ON q.created_by=u.id ORDER BY q.created_at DESC`).all());
+router.get('/', async (req, res) => {
+  try {
+    res.json(await pg.all(`SELECT q.*, l.company_name, u.name as created_by_name FROM quotations q
+      LEFT JOIN leads l ON q.lead_id=l.id LEFT JOIN users u ON q.created_by=u.id ORDER BY q.created_at DESC`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', (req, res) => {
-  const { lead_id, boq_id, total_amount, discount, final_amount, valid_until, notes } = req.body;
-  const db = getDb();
-  const { nextSequence } = require('../db/nextSequence');
-  const qNum = nextSequence(db, 'quotations', 'quotation_number', 'QTN-', { startFrom: 0, pad: 4 });
-  const r = db.prepare(
-    'INSERT INTO quotations (lead_id, boq_id, quotation_number, total_amount, discount, final_amount, valid_until, notes, created_by) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).run(lead_id, boq_id, qNum, total_amount, discount || 0, final_amount, valid_until, notes, req.user.id);
-  res.status(201).json({ id: r.lastInsertRowid, quotation_number: qNum });
+router.post('/', async (req, res) => {
+  try {
+    const { lead_id, boq_id, total_amount, discount, final_amount, valid_until, notes } = req.body;
+    const { nextSequencePg } = require('../db/nextSequence');
+    const qNum = await nextSequencePg(pg, 'quotations', 'quotation_number', 'QTN-', { startFrom: 0, pad: 4 });
+    const r = await pg.run(
+      'INSERT INTO quotations (lead_id, boq_id, quotation_number, total_amount, discount, final_amount, valid_until, notes, created_by) VALUES (?,?,?,?,?,?,?,?,?)',
+      lead_id, boq_id, qNum, total_amount, discount || 0, final_amount, valid_until, notes, req.user.id);
+    res.status(201).json({ id: r.lastInsertRowid, quotation_number: qNum });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', (req, res) => {
-  const { total_amount, discount, final_amount, status, valid_until, notes } = req.body;
-  getDb().prepare('UPDATE quotations SET total_amount=?, discount=?, final_amount=?, status=?, valid_until=?, notes=? WHERE id=?')
-    .run(total_amount, discount, final_amount, status, valid_until, notes, req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/:id', async (req, res) => {
+  try {
+    const { total_amount, discount, final_amount, status, valid_until, notes } = req.body;
+    await pg.run('UPDATE quotations SET total_amount=?, discount=?, final_amount=?, status=?, valid_until=?, notes=? WHERE id=?',
+      total_amount, discount, final_amount, status, valid_until, notes, req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', (req, res) => {
-  const db = getDb();
-  const poCount = db.prepare('SELECT COUNT(*) as c FROM purchase_orders WHERE quotation_id=?').get(req.params.id).c;
-  if (poCount > 0) return res.status(409).json({ error: 'Cannot delete: Purchase Orders reference this quotation' });
-  db.prepare('DELETE FROM quotations WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/:id', async (req, res) => {
+  try {
+    const poCount = (await pg.get('SELECT COUNT(*) as c FROM purchase_orders WHERE quotation_id=?', req.params.id)).c;
+    if (poCount > 0) return res.status(409).json({ error: 'Cannot delete: Purchase Orders reference this quotation' });
+    await pg.run('DELETE FROM quotations WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/boq/:id', (req, res) => {
-  const db = getDb();
-  const qCount = db.prepare('SELECT COUNT(*) as c FROM quotations WHERE boq_id=?').get(req.params.id).c;
-  if (qCount > 0) return res.status(409).json({ error: 'Cannot delete: Quotations reference this BOQ' });
-  db.prepare('DELETE FROM boq_items WHERE boq_id=?').run(req.params.id);
-  db.prepare('DELETE FROM boq WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/boq/:id', async (req, res) => {
+  try {
+    const qCount = (await pg.get('SELECT COUNT(*) as c FROM quotations WHERE boq_id=?', req.params.id)).c;
+    if (qCount > 0) return res.status(409).json({ error: 'Cannot delete: Quotations reference this BOQ' });
+    await pg.run('DELETE FROM boq_items WHERE boq_id=?', req.params.id);
+    await pg.run('DELETE FROM boq WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── PO/FOC Stripped (mam 2026-06-09) ──────────────────────────────
@@ -454,11 +464,11 @@ function itemDisplay(im) {
 // has 800+ kits × ~6-8 FOC each, so the old per-row queries meant thousands of
 // point lookups on every load/approve and the page crawled (mam 2026-06-11:
 // "takes lots of process time"). Two bulk reads replace all of them.
-function buildLiveMaps(db) {
+async function buildLiveMaps() {
   const items = new Map();
-  for (const im of db.prepare('SELECT id, item_code, item_name, specification, size, uom, current_price FROM item_master').all()) items.set(im.id, im);
+  for (const im of await pg.all('SELECT id, item_code, item_name, specification, size, uom, current_price FROM item_master')) items.set(im.id, im);
   const labour = new Map();
-  for (const lr of db.prepare('SELECT id, item_name, rate FROM labour_rates').all()) labour.set(lr.id, lr);
+  for (const lr of await pg.all('SELECT id, item_name, rate FROM labour_rates')) labour.set(lr.id, lr);
   return { items, labour };
 }
 
@@ -489,93 +499,108 @@ function liveResolvePoFoc(row, maps) {
   return { ...row, po_rate, po_name, labour, labour_name, focs, cost: c.cost, tpa: c.tpa };
 }
 
-router.get('/po-foc', (req, res) => {
-  const db = getDb();
-  const rows = db.prepare('SELECT * FROM po_foc_entries ORDER BY updated_at DESC, id DESC').all();
-  const counts = { non_approved: 0, approved: 0, re_approved: 0 };
-  for (const r of rows) counts[r.status] = (counts[r.status] || 0) + 1;
-  const maps = buildLiveMaps(db);
-  res.json({ rows: rows.map(r => liveResolvePoFoc(r, maps)), counts });
+router.get('/po-foc', async (req, res) => {
+  try {
+    const rows = await pg.all('SELECT * FROM po_foc_entries ORDER BY updated_at DESC, id DESC');
+    const counts = { non_approved: 0, approved: 0, re_approved: 0 };
+    for (const r of rows) counts[r.status] = (counts[r.status] || 0) + 1;
+    const maps = await buildLiveMaps();
+    res.json({ rows: rows.map(r => liveResolvePoFoc(r, maps)), counts });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/po-foc/:id', (req, res) => {
-  const db = getDb();
-  const r = db.prepare('SELECT * FROM po_foc_entries WHERE id=?').get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'Not found' });
-  res.json(liveResolvePoFoc(r, buildLiveMaps(db)));
+router.get('/po-foc/:id', async (req, res) => {
+  try {
+    const r = await pg.get('SELECT * FROM po_foc_entries WHERE id=?', req.params.id);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    res.json(liveResolvePoFoc(r, await buildLiveMaps()));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/po-foc', (req, res) => {
-  const c = computePoFoc(req.body);
-  const r = getDb().prepare(
-    `INSERT INTO po_foc_entries (po_item_id, po_name, po_rate, qty, labour, labour_item_id, labour_name, labour_margin, margin, focs_json, cost, tpa, status, created_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'non_approved', ?)`
-  ).run(req.body.po_item_id || null, req.body.po_name || '', c.poRate, c.qty, c.labour,
-        req.body.labour_item_id || null, req.body.labour_name || '', c.labourMargin, c.margin,
-        JSON.stringify(c.focs), c.cost, c.tpa, req.user.id);
-  res.json({ id: r.lastInsertRowid, message: 'Saved' });
+router.post('/po-foc', async (req, res) => {
+  try {
+    const c = computePoFoc(req.body);
+    const r = await pg.run(
+      `INSERT INTO po_foc_entries (po_item_id, po_name, po_rate, qty, labour, labour_item_id, labour_name, labour_margin, margin, focs_json, cost, tpa, status, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'non_approved', ?)`,
+      req.body.po_item_id || null, req.body.po_name || '', c.poRate, c.qty, c.labour,
+      req.body.labour_item_id || null, req.body.labour_name || '', c.labourMargin, c.margin,
+      JSON.stringify(c.focs), c.cost, c.tpa, req.user.id);
+    res.json({ id: r.lastInsertRowid, message: 'Saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/po-foc/:id', (req, res) => {
-  const db = getDb();
-  const cur = db.prepare('SELECT status FROM po_foc_entries WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  const c = computePoFoc(req.body);
-  // Editing an APPROVED entry sends it to re_approved (mam's rule).
-  const newStatus = cur.status === 'approved' ? 're_approved' : cur.status;
-  db.prepare(
-    `UPDATE po_foc_entries SET po_item_id=?, po_name=?, po_rate=?, qty=?, labour=?, labour_item_id=?, labour_name=?, labour_margin=?, margin=?,
-            focs_json=?, cost=?, tpa=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).run(req.body.po_item_id || null, req.body.po_name || '', c.poRate, c.qty, c.labour,
-        req.body.labour_item_id || null, req.body.labour_name || '', c.labourMargin, c.margin,
-        JSON.stringify(c.focs), c.cost, c.tpa, newStatus, req.params.id);
-  res.json({ message: 'Updated', status: newStatus });
+router.put('/po-foc/:id', async (req, res) => {
+  try {
+    const cur = await pg.get('SELECT status FROM po_foc_entries WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    const c = computePoFoc(req.body);
+    // Editing an APPROVED entry sends it to re_approved (mam's rule).
+    const newStatus = cur.status === 'approved' ? 're_approved' : cur.status;
+    await pg.run(
+      `UPDATE po_foc_entries SET po_item_id=?, po_name=?, po_rate=?, qty=?, labour=?, labour_item_id=?, labour_name=?, labour_margin=?, margin=?,
+              focs_json=?, cost=?, tpa=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      req.body.po_item_id || null, req.body.po_name || '', c.poRate, c.qty, c.labour,
+      req.body.labour_item_id || null, req.body.labour_name || '', c.labourMargin, c.margin,
+      JSON.stringify(c.focs), c.cost, c.tpa, newStatus, req.params.id);
+    res.json({ message: 'Updated', status: newStatus });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/po-foc/:id/approve', (req, res) => {
-  const db = getDb();
-  const cur = db.prepare('SELECT id FROM po_foc_entries WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  db.prepare(`UPDATE po_foc_entries SET status='approved', approved_by=?, approved_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(req.user.id, req.params.id);
-  res.json({ message: 'Approved' });
+router.post('/po-foc/:id/approve', async (req, res) => {
+  try {
+    const cur = await pg.get('SELECT id FROM po_foc_entries WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    await pg.run(`UPDATE po_foc_entries SET status='approved', approved_by=?, approved_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      req.user.id, req.params.id);
+    res.json({ message: 'Approved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/po-foc/:id', (req, res) => {
-  getDb().prepare('DELETE FROM po_foc_entries WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/po-foc/:id', async (req, res) => {
+  try {
+    await pg.run('DELETE FROM po_foc_entries WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Labour Rate sheet (mam 2026-06-10) ────────────────────────────
-router.get('/labour-rates', (req, res) => {
-  const db = getDb();
-  const { search, category } = req.query;
-  const cond = [], args = [];
-  if (category) { cond.push('category = ?'); args.push(category); }
-  if (search) { cond.push('LOWER(item_name) LIKE ?'); args.push('%' + String(search).toLowerCase() + '%'); }
-  const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
-  res.json(db.prepare(`SELECT * FROM labour_rates ${where} ORDER BY category, item_name`).all(...args));
+router.get('/labour-rates', async (req, res) => {
+  try {
+    const { search, category } = req.query;
+    const cond = [], args = [];
+    if (category) { cond.push('category = ?'); args.push(category); }
+    if (search) { cond.push('LOWER(item_name) LIKE ?'); args.push('%' + String(search).toLowerCase() + '%'); }
+    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    res.json(await pg.all(`SELECT * FROM labour_rates ${where} ORDER BY category, item_name`, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/labour-rates', (req, res) => {
-  const { item_name, specification, size, rate, uom, category } = req.body;
-  if (!item_name || !String(item_name).trim()) return res.status(400).json({ error: 'Item name is required' });
-  const r = getDb().prepare('INSERT INTO labour_rates (item_name, specification, size, rate, uom, category, created_by) VALUES (?,?,?,?,?,?,?)')
-    .run(String(item_name).trim(), specification || '', size || '', Number(rate) || 0, uom || '', category || '', req.user.id);
-  res.json({ id: r.lastInsertRowid, message: 'Saved' });
+router.post('/labour-rates', async (req, res) => {
+  try {
+    const { item_name, specification, size, rate, uom, category } = req.body;
+    if (!item_name || !String(item_name).trim()) return res.status(400).json({ error: 'Item name is required' });
+    const r = await pg.run('INSERT INTO labour_rates (item_name, specification, size, rate, uom, category, created_by) VALUES (?,?,?,?,?,?,?)',
+      String(item_name).trim(), specification || '', size || '', Number(rate) || 0, uom || '', category || '', req.user.id);
+    res.json({ id: r.lastInsertRowid, message: 'Saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/labour-rates/:id', (req, res) => {
-  const { item_name, specification, size, rate, uom, category } = req.body;
-  if (!item_name || !String(item_name).trim()) return res.status(400).json({ error: 'Item name is required' });
-  getDb().prepare('UPDATE labour_rates SET item_name=?, specification=?, size=?, rate=?, uom=?, category=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
-    .run(String(item_name).trim(), specification || '', size || '', Number(rate) || 0, uom || '', category || '', req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/labour-rates/:id', async (req, res) => {
+  try {
+    const { item_name, specification, size, rate, uom, category } = req.body;
+    if (!item_name || !String(item_name).trim()) return res.status(400).json({ error: 'Item name is required' });
+    await pg.run('UPDATE labour_rates SET item_name=?, specification=?, size=?, rate=?, uom=?, category=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+      String(item_name).trim(), specification || '', size || '', Number(rate) || 0, uom || '', category || '', req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/labour-rates/:id', (req, res) => {
-  getDb().prepare('DELETE FROM labour_rates WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/labour-rates/:id', async (req, res) => {
+  try {
+    await pg.run('DELETE FROM labour_rates WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Labour Rate Excel export / template / bulk import (mam 2026-06-11) ─
@@ -592,16 +617,17 @@ function sendLabourXlsx(res, rowsAoA, filename) {
 }
 
 // Download every labour rate as a real .xlsx (respects ?search / ?category).
-router.get('/labour-rates/export', (req, res) => {
-  const db = getDb();
-  const { search, category } = req.query;
-  const cond = [], args = [];
-  if (category) { cond.push('category = ?'); args.push(category); }
-  if (search) { cond.push('LOWER(item_name) LIKE ?'); args.push('%' + String(search).toLowerCase() + '%'); }
-  const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
-  const rows = db.prepare(`SELECT * FROM labour_rates ${where} ORDER BY category, item_name`).all(...args);
-  const aoa = rows.map(r => [r.item_name, r.specification || '', r.size || '', r.rate || 0, r.uom || '', r.category || '']);
-  sendLabourXlsx(res, aoa, 'labour-rates.xlsx');
+router.get('/labour-rates/export', async (req, res) => {
+  try {
+    const { search, category } = req.query;
+    const cond = [], args = [];
+    if (category) { cond.push('category = ?'); args.push(category); }
+    if (search) { cond.push('LOWER(item_name) LIKE ?'); args.push('%' + String(search).toLowerCase() + '%'); }
+    const where = cond.length ? 'WHERE ' + cond.join(' AND ') : '';
+    const rows = await pg.all(`SELECT * FROM labour_rates ${where} ORDER BY category, item_name`, ...args);
+    const aoa = rows.map(r => [r.item_name, r.specification || '', r.size || '', r.rate || 0, r.uom || '', r.category || '']);
+    sendLabourXlsx(res, aoa, 'labour-rates.xlsx');
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Blank template with the header row + one sample line.
@@ -612,10 +638,10 @@ router.get('/labour-rates/template', (req, res) => {
 // Find labour items that share the same name (case/space-insensitive) —
 // duplicates that splinter one task across two rows (e.g. one MTRS + one Kg),
 // which breaks the live link from PO/FOC kits (mam 2026-06-11).
-router.get('/labour-rates/duplicates', (req, res) => {
-  const db = getDb();
-  const rows = db.prepare('SELECT * FROM labour_rates ORDER BY item_name, id').all();
-  const usage = db.prepare('SELECT labour_item_id AS id, COUNT(*) AS c FROM po_foc_entries WHERE labour_item_id IS NOT NULL GROUP BY labour_item_id').all();
+router.get('/labour-rates/duplicates', async (req, res) => {
+  try {
+  const rows = await pg.all('SELECT * FROM labour_rates ORDER BY item_name, id');
+  const usage = await pg.all('SELECT labour_item_id AS id, COUNT(*) AS c FROM po_foc_entries WHERE labour_item_id IS NOT NULL GROUP BY labour_item_id');
   const useMap = new Map(usage.map(u => [u.id, u.c]));
   const groups = new Map();
   for (const r of rows) {
@@ -624,30 +650,31 @@ router.get('/labour-rates/duplicates', (req, res) => {
     groups.get(key).push({ ...r, used_in: useMap.get(r.id) || 0 });
   }
   res.json([...groups.values()].filter(g => g.length > 1));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Merge duplicate labour rows: repoint every PO/FOC kit from the removed rows
 // onto the kept row, then delete the removed rows (one transaction).
-router.post('/labour-rates/merge', (req, res) => {
-  const keepId = Number(req.body.keep_id);
-  const removeIds = (Array.isArray(req.body.remove_ids) ? req.body.remove_ids : []).map(Number).filter(id => id && id !== keepId);
-  if (!keepId || !removeIds.length) return res.status(400).json({ error: 'keep_id and at least one remove_id required' });
-  const db = getDb();
-  if (!db.prepare('SELECT id FROM labour_rates WHERE id=?').get(keepId)) return res.status(404).json({ error: 'Kept item not found' });
-  const ph = removeIds.map(() => '?').join(',');
-  const result = db.transaction(() => {
-    const rep = db.prepare(`UPDATE po_foc_entries SET labour_item_id=? WHERE labour_item_id IN (${ph})`).run(keepId, ...removeIds);
-    const del = db.prepare(`DELETE FROM labour_rates WHERE id IN (${ph})`).run(...removeIds);
-    return { repointed: rep.changes, removed: del.changes };
-  })();
-  res.json(result);
+router.post('/labour-rates/merge', async (req, res) => {
+  try {
+    const keepId = Number(req.body.keep_id);
+    const removeIds = (Array.isArray(req.body.remove_ids) ? req.body.remove_ids : []).map(Number).filter(id => id && id !== keepId);
+    if (!keepId || !removeIds.length) return res.status(400).json({ error: 'keep_id and at least one remove_id required' });
+    if (!(await pg.get('SELECT id FROM labour_rates WHERE id=?', keepId))) return res.status(404).json({ error: 'Kept item not found' });
+    const ph = removeIds.map(() => '?').join(',');
+    const result = await pg.tx(async (t) => {
+      const rep = await t.run(`UPDATE po_foc_entries SET labour_item_id=? WHERE labour_item_id IN (${ph})`, keepId, ...removeIds);
+      const del = await t.run(`DELETE FROM labour_rates WHERE id IN (${ph})`, ...removeIds);
+      return { repointed: rep.changes, removed: del.changes };
+    });
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Bulk import from an uploaded .xlsx / .xls / .csv. First row = headers;
 // columns matched case-insensitively. Item Name required; others optional.
-router.post('/labour-rates/import', upload.single('file'), (req, res) => {
+router.post('/labour-rates/import', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const db = getDb();
   let rows;
   try {
     const wb = XLSX.readFile(req.file.path);
@@ -660,7 +687,6 @@ router.post('/labour-rates/import', upload.single('file'), (req, res) => {
   if (!rows.length) return res.status(400).json({ error: 'No data rows. Row 1 must be headers; data starts on row 2.' });
 
   const cleanKey = (k) => String(k || '').toLowerCase().replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-  const insert = db.prepare('INSERT INTO labour_rates (item_name, specification, size, rate, uom, category, created_by) VALUES (?,?,?,?,?,?,?)');
   let added = 0; const errors = [];
   for (let i = 0; i < rows.length; i++) {
     const r = {};
@@ -668,7 +694,8 @@ router.post('/labour-rates/import', upload.single('file'), (req, res) => {
     const item_name = String(r['item name'] || '').trim();
     if (!item_name) { errors.push(`Row ${i + 2}: Item Name required`); continue; }
     try {
-      insert.run(item_name, String(r['specification'] || ''), String(r['size'] || ''),
+      await pg.run('INSERT INTO labour_rates (item_name, specification, size, rate, uom, category, created_by) VALUES (?,?,?,?,?,?,?)',
+        item_name, String(r['specification'] || ''), String(r['size'] || ''),
         Number(r['rate']) || 0, String(r['uom'] || ''), String(r['category'] || ''), req.user.id);
       added++;
     } catch (err) { errors.push(`Row ${i + 2}: ${err.message}`); }
@@ -677,37 +704,47 @@ router.post('/labour-rates/import', upload.single('file'), (req, res) => {
 });
 
 // ── Saved AI Auto-Quotation estimates (mam 2026-06-10) ────────────
-router.get('/estimates', (req, res) => {
-  const rows = getDb().prepare(`SELECT id, title, client_name, sp, cost, updated_at, created_at
-    FROM estimate_quotations ORDER BY client_name COLLATE NOCASE, updated_at DESC`).all();
-  res.json(rows);
+router.get('/estimates', async (req, res) => {
+  try {
+    const rows = await pg.all(`SELECT id, title, client_name, sp, cost, updated_at, created_at
+      FROM estimate_quotations ORDER BY LOWER(client_name), updated_at DESC`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.get('/estimates/:id', (req, res) => {
-  const r = getDb().prepare('SELECT * FROM estimate_quotations WHERE id=?').get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'Not found' });
-  res.json({ ...r, margins: JSON.parse(r.margins_json || '{}'), rows: JSON.parse(r.rows_json || '[]'), manpower: JSON.parse(r.manpower_json || '[]'), payment_terms: JSON.parse(r.payment_terms_json || '{}') });
+router.get('/estimates/:id', async (req, res) => {
+  try {
+    const r = await pg.get('SELECT * FROM estimate_quotations WHERE id=?', req.params.id);
+    if (!r) return res.status(404).json({ error: 'Not found' });
+    res.json({ ...r, margins: JSON.parse(r.margins_json || '{}'), rows: JSON.parse(r.rows_json || '[]'), manpower: JSON.parse(r.manpower_json || '[]'), payment_terms: JSON.parse(r.payment_terms_json || '{}') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post('/estimates', (req, res) => {
-  const b = req.body || {};
-  const r = getDb().prepare(`INSERT INTO estimate_quotations (title, lead_id, client_name, acc_pct, margins_json, rows_json, manpower_json, payment_terms_json, cost, sp, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(b.title || '', b.lead_id || null, b.client_name || '', Number(b.acc_pct) || 0,
-    JSON.stringify(b.margins || {}), JSON.stringify(b.rows || []), JSON.stringify(b.manpower || []), JSON.stringify(b.payment_terms || {}),
-    Number(b.cost) || 0, Number(b.sp) || 0, req.user.id);
-  res.json({ id: r.lastInsertRowid, message: 'Saved' });
+router.post('/estimates', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const r = await pg.run(`INSERT INTO estimate_quotations (title, lead_id, client_name, acc_pct, margins_json, rows_json, manpower_json, payment_terms_json, cost, sp, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`, b.title || '', b.lead_id || null, b.client_name || '', Number(b.acc_pct) || 0,
+      JSON.stringify(b.margins || {}), JSON.stringify(b.rows || []), JSON.stringify(b.manpower || []), JSON.stringify(b.payment_terms || {}),
+      Number(b.cost) || 0, Number(b.sp) || 0, req.user.id);
+    res.json({ id: r.lastInsertRowid, message: 'Saved' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.put('/estimates/:id', (req, res) => {
-  const b = req.body || {};
-  const ex = getDb().prepare('SELECT id FROM estimate_quotations WHERE id=?').get(req.params.id);
-  if (!ex) return res.status(404).json({ error: 'Not found' });
-  getDb().prepare(`UPDATE estimate_quotations SET title=?, lead_id=?, client_name=?, acc_pct=?, margins_json=?, rows_json=?, manpower_json=?, payment_terms_json=?, cost=?, sp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(b.title || '', b.lead_id || null, b.client_name || '', Number(b.acc_pct) || 0,
+router.put('/estimates/:id', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const ex = await pg.get('SELECT id FROM estimate_quotations WHERE id=?', req.params.id);
+    if (!ex) return res.status(404).json({ error: 'Not found' });
+    await pg.run(`UPDATE estimate_quotations SET title=?, lead_id=?, client_name=?, acc_pct=?, margins_json=?, rows_json=?, manpower_json=?, payment_terms_json=?, cost=?, sp=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      b.title || '', b.lead_id || null, b.client_name || '', Number(b.acc_pct) || 0,
       JSON.stringify(b.margins || {}), JSON.stringify(b.rows || []), JSON.stringify(b.manpower || []), JSON.stringify(b.payment_terms || {}),
       Number(b.cost) || 0, Number(b.sp) || 0, req.params.id);
-  res.json({ message: 'Updated' });
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.delete('/estimates/:id', (req, res) => {
-  getDb().prepare('DELETE FROM estimate_quotations WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/estimates/:id', async (req, res) => {
+  try {
+    await pg.run('DELETE FROM estimate_quotations WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Build the multi-sheet quotation Excel (mam's saizar format): one sheet per

@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { validatePoNumber } = require('../utils/validate');
 const router = express.Router();
@@ -14,8 +14,8 @@ const uploadDir = path.join(__dirname, '..', '..', 'data', 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
 
-// Discover every table whose FOREIGN KEY targets `targetTable` (via SQLite's
-// own PRAGMA foreign_key_list) and NULL out the referencing column on rows
+// Discover every table whose FOREIGN KEY targets `targetTable` (via the
+// information_schema FK catalog) and NULL out the referencing column on rows
 // pointing at `ids`. Returns the list of referencers it touched + any errors
 // so callers can build a diagnostic message on FK failure.
 //
@@ -23,25 +23,27 @@ const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } 
 // constraint failed" because a hard-coded dependent list missed a table.
 // Self-healing: new tables that gain an FK in future are picked up
 // automatically the next time the path runs.
-function nullReferencers(db, targetTable, ids) {
+async function nullReferencers(dbx, targetTable, ids) {
   if (!ids || !ids.length) return { referencers: [], errors: [] };
   const placeholders = ids.map(() => '?').join(',');
-  const allTables = db.prepare(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-  ).all().map(r => r.name);
   const referencers = [];
-  for (const t of allTables) {
-    try {
-      const fks = db.prepare(`PRAGMA foreign_key_list(${t})`).all();
-      for (const fk of fks) {
-        if (fk.table === targetTable) referencers.push({ table: t, column: fk.from });
-      }
-    } catch (_) { /* unreadable table — skip */ }
-  }
+  try {
+    const fkRows = await dbx.all(`
+      SELECT tc.table_name AS tbl, kcu.column_name AS col
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema
+       WHERE tc.constraint_type = 'FOREIGN KEY'
+         AND tc.table_schema = 'public'
+         AND ccu.table_name = ?`, targetTable);
+    for (const fk of fkRows) referencers.push({ table: fk.tbl, column: fk.col });
+  } catch (_) { /* catalog unreadable — skip */ }
   const errors = [];
   for (const { table, column } of referencers) {
     try {
-      db.prepare(`UPDATE ${table} SET ${column}=NULL WHERE ${column} IN (${placeholders})`).run(...ids);
+      await dbx.run(`UPDATE ${table} SET ${column}=NULL WHERE ${column} IN (${placeholders})`, ...ids);
     } catch (e) {
       errors.push(`${table}.${column}: ${e.message}`);
       console.warn(`[nullReferencers] could not null ${table}.${column}:`, e.message);
@@ -53,13 +55,13 @@ function nullReferencers(db, targetTable, ids) {
 // Count how many rows still reference `ids` across the given referencers —
 // used to build a precise diagnostic when a DELETE still fails after a
 // null-out pass. Returns `{ "table.col": N, ... }` for non-zero counts only.
-function countRemainingRefs(db, referencers, ids) {
+async function countRemainingRefs(dbx, referencers, ids) {
   if (!ids || !ids.length) return {};
   const placeholders = ids.map(() => '?').join(',');
   const out = {};
   for (const { table, column } of referencers) {
     try {
-      const r = db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} IN (${placeholders})`).get(...ids);
+      const r = await dbx.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${column} IN (${placeholders})`, ...ids);
       if (r?.n > 0) out[`${table}.${column}`] = r.n;
     } catch (_) {}
   }
@@ -67,132 +69,138 @@ function countRemainingRefs(db, referencers, ids) {
 }
 
 // Business Book entries for PO dropdown
-router.get('/business-book-entries', (req, res) => {
-  res.json(getDb().prepare(
-    `SELECT bb.id, bb.lead_no, bb.client_name, bb.company_name, COALESCE(s.name, bb.project_name) as project_name,
-     bb.category, bb.order_type, bb.po_amount, bb.sale_amount_without_gst, bb.district, bb.state
-     FROM business_book bb LEFT JOIN sites s ON s.business_book_id=bb.id ORDER BY bb.created_at DESC`
-  ).all());
+router.get('/business-book-entries', async (req, res) => {
+  try {
+    res.json(await pg.all(
+      `SELECT bb.id, bb.lead_no, bb.client_name, bb.company_name, COALESCE(s.name, bb.project_name) as project_name,
+       bb.category, bb.order_type, bb.po_amount, bb.sale_amount_without_gst, bb.district, bb.state
+       FROM business_book bb LEFT JOIN sites s ON s.business_book_id=bb.id ORDER BY bb.created_at DESC`
+    ));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Purchase Orders
-router.get('/po', (req, res) => {
-  const db = getDb();
-  const rows = db.prepare(`SELECT po.*, bb.lead_no, bb.client_name as bb_client, bb.company_name as bb_company,
-    COALESCE(s.name, bb.project_name) as bb_project, bb.category as bb_category,
-    l.company_name, q.quotation_number, se.name as site_engineer_name FROM purchase_orders po
-    LEFT JOIN business_book bb ON po.business_book_id=bb.id
-    LEFT JOIN sites s ON s.business_book_id=bb.id
-    LEFT JOIN leads l ON po.lead_id=l.id LEFT JOIN quotations q ON po.quotation_id=q.id
-    LEFT JOIN users se ON po.site_engineer_id=se.id
-    ORDER BY po.created_at DESC`).all();
-  // Resolve multi-engineer names from site_engineer_ids CSV
-  for (const r of rows) {
-    const csv = r.site_engineer_ids;
-    if (csv) {
-      const ids = String(csv).split(',').map(x => parseInt(x, 10)).filter(Boolean);
-      if (ids.length) {
-        const placeholders = ids.map(() => '?').join(',');
-        const users = db.prepare(`SELECT id, name FROM users WHERE id IN (${placeholders})`).all(...ids);
-        r.site_engineer_ids_list = ids;
-        r.site_engineer_names = users.map(u => u.name).join(', ');
-      }
-    } else if (r.site_engineer_id) {
-      r.site_engineer_ids_list = [r.site_engineer_id];
-      r.site_engineer_names = r.site_engineer_name || '';
-    } else {
-      r.site_engineer_ids_list = [];
-      r.site_engineer_names = '';
-    }
-    // Extra project roles (mam 2026-06-17): jr site eng / supervisor /
-    // welder / helper — same CSV-of-user-ids shape as site engineers.
-    for (const f of ['jr_site_engineer', 'supervisor', 'welder', 'helper']) {
-      const ids = String(r[`${f}_ids`] || '').split(',').map(x => parseInt(x, 10)).filter(Boolean);
-      r[`${f}_ids_list`] = ids;
-      if (ids.length) {
-        const ph = ids.map(() => '?').join(',');
-        const us = db.prepare(`SELECT id, name FROM users WHERE id IN (${ph})`).all(...ids);
-        const byId = new Map(us.map(u => [u.id, u.name]));
-        r[`${f}_names`] = ids.map(id => byId.get(id)).filter(Boolean).join(', ');
+router.get('/po', async (req, res) => {
+  try {
+    const rows = await pg.all(`SELECT po.*, bb.lead_no, bb.client_name as bb_client, bb.company_name as bb_company,
+      COALESCE(s.name, bb.project_name) as bb_project, bb.category as bb_category,
+      l.company_name, q.quotation_number, se.name as site_engineer_name FROM purchase_orders po
+      LEFT JOIN business_book bb ON po.business_book_id=bb.id
+      LEFT JOIN sites s ON s.business_book_id=bb.id
+      LEFT JOIN leads l ON po.lead_id=l.id LEFT JOIN quotations q ON po.quotation_id=q.id
+      LEFT JOIN users se ON po.site_engineer_id=se.id
+      ORDER BY po.created_at DESC`);
+    // Resolve multi-engineer names from site_engineer_ids CSV
+    for (const r of rows) {
+      const csv = r.site_engineer_ids;
+      if (csv) {
+        const ids = String(csv).split(',').map(x => parseInt(x, 10)).filter(Boolean);
+        if (ids.length) {
+          const placeholders = ids.map(() => '?').join(',');
+          const users = await pg.all(`SELECT id, name FROM users WHERE id IN (${placeholders})`, ...ids);
+          r.site_engineer_ids_list = ids;
+          r.site_engineer_names = users.map(u => u.name).join(', ');
+        }
+      } else if (r.site_engineer_id) {
+        r.site_engineer_ids_list = [r.site_engineer_id];
+        r.site_engineer_names = r.site_engineer_name || '';
       } else {
-        r[`${f}_names`] = '';
+        r.site_engineer_ids_list = [];
+        r.site_engineer_names = '';
+      }
+      // Extra project roles (mam 2026-06-17): jr site eng / supervisor /
+      // welder / helper — same CSV-of-user-ids shape as site engineers.
+      for (const f of ['jr_site_engineer', 'supervisor', 'welder', 'helper']) {
+        const ids = String(r[`${f}_ids`] || '').split(',').map(x => parseInt(x, 10)).filter(Boolean);
+        r[`${f}_ids_list`] = ids;
+        if (ids.length) {
+          const ph = ids.map(() => '?').join(',');
+          const us = await pg.all(`SELECT id, name FROM users WHERE id IN (${ph})`, ...ids);
+          const byId = new Map(us.map(u => [u.id, u.name]));
+          r[`${f}_names`] = ids.map(id => byId.get(id)).filter(Boolean).join(', ');
+        } else {
+          r[`${f}_names`] = '';
+        }
       }
     }
-  }
-  res.json(rows);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/po', requirePermission('orders', 'create'), (req, res) => {
-  const { business_book_id, lead_id, quotation_id, po_number, po_date, total_amount, advance_amount, po_copy_link, boq_file_link, pt_advance, pt_delivery, pt_installation, pt_commissioning, pt_retention, site_engineer_id, site_engineer_ids, crm_name, items, jr_site_engineer_ids, supervisor_ids, welder_ids, helper_ids } = req.body;
-  const db = getDb();
-  // Extra-role CSVs (jr site eng / supervisor / welder / helper). Accept an
-  // array of user ids (preferred) or a CSV string; store as a clean CSV.
-  const csvIds = (v) => Array.isArray(v) ? v.map(x => parseInt(x, 10)).filter(Boolean).join(',') : (v == null ? '' : String(v));
-  const jrCsv = csvIds(jr_site_engineer_ids), supCsv = csvIds(supervisor_ids), weldCsv = csvIds(welder_ids), helpCsv = csvIds(helper_ids);
+router.post('/po', requirePermission('orders', 'create'), async (req, res) => {
+  try {
+    const { business_book_id, lead_id, quotation_id, po_number, po_date, total_amount, advance_amount, po_copy_link, boq_file_link, pt_advance, pt_delivery, pt_installation, pt_commissioning, pt_retention, site_engineer_id, site_engineer_ids, crm_name, items, jr_site_engineer_ids, supervisor_ids, welder_ids, helper_ids } = req.body;
+    // Extra-role CSVs (jr site eng / supervisor / welder / helper). Accept an
+    // array of user ids (preferred) or a CSV string; store as a clean CSV.
+    const csvIds = (v) => Array.isArray(v) ? v.map(x => parseInt(x, 10)).filter(Boolean).join(',') : (v == null ? '' : String(v));
+    const jrCsv = csvIds(jr_site_engineer_ids), supCsv = csvIds(supervisor_ids), weldCsv = csvIds(welder_ids), helpCsv = csvIds(helper_ids);
 
-  // PO number regex / junk-blocklist guard per TOC v3 P0 #1 — stops
-  // historical junk like "5252525", "141414", "1111111111", "00".
-  const poErr = validatePoNumber(po_number);
-  if (poErr) return res.status(400).json({ error: poErr });
+    // PO number regex / junk-blocklist guard per TOC v3 P0 #1 — stops
+    // historical junk like "5252525", "141414", "1111111111", "00".
+    const poErr = validatePoNumber(po_number);
+    if (poErr) return res.status(400).json({ error: poErr });
 
-  // Normalize engineer IDs: accept array (preferred) or single legacy id
-  const engIds = Array.isArray(site_engineer_ids)
-    ? site_engineer_ids.map(x => parseInt(x, 10)).filter(Boolean)
-    : (site_engineer_id ? [parseInt(site_engineer_id, 10)].filter(Boolean) : []);
-  if (engIds.length === 0) return res.status(400).json({ error: 'At least one Site Engineer is required' });
-  if (!crm_name) return res.status(400).json({ error: 'CRM is required' });
+    // Normalize engineer IDs: accept array (preferred) or single legacy id
+    const engIds = Array.isArray(site_engineer_ids)
+      ? site_engineer_ids.map(x => parseInt(x, 10)).filter(Boolean)
+      : (site_engineer_id ? [parseInt(site_engineer_id, 10)].filter(Boolean) : []);
+    if (engIds.length === 0) return res.status(400).json({ error: 'At least one Site Engineer is required' });
+    if (!crm_name) return res.status(400).json({ error: 'CRM is required' });
 
-  const primaryEng = engIds[0];
-  const engCsv = engIds.join(',');
+    const primaryEng = engIds[0];
+    const engCsv = engIds.join(',');
 
-  const r = db.prepare(
-    'INSERT INTO purchase_orders (business_book_id, lead_id, quotation_id, po_number, po_date, total_amount, advance_amount, po_copy_link, boq_file_link, pt_advance, pt_delivery, pt_installation, pt_commissioning, pt_retention, site_engineer_id, site_engineer_ids, jr_site_engineer_ids, supervisor_ids, welder_ids, helper_ids, crm_name, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
-  ).run(business_book_id || null, lead_id || null, quotation_id || null, po_number, po_date, total_amount, advance_amount || 0, po_copy_link || null, boq_file_link || null, pt_advance || 0, pt_delivery || 0, pt_installation || 0, pt_commissioning || 0, pt_retention || 0, primaryEng, engCsv, jrCsv, supCsv, weldCsv, helpCsv, crm_name, req.user.id);
-  const poId = r.lastInsertRowid;
+    const r = await pg.run(
+      'INSERT INTO purchase_orders (business_book_id, lead_id, quotation_id, po_number, po_date, total_amount, advance_amount, po_copy_link, boq_file_link, pt_advance, pt_delivery, pt_installation, pt_commissioning, pt_retention, site_engineer_id, site_engineer_ids, jr_site_engineer_ids, supervisor_ids, welder_ids, helper_ids, crm_name, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      business_book_id || null, lead_id || null, quotation_id || null, po_number, po_date, total_amount, advance_amount || 0, po_copy_link || null, boq_file_link || null, pt_advance || 0, pt_delivery || 0, pt_installation || 0, pt_commissioning || 0, pt_retention || 0, primaryEng, engCsv, jrCsv, supCsv, weldCsv, helpCsv, crm_name, req.user.id);
+    const poId = r.lastInsertRowid;
 
-  // Insert PO items — scoped to THIS PO (po_id = poId) so a later edit
-  // of another PO sharing the same business_book doesn't wipe these
-  // items. business_book_id is still recorded for cross-PO indent /
-  // DPR pooling.
-  if (items && items.length > 0) {
-    const insertItem = db.prepare('INSERT INTO po_items (business_book_id, po_id, item_master_id, description, quantity, unit, rate, amount, hsn_code, sr_no, part_price, labour_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
-    items.forEach((item, idx) => {
-      if (item.description && item.description.trim()) {
-        insertItem.run(
-          business_book_id || null,
-          poId,
-          item.item_master_id || null,
-          item.description.trim(),
-          +item.quantity || 0,
-          item.unit || 'nos',
-          +item.rate || 0,
-          +item.amount || 0,
-          item.hsn_code || '',
-          +item.sr_no || idx + 1,
-          +item.part_price || 0,        // PP (Part Price)
-          +item.labour_rate || 0,        // Labour Rate
-        );
+    // Insert PO items — scoped to THIS PO (po_id = poId) so a later edit
+    // of another PO sharing the same business_book doesn't wipe these
+    // items. business_book_id is still recorded for cross-PO indent /
+    // DPR pooling.
+    if (items && items.length > 0) {
+      const insertItemSql = 'INSERT INTO po_items (business_book_id, po_id, item_master_id, description, quantity, unit, rate, amount, hsn_code, sr_no, part_price, labour_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)';
+      for (let idx = 0; idx < items.length; idx++) {
+        const item = items[idx];
+        if (item.description && item.description.trim()) {
+          await pg.run(
+            insertItemSql,
+            business_book_id || null,
+            poId,
+            item.item_master_id || null,
+            item.description.trim(),
+            +item.quantity || 0,
+            item.unit || 'nos',
+            +item.rate || 0,
+            +item.amount || 0,
+            item.hsn_code || '',
+            +item.sr_no || idx + 1,
+            +item.part_price || 0,        // PP (Part Price)
+            +item.labour_rate || 0,        // Labour Rate
+          );
+        }
       }
-    });
-  }
+    }
 
-  // Sync po_number back to business_book
-  if (business_book_id) {
-    db.prepare('UPDATE business_book SET po_number=?, po_date=?, po_amount=? WHERE id=?')
-      .run(po_number, po_date, total_amount || 0, business_book_id);
-    // Update site's po_id if exists
-    db.prepare('UPDATE sites SET po_id=? WHERE business_book_id=?').run(poId, business_book_id);
-    // Update order_planning po_id
-    db.prepare('UPDATE order_planning SET po_id=? WHERE business_book_id=?').run(poId, business_book_id);
-  }
+    // Sync po_number back to business_book
+    if (business_book_id) {
+      await pg.run('UPDATE business_book SET po_number=?, po_date=?, po_amount=? WHERE id=?',
+        po_number, po_date, total_amount || 0, business_book_id);
+      // Update site's po_id if exists
+      await pg.run('UPDATE sites SET po_id=? WHERE business_book_id=?', poId, business_book_id);
+      // Update order_planning po_id
+      await pg.run('UPDATE order_planning SET po_id=? WHERE business_book_id=?', poId, business_book_id);
+    }
 
-  // Update lead status to won
-  if (lead_id) db.prepare('UPDATE leads SET status=? WHERE id=?').run('won', lead_id);
+    // Update lead status to won
+    if (lead_id) await pg.run('UPDATE leads SET status=? WHERE id=?', 'won', lead_id);
 
-  res.status(201).json({ id: poId });
+    res.status(201).json({ id: poId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/po/:id', requirePermission('orders', 'edit'), (req, res) => {
+router.put('/po/:id', requirePermission('orders', 'edit'), async (req, res) => {
   const { business_book_id, po_number, po_date, total_amount, advance_amount, po_copy_link, boq_file_link, pt_advance, pt_delivery, pt_installation, pt_commissioning, pt_retention, status, site_engineer_id, site_engineer_ids, crm_name, jr_site_engineer_ids, supervisor_ids, welder_ids, helper_ids } = req.body;
   // Extra-role CSVs — null when the field is absent so COALESCE keeps the
   // existing value; an explicit [] clears it (csvIds → '').
@@ -242,21 +250,20 @@ router.put('/po/:id', requirePermission('orders', 'edit'), (req, res) => {
     ? parseInt(business_book_id, 10) : null;
 
   try {
-    const db = getDb();
     // Guard the FK columns so a stale pick never 500s with "FOREIGN KEY
     // constraint failed" (mam 2026-06-24, "error if I update jr site eng"):
     // drop any engineer id that no longer exists in `users` (site_engineer_id
     // REFERENCES users(id)), and ignore a business_book link that's been
     // deleted. The jr/supervisor/welder/helper CSVs are plain TEXT (no FK).
-    const liveUserIds = new Set(db.prepare('SELECT id FROM users').all().map(r => r.id));
+    const liveUserIds = new Set((await pg.all('SELECT id FROM users')).map(r => r.id));
     const liveEngIds = engIds.filter(id => liveUserIds.has(id));
     if (!liveEngIds.length) return res.status(400).json({ error: 'The selected Site Engineer no longer exists as an active user — pick a current user.' });
     const primaryEngSafe = liveEngIds[0];
     const engCsvSafe = liveEngIds.join(',');
     let bbIdSafe = safeBbId;
-    if (bbIdSafe && !db.prepare('SELECT 1 FROM business_book WHERE id=?').get(bbIdSafe)) bbIdSafe = null;
+    if (bbIdSafe && !(await pg.get('SELECT 1 FROM business_book WHERE id=?', bbIdSafe))) bbIdSafe = null;
 
-    db.prepare(`UPDATE purchase_orders SET
+    await pg.run(`UPDATE purchase_orders SET
       business_book_id=COALESCE(?,business_book_id),
       po_number=COALESCE(?,po_number), po_date=COALESCE(?,po_date),
       total_amount=COALESCE(?,total_amount), advance_amount=COALESCE(?,advance_amount),
@@ -268,28 +275,27 @@ router.put('/po/:id', requirePermission('orders', 'edit'), (req, res) => {
       welder_ids=COALESCE(?,welder_ids),
       helper_ids=COALESCE(?,helper_ids),
       crm_name=?,
-      status=COALESCE(?,status) WHERE id=?`)
-      .run(
-        bbIdSafe,
-        safePoNumber, safePoDate,
-        num(total_amount), num(advance_amount),
-        po_copy_link || null, boq_file_link || null,
-        num(pt_advance, 0), num(pt_delivery, 0), num(pt_installation, 0), num(pt_commissioning, 0), num(pt_retention, 0),
-        primaryEngSafe, engCsvSafe,
-        jrCsv, supCsv, weldCsv, helpCsv,
-        crm_name,
-        safeStatus, req.params.id
-      );
+      status=COALESCE(?,status) WHERE id=?`,
+      bbIdSafe,
+      safePoNumber, safePoDate,
+      num(total_amount), num(advance_amount),
+      po_copy_link || null, boq_file_link || null,
+      num(pt_advance, 0), num(pt_delivery, 0), num(pt_installation, 0), num(pt_commissioning, 0), num(pt_retention, 0),
+      primaryEngSafe, engCsvSafe,
+      jrCsv, supCsv, weldCsv, helpCsv,
+      crm_name,
+      safeStatus, req.params.id
+    );
 
     // When the link changed, keep the dependent rows consistent — mirror
     // what POST /po does: re-point this PO's items to the new business
     // book (for indent/DPR pooling) and sync the new lead's po_* fields.
     if (bbIdSafe) {
-      db.prepare('UPDATE po_items SET business_book_id=? WHERE po_id=?').run(bbIdSafe, req.params.id);
-      const cur = db.prepare('SELECT po_number, po_date, total_amount FROM purchase_orders WHERE id=?').get(req.params.id);
+      await pg.run('UPDATE po_items SET business_book_id=? WHERE po_id=?', bbIdSafe, req.params.id);
+      const cur = await pg.get('SELECT po_number, po_date, total_amount FROM purchase_orders WHERE id=?', req.params.id);
       if (cur) {
-        db.prepare('UPDATE business_book SET po_number=?, po_date=?, po_amount=? WHERE id=?')
-          .run(cur.po_number, cur.po_date, cur.total_amount || 0, bbIdSafe);
+        await pg.run('UPDATE business_book SET po_number=?, po_date=?, po_amount=? WHERE id=?',
+          cur.po_number, cur.po_date, cur.total_amount || 0, bbIdSafe);
       }
     }
     res.json({ message: 'Updated' });
@@ -299,28 +305,27 @@ router.put('/po/:id', requirePermission('orders', 'edit'), (req, res) => {
   }
 });
 
-router.delete('/po/:id', requirePermission('orders', 'delete'), (req, res) => {
-  const db = getDb();
+router.delete('/po/:id', requirePermission('orders', 'delete'), async (req, res) => {
   const id = req.params.id;
   // ?force=1 cascades down through the entire procurement chain so admin
   // can wipe a bad-data PO and re-add. Regular delete (no flag) stays safe
   // — blocks if anything downstream references the PO.
   const force = req.query.force === '1' || req.query.force === 'true';
   try {
-    const po = db.prepare('SELECT business_book_id FROM purchase_orders WHERE id=?').get(id);
+    const po = await pg.get('SELECT business_book_id FROM purchase_orders WHERE id=?', id);
     if (!po) return res.status(404).json({ error: 'PO not found' });
 
     // Chain: purchase_orders -> order_planning (po_id) -> indents (planning_id) -> vendor_pos (indent_id) -> purchase_bills (vendor_po_id)
-    const vendorPoCount = db.prepare(`
+    const vendorPoCount = (await pg.get(`
       SELECT COUNT(*) as c FROM vendor_pos
       WHERE indent_id IN (
         SELECT id FROM indents WHERE planning_id IN (
           SELECT id FROM order_planning WHERE po_id=?
         )
       )
-    `).get(id).c;
+    `, id)).c;
 
-    const billCount = db.prepare(`
+    const billCount = (await pg.get(`
       SELECT COUNT(*) as c FROM purchase_bills
       WHERE vendor_po_id IN (
         SELECT id FROM vendor_pos WHERE indent_id IN (
@@ -329,10 +334,10 @@ router.delete('/po/:id', requirePermission('orders', 'delete'), (req, res) => {
           )
         )
       )
-    `).get(id).c;
+    `, id)).c;
 
-    const salesBillCount = db.prepare('SELECT COUNT(*) as c FROM sales_bills WHERE po_id=?').get(id).c;
-    const installCount = db.prepare('SELECT COUNT(*) as c FROM installations WHERE po_id=?').get(id).c;
+    const salesBillCount = (await pg.get('SELECT COUNT(*) as c FROM sales_bills WHERE po_id=?', id)).c;
+    const installCount = (await pg.get('SELECT COUNT(*) as c FROM installations WHERE po_id=?', id)).c;
 
     // Regular delete — block if any dependent record exists. Response
     // includes `canForce: true` so the client can offer a "Force Delete"
@@ -352,64 +357,63 @@ router.delete('/po/:id', requirePermission('orders', 'delete'), (req, res) => {
 
     // Force delete — cascade down the entire chain in a single transaction.
     if (force) {
-      const cascade = db.transaction(() => {
+      await pg.tx(async (t) => {
         // Gather ids through the chain so we can delete leaves first
-        const planningIds = db.prepare('SELECT id FROM order_planning WHERE po_id=?').all(id).map(r => r.id);
+        const planningIds = (await t.all('SELECT id FROM order_planning WHERE po_id=?', id)).map(r => r.id);
         const indentIds = planningIds.length
-          ? db.prepare(`SELECT id FROM indents WHERE planning_id IN (${planningIds.map(() => '?').join(',')})`).all(...planningIds).map(r => r.id)
+          ? (await t.all(`SELECT id FROM indents WHERE planning_id IN (${planningIds.map(() => '?').join(',')})`, ...planningIds)).map(r => r.id)
           : [];
         const vendorPoIds = indentIds.length
-          ? db.prepare(`SELECT id FROM vendor_pos WHERE indent_id IN (${indentIds.map(() => '?').join(',')})`).all(...indentIds).map(r => r.id)
+          ? (await t.all(`SELECT id FROM vendor_pos WHERE indent_id IN (${indentIds.map(() => '?').join(',')})`, ...indentIds)).map(r => r.id)
           : [];
 
         // Delete deepest leaves upward
         if (vendorPoIds.length) {
           const ph = vendorPoIds.map(() => '?').join(',');
-          db.prepare(`DELETE FROM purchase_bills WHERE vendor_po_id IN (${ph})`).run(...vendorPoIds);
-          db.prepare(`DELETE FROM delivery_notes WHERE vendor_po_id IN (${ph})`).run(...vendorPoIds);
-          db.prepare(`DELETE FROM vendor_po_items WHERE vendor_po_id IN (${ph})`).run(...vendorPoIds);
-          db.prepare(`DELETE FROM vendor_pos WHERE id IN (${ph})`).run(...vendorPoIds);
+          await t.run(`DELETE FROM purchase_bills WHERE vendor_po_id IN (${ph})`, ...vendorPoIds);
+          await t.run(`DELETE FROM delivery_notes WHERE vendor_po_id IN (${ph})`, ...vendorPoIds);
+          await t.run(`DELETE FROM vendor_po_items WHERE vendor_po_id IN (${ph})`, ...vendorPoIds);
+          await t.run(`DELETE FROM vendor_pos WHERE id IN (${ph})`, ...vendorPoIds);
         }
         if (indentIds.length) {
           const ph = indentIds.map(() => '?').join(',');
-          db.prepare(`DELETE FROM indent_item_rates WHERE indent_item_id IN (SELECT id FROM indent_items WHERE indent_id IN (${ph}))`).run(...indentIds);
-          db.prepare(`DELETE FROM indent_items WHERE indent_id IN (${ph})`).run(...indentIds);
-          db.prepare(`DELETE FROM indents WHERE id IN (${ph})`).run(...indentIds);
+          await t.run(`DELETE FROM indent_item_rates WHERE indent_item_id IN (SELECT id FROM indent_items WHERE indent_id IN (${ph}))`, ...indentIds);
+          await t.run(`DELETE FROM indent_items WHERE indent_id IN (${ph})`, ...indentIds);
+          await t.run(`DELETE FROM indents WHERE id IN (${ph})`, ...indentIds);
         }
-        db.prepare('DELETE FROM sales_bills WHERE po_id=?').run(id);
-        db.prepare('DELETE FROM installations WHERE po_id=?').run(id);
-        db.prepare('DELETE FROM order_planning WHERE po_id=?').run(id);
+        await t.run('DELETE FROM sales_bills WHERE po_id=?', id);
+        await t.run('DELETE FROM installations WHERE po_id=?', id);
+        await t.run('DELETE FROM order_planning WHERE po_id=?', id);
       });
-      cascade();
     }
 
     // Unlink lingering children and wipe the PO itself. Both the po_items
     // and purchase_orders DELETEs were hitting FK violations because tables
     // we didn't hardcode (e.g. indent_items.po_item_id, plus 7 known tables
     // with po_id REFERENCES purchase_orders) still pointed at the rows.
-    // nullReferencers() asks SQLite for the full list and clears them.
+    // nullReferencers() asks the FK catalog for the full list and clears them.
     // Wipe THIS PO's items only — was previously by business_book_id
     // which nuked every sibling PO. Now scoped by po_id with a
     // legacy-fallback for any items that haven't been backfilled yet
     // (po_id IS NULL AND business_book_id = po.business_book_id).
     if (po.business_book_id) {
-      db.prepare('UPDATE business_book SET po_number=NULL, po_date=NULL, po_amount=0 WHERE id=?').run(po.business_book_id);
+      await pg.run('UPDATE business_book SET po_number=NULL, po_date=NULL, po_amount=0 WHERE id=?', po.business_book_id);
     }
-    const poItemIds = db.prepare(`
+    const poItemIds = (await pg.all(`
       SELECT id FROM po_items
        WHERE po_id = ?
           OR (po_id IS NULL AND business_book_id = ?)
-    `).all(id, po.business_book_id || -1).map(r => r.id);
+    `, id, po.business_book_id || -1)).map(r => r.id);
     if (poItemIds.length) {
-      const { referencers: piRefs, errors: piErrs } = nullReferencers(db, 'po_items', poItemIds);
+      const { referencers: piRefs, errors: piErrs } = await nullReferencers(pg, 'po_items', poItemIds);
       try {
-        db.prepare(`
+        await pg.run(`
           DELETE FROM po_items
            WHERE po_id = ?
               OR (po_id IS NULL AND business_book_id = ?)
-        `).run(id, po.business_book_id || -1);
+        `, id, po.business_book_id || -1);
       } catch (e) {
-        const remaining = countRemainingRefs(db, piRefs, poItemIds);
+        const remaining = await countRemainingRefs(pg, piRefs, poItemIds);
         console.error('[PO delete] po_items DELETE failed:', e.message, '| poId:', id, '| bbId:', po.business_book_id,
           '| referencers:', piRefs, '| remaining:', remaining, '| nullErrors:', piErrs);
         const hint = Object.keys(remaining).length
@@ -418,14 +422,14 @@ router.delete('/po/:id', requirePermission('orders', 'delete'), (req, res) => {
         return res.status(409).json({ error: `Cannot delete PO: line items are referenced elsewhere.${hint}` });
       }
     }
-    db.prepare('UPDATE sites SET po_id=NULL WHERE po_id=?').run(id);
-    db.prepare('UPDATE order_planning SET po_id=NULL WHERE po_id=?').run(id);
+    await pg.run('UPDATE sites SET po_id=NULL WHERE po_id=?', id);
+    await pg.run('UPDATE order_planning SET po_id=NULL WHERE po_id=?', id);
 
-    const { referencers: poRefs, errors: poErrs } = nullReferencers(db, 'purchase_orders', [id]);
+    const { referencers: poRefs, errors: poErrs } = await nullReferencers(pg, 'purchase_orders', [id]);
     try {
-      db.prepare('DELETE FROM purchase_orders WHERE id=?').run(id);
+      await pg.run('DELETE FROM purchase_orders WHERE id=?', id);
     } catch (e) {
-      const remaining = countRemainingRefs(db, poRefs, [id]);
+      const remaining = await countRemainingRefs(pg, poRefs, [id]);
       console.error('[PO delete] purchase_orders DELETE failed:', e.message, '| poId:', id,
         '| referencers:', poRefs, '| remaining:', remaining, '| nullErrors:', poErrs);
       const hint = Object.keys(remaining).length
@@ -440,20 +444,24 @@ router.delete('/po/:id', requirePermission('orders', 'delete'), (req, res) => {
   }
 });
 
-router.delete('/planning/:id', requirePermission('orders', 'delete'), (req, res) => {
-  getDb().prepare('DELETE FROM order_planning WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/planning/:id', requirePermission('orders', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM order_planning WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // PO Items CRUD
-router.get('/po/:id/items', (req, res) => {
-  // Get items via business_book_id linked to this PO
-  const po = getDb().prepare('SELECT business_book_id FROM purchase_orders WHERE id=?').get(req.params.id);
-  if (po?.business_book_id) {
-    res.json(getDb().prepare('SELECT * FROM po_items WHERE business_book_id=?').all(po.business_book_id));
-  } else {
-    res.json([]);
-  }
+router.get('/po/:id/items', async (req, res) => {
+  try {
+    // Get items via business_book_id linked to this PO
+    const po = await pg.get('SELECT business_book_id FROM purchase_orders WHERE id=?', req.params.id);
+    if (po?.business_book_id) {
+      res.json(await pg.all('SELECT * FROM po_items WHERE business_book_id=?', po.business_book_id));
+    } else {
+      res.json([]);
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Reset (zero out) labour_rate + labour_amount on every po_items row
@@ -461,15 +469,16 @@ router.get('/po/:id/items', (req, res) => {
 // bcs after labour rate add this happen". Used when a labour rate sheet
 // was applied to the wrong PO or with a wrong-shape sheet; mam can
 // reset and re-upload cleanly. Idempotent and scoped by business_book_id.
-router.post('/po/:id/labour-rates/reset', requirePermission('orders', 'edit'), (req, res) => {
-  const db = getDb();
-  const po = db.prepare('SELECT business_book_id FROM purchase_orders WHERE id=?').get(req.params.id);
-  if (!po?.business_book_id) return res.status(404).json({ error: 'PO not found or has no business_book link' });
-  const r = db.prepare('UPDATE po_items SET labour_rate = 0, labour_amount = 0 WHERE business_book_id = ?').run(po.business_book_id);
-  res.json({
-    message: `Cleared labour rate on ${r.changes} item${r.changes === 1 ? '' : 's'}. Upload the Labour Rate Sheet again to repopulate.`,
-    cleared_count: r.changes,
-  });
+router.post('/po/:id/labour-rates/reset', requirePermission('orders', 'edit'), async (req, res) => {
+  try {
+    const po = await pg.get('SELECT business_book_id FROM purchase_orders WHERE id=?', req.params.id);
+    if (!po?.business_book_id) return res.status(404).json({ error: 'PO not found or has no business_book link' });
+    const r = await pg.run('UPDATE po_items SET labour_rate = 0, labour_amount = 0 WHERE business_book_id = ?', po.business_book_id);
+    res.json({
+      message: `Cleared labour rate on ${r.changes} item${r.changes === 1 ? '' : 's'}. Upload the Labour Rate Sheet again to repopulate.`,
+      cleared_count: r.changes,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Bulk-patch labour_rate (and the derived labour_amount) on po_items.
@@ -478,46 +487,42 @@ router.post('/po/:id/labour-rates/reset', requirePermission('orders', 'edit'), (
 // uploads the Labour Rate Sheet — the rate from each row is matched
 // to a po_item and written here without disturbing rate / quantity /
 // description. From here the rate flows into dpr_work_items.
-router.post('/po/:id/labour-rates', requirePermission('orders', 'edit'), (req, res) => {
-  const db = getDb();
-  const po = db.prepare('SELECT business_book_id FROM purchase_orders WHERE id=?').get(req.params.id);
-  if (!po) return res.status(404).json({ error: 'PO not found' });
-  const updates = Array.isArray(req.body?.items) ? req.body.items : [];
-  if (!updates.length) return res.status(400).json({ error: 'No items supplied' });
-
-  // Pre-fetch all po_items for this PO so we can validate ownership
-  // (don't let a stray id from another PO get patched) and read qty
-  // for the labour_amount math.
-  const rows = db.prepare('SELECT id, quantity, business_book_id FROM po_items WHERE business_book_id=?').all(po.business_book_id);
-  const byId = new Map(rows.map(r => [r.id, r]));
-
-  const upd = db.prepare('UPDATE po_items SET labour_rate=?, labour_amount=? WHERE id=?');
-  const tx = db.transaction((items) => {
-    let n = 0;
-    for (const it of items) {
-      const id = +it.po_item_id || +it.id;
-      const row = byId.get(id);
-      if (!row) continue;
-      const labour = +it.labour_rate || 0;
-      const amount = +it.labour_amount || (+row.quantity || 0) * labour;
-      upd.run(labour, amount, id);
-      n++;
-    }
-    return n;
-  });
+router.post('/po/:id/labour-rates', requirePermission('orders', 'edit'), async (req, res) => {
   try {
-    const updated = tx(updates);
+    const po = await pg.get('SELECT business_book_id FROM purchase_orders WHERE id=?', req.params.id);
+    if (!po) return res.status(404).json({ error: 'PO not found' });
+    const updates = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!updates.length) return res.status(400).json({ error: 'No items supplied' });
+
+    // Pre-fetch all po_items for this PO so we can validate ownership
+    // (don't let a stray id from another PO get patched) and read qty
+    // for the labour_amount math.
+    const rows = await pg.all('SELECT id, quantity, business_book_id FROM po_items WHERE business_book_id=?', po.business_book_id);
+    const byId = new Map(rows.map(r => [r.id, r]));
+
+    const updated = await pg.tx(async (t) => {
+      let n = 0;
+      for (const it of updates) {
+        const id = +it.po_item_id || +it.id;
+        const row = byId.get(id);
+        if (!row) continue;
+        const labour = +it.labour_rate || 0;
+        const amount = +it.labour_amount || (+row.quantity || 0) * labour;
+        await t.run('UPDATE po_items SET labour_rate=?, labour_amount=? WHERE id=?', labour, amount, id);
+        n++;
+      }
+      return n;
+    });
     res.json({ message: `Labour rate updated on ${updated} item${updated === 1 ? '' : 's'}`, updated_count: updated });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => {
+router.post('/po/:id/items', requirePermission('orders', 'edit'), async (req, res) => {
  try {
   const { items } = req.body;
-  const db = getDb();
-  const po = db.prepare('SELECT business_book_id FROM purchase_orders WHERE id=?').get(req.params.id);
+  const po = await pg.get('SELECT business_book_id FROM purchase_orders WHERE id=?', req.params.id);
   if (!po) return res.status(404).json({ error: 'PO not found' });
 
   // Guard against stale FK references: if the PO points at a business_book
@@ -526,11 +531,11 @@ router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => 
   // business_book_id = NULL (item_master_id too).
   let bbId = po?.business_book_id || null;
   if (bbId) {
-    const bbExists = db.prepare('SELECT 1 FROM business_book WHERE id=?').get(bbId);
+    const bbExists = await pg.get('SELECT 1 FROM business_book WHERE id=?', bbId);
     if (!bbExists) {
       console.warn(`[PO items save] PO ${req.params.id} references missing business_book ${bbId}; saving items without BB link`);
       // Also null out the stale reference on the PO itself so future saves don't hit this
-      try { db.prepare('UPDATE purchase_orders SET business_book_id=NULL WHERE id=?').run(req.params.id); } catch (e) {}
+      try { await pg.run('UPDATE purchase_orders SET business_book_id=NULL WHERE id=?', req.params.id); } catch (e) {}
       bbId = null;
     }
   }
@@ -541,21 +546,21 @@ router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => 
   // item set. Legacy items with po_id=NULL get scooped up too so a
   // re-upload after a migration still replaces them.
   const poId = +req.params.id || null;
-  const poItemIds = db.prepare(`
+  const poItemIds = (await pg.all(`
     SELECT id FROM po_items
      WHERE po_id = ?
         OR (po_id IS NULL AND business_book_id = ?)
-  `).all(poId, bbId).map(r => r.id);
+  `, poId, bbId)).map(r => r.id);
   if (poItemIds.length) {
-    const { referencers, errors: nullErrors } = nullReferencers(db, 'po_items', poItemIds);
+    const { referencers, errors: nullErrors } = await nullReferencers(pg, 'po_items', poItemIds);
     try {
-      db.prepare(`
+      await pg.run(`
         DELETE FROM po_items
          WHERE po_id = ?
             OR (po_id IS NULL AND business_book_id = ?)
-      `).run(poId, bbId);
+      `, poId, bbId);
     } catch (e) {
-      const remaining = countRemainingRefs(db, referencers, poItemIds);
+      const remaining = await countRemainingRefs(pg, referencers, poItemIds);
       const knownList = referencers.map(r => `${r.table}.${r.column}`).join(', ') || '(none discovered)';
       const hint = Object.keys(remaining).length
         ? ' Still blocking: ' + Object.entries(remaining).map(([k, n]) => `${k}(${n})`).join(', ') + '.'
@@ -570,9 +575,9 @@ router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => 
 
   // Build set of valid item_master ids up-front so we can skip dangling
   // references without individual queries per row.
-  const validMasterIds = new Set(db.prepare('SELECT id FROM item_master').all().map(r => r.id));
+  const validMasterIds = new Set((await pg.all('SELECT id FROM item_master')).map(r => r.id));
 
-  const insert = db.prepare('INSERT INTO po_items (business_book_id, po_id, item_master_id, description, quantity, unit, rate, amount, hsn_code, sr_no, part_price, labour_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+  const insertSql = 'INSERT INTO po_items (business_book_id, po_id, item_master_id, description, quantity, unit, rate, amount, hsn_code, sr_no, part_price, labour_rate) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)';
   let count = 0;
   const errors = [];
   // Coerce numerics safely — empty strings, null, NaN all become 0 so a
@@ -584,38 +589,42 @@ router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => 
 
   try {
     // Wrap all inserts in a single transaction for atomicity + speed.
-    const runInserts = db.transaction(() => {
+    // Each row runs under a savepoint so one bad row is skipped (and
+    // reported) without poisoning the whole Postgres transaction.
+    await pg.tx(async (t) => {
       for (let idx = 0; idx < (items || []).length; idx++) {
         const item = items[idx];
         if (!item || !item.description || !item.description.trim()) continue;
         try {
-          // item_master_id: accept only integer ids that actually exist in
-          // item_master. Empty string / non-int / unknown id → NULL (so FK
-          // doesn't blow up).
-          const rawMid = item.item_master_id;
-          const midNum = parseInt(rawMid, 10);
-          const safeMasterId = Number.isFinite(midNum) && validMasterIds.has(midNum) ? midNum : null;
-          insert.run(
-            bbId,
-            poId,
-            safeMasterId,
-            item.description.trim(),
-            num(item.quantity),
-            item.unit || 'nos',
-            num(item.rate),
-            num(item.amount),
-            item.hsn_code || '',
-            num(item.sr_no) || idx + 1,
-            num(item.part_price),        // PP (Part Price)
-            num(item.labour_rate),        // Labour Rate
-          );
+          await t.savepoint(async () => {
+            // item_master_id: accept only integer ids that actually exist in
+            // item_master. Empty string / non-int / unknown id → NULL (so FK
+            // doesn't blow up).
+            const rawMid = item.item_master_id;
+            const midNum = parseInt(rawMid, 10);
+            const safeMasterId = Number.isFinite(midNum) && validMasterIds.has(midNum) ? midNum : null;
+            await t.run(
+              insertSql,
+              bbId,
+              poId,
+              safeMasterId,
+              item.description.trim(),
+              num(item.quantity),
+              item.unit || 'nos',
+              num(item.rate),
+              num(item.amount),
+              item.hsn_code || '',
+              num(item.sr_no) || idx + 1,
+              num(item.part_price),        // PP (Part Price)
+              num(item.labour_rate),        // Labour Rate
+            );
+          });
           count++;
         } catch (rowErr) {
           errors.push(`Row ${idx + 1}: ${rowErr.message}`);
         }
       }
     });
-    runInserts();
     if (errors.length) {
       return res.status(400).json({ error: `Saved ${count} items; ${errors.length} failed`, failures: errors });
     }
@@ -625,47 +634,56 @@ router.post('/po/:id/items', requirePermission('orders', 'edit'), (req, res) => 
     res.status(500).json({ error: 'Items save failed: ' + err.message });
   }
  } catch (outerErr) {
-  // Outer catch for errors in db.prepare / db.get setup before the transaction
+  // Outer catch for errors in query setup before the transaction
   console.error('[PO items save] outer failure:', outerErr.message, '\nbody:', JSON.stringify(req.body).slice(0, 2000));
   res.status(500).json({ error: 'Items save failed (setup): ' + outerErr.message });
  }
 });
 
 // Get PO items by business_book_id directly
-router.get('/bb/:bbId/items', (req, res) => {
-  res.json(getDb().prepare('SELECT * FROM po_items WHERE business_book_id=?').all(req.params.bbId));
+router.get('/bb/:bbId/items', async (req, res) => {
+  try {
+    res.json(await pg.all('SELECT * FROM po_items WHERE business_book_id=?', req.params.bbId));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Order Planning
-router.get('/planning', (req, res) => {
-  res.json(getDb().prepare(`SELECT op.*, po.po_number, bb.client_name FROM order_planning op
-    LEFT JOIN purchase_orders po ON op.po_id=po.id LEFT JOIN business_book bb ON op.business_book_id=bb.id ORDER BY op.created_at DESC`).all());
+router.get('/planning', async (req, res) => {
+  try {
+    res.json(await pg.all(`SELECT op.*, po.po_number, bb.client_name FROM order_planning op
+      LEFT JOIN purchase_orders po ON op.po_id=po.id LEFT JOIN business_book bb ON op.business_book_id=bb.id ORDER BY op.created_at DESC`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/planning', requirePermission('orders', 'create'), (req, res) => {
-  const { po_id, business_book_id, planned_start, planned_end, notes } = req.body;
-  const r = getDb().prepare(
-    'INSERT INTO order_planning (po_id, business_book_id, planned_start, planned_end, notes, created_by) VALUES (?,?,?,?,?,?)'
-  ).run(po_id, business_book_id, planned_start, planned_end, notes, req.user.id);
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/planning', requirePermission('orders', 'create'), async (req, res) => {
+  try {
+    const { po_id, business_book_id, planned_start, planned_end, notes } = req.body;
+    const r = await pg.run(
+      'INSERT INTO order_planning (po_id, business_book_id, planned_start, planned_end, notes, created_by) VALUES (?,?,?,?,?,?)',
+      po_id, business_book_id, planned_start, planned_end, notes, req.user.id);
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/planning/:id', requirePermission('orders', 'edit'), (req, res) => {
-  const { status, planned_start, planned_end, notes } = req.body;
-  getDb().prepare('UPDATE order_planning SET status=?, planned_start=?, planned_end=?, notes=? WHERE id=?')
-    .run(status, planned_start, planned_end, notes, req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/planning/:id', requirePermission('orders', 'edit'), async (req, res) => {
+  try {
+    const { status, planned_start, planned_end, notes } = req.body;
+    await pg.run('UPDATE order_planning SET status=?, planned_start=?, planned_end=?, notes=? WHERE id=?',
+      status, planned_start, planned_end, notes, req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Get BOQ items for a PO (for DPR auto-population)
-router.get('/po/:id/boq-items', (req, res) => {
-  const db = getDb();
-  const po = db.prepare('SELECT quotation_id FROM purchase_orders WHERE id=?').get(req.params.id);
-  if (!po?.quotation_id) return res.json([]);
-  const quotation = db.prepare('SELECT boq_id FROM quotations WHERE id=?').get(po.quotation_id);
-  if (!quotation?.boq_id) return res.json([]);
-  const items = db.prepare('SELECT * FROM boq_items WHERE boq_id=?').all(quotation.boq_id);
-  res.json(items);
+router.get('/po/:id/boq-items', async (req, res) => {
+  try {
+    const po = await pg.get('SELECT quotation_id FROM purchase_orders WHERE id=?', req.params.id);
+    if (!po?.quotation_id) return res.json([]);
+    const quotation = await pg.get('SELECT boq_id FROM quotations WHERE id=?', po.quotation_id);
+    if (!quotation?.boq_id) return res.json([]);
+    const items = await pg.all('SELECT * FROM boq_items WHERE boq_id=?', quotation.boq_id);
+    res.json(items);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Download PO Excel template

@@ -3,10 +3,10 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { parseResume } = require('../utils/resumeParser');
-const { getShiftHistory } = require('../lib/shifts');
+const { getShiftHistory } = require('../lib/shifts');   // async: await getShiftHistory(pg, id)
 const router = express.Router();
 router.use(authMiddleware);
 
@@ -53,23 +53,23 @@ function classifyRole(roleNames) {
   return 'se';
 }
 
-router.get('/manpower-plan', (req, res) => {
-  const db = getDb();
-  const bbs = db.prepare(
+router.get('/manpower-plan', async (req, res) => {
+  try {
+  const bbs = await pg.all(
     `SELECT id, lead_no, project_name, company_name, client_name, po_amount, status
        FROM business_book`
-  ).all();
-  const sites = db.prepare(`SELECT id, business_book_id FROM sites`).all();
+  );
+  const sites = await pg.all(`SELECT id, business_book_id FROM sites`);
   // Manpower per DPR: prefer the sum of dpr_contractors.manpower, else the
   // legacy dpr.contractor_manpower.  One row per DPR.
-  const dprRows = db.prepare(
+  const dprRows = await pg.all(
     `SELECT d.id, d.site_id, d.report_date,
             CASE WHEN COALESCE(SUM(dc.manpower), 0) > 0 THEN SUM(dc.manpower)
                  ELSE COALESCE(d.contractor_manpower, 0) END AS mp
        FROM dpr d
        LEFT JOIN dpr_contractors dc ON dc.dpr_id = d.id
       GROUP BY d.id`
-  ).all();
+  );
   // Group business_book rows into unique projects by normalized name.
   const norm = s => String(s || '').trim();
   const keyOf = bb => (norm(bb.project_name) || norm(bb.company_name) || norm(bb.client_name)
@@ -104,9 +104,9 @@ router.get('/manpower-plan', (req, res) => {
   // assigned ROLE (same badge shown in User Management), counting only ACTIVE
   // users.  So someone whose role is "Jr. Site Eng" lands in Jr, not Site Eng.
   try {
-    const pos = db.prepare(
+    const pos = await pg.all(
       `SELECT business_book_id, site_engineer_id, site_engineer_ids FROM purchase_orders`
-    ).all();
+    );
     for (const po of pos) {
       const g = groups.get(groupByBB.get(po.business_book_id));
       if (!g) continue;
@@ -121,14 +121,15 @@ router.get('/manpower-plan', (req, res) => {
       const ph = allEngIds.map(() => '?').join(',');
       // Active users only, each with the comma-joined list of their role names.
       const userMap = new Map(
-        db.prepare(
-          `SELECT u.id, u.name, GROUP_CONCAT(r.name) AS role_names
+        (await pg.all(
+          `SELECT u.id, u.name, STRING_AGG(r.name, ',') AS role_names
              FROM users u
              LEFT JOIN user_roles ur ON ur.user_id = u.id
              LEFT JOIN roles r ON r.id = ur.role_id
             WHERE u.id IN (${ph}) AND u.active = 1
-            GROUP BY u.id`
-        ).all(...allEngIds).map(u => [u.id, u])
+            GROUP BY u.id`,
+          ...allEngIds
+        )).map(u => [u.id, u])
       );
       for (const g of groups.values()) {
         const seN = [], jrN = [], fmN = [];
@@ -148,7 +149,7 @@ router.get('/manpower-plan', (req, res) => {
   // Per-project settings — category + required override, keyed by project key.
   const settings = new Map();
   try {
-    for (const s of db.prepare(`SELECT project_key, required_override, category, site_eng_override, jr_site_eng_override, foreman_override FROM manpower_project_settings`).all()) {
+    for (const s of await pg.all(`SELECT project_key, required_override, category, site_eng_override, jr_site_eng_override, foreman_override FROM manpower_project_settings`)) {
       settings.set(s.project_key, s);
     }
   } catch (e) { /* table may not exist on a very stale DB */ }
@@ -211,14 +212,14 @@ router.get('/manpower-plan', (req, res) => {
     };
   }).sort((a, b) => b.gap - a.gap || b.value - a.value);
   res.json(projects);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // PUT a manual override of a project's required manpower (mam 2026-06-12:
 // "admin wants to edit required manpower give then access").  Gated by hr
 // EDIT permission (admins always pass).  Body { key, required }.  A blank /
 // 0 / null required RESETS the project back to the auto value-slab number.
-router.put('/manpower-plan/required', requirePermission('hr', 'edit'), (req, res) => {
-  const db = getDb();
+router.put('/manpower-plan/required', requirePermission('hr', 'edit'), async (req, res) => {
   const key = String(req.body?.key || '').trim();
   if (!key) return res.status(400).json({ error: 'project key is required' });
   // role selects which target is being edited: manpower (default), Site
@@ -230,16 +231,16 @@ router.put('/manpower-plan/required', requirePermission('hr', 'edit'), (req, res
   try {
     if (reset) {
       // Clear this override but keep the rest of the row.
-      db.prepare(`UPDATE manpower_project_settings SET ${col}=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_key=?`).run(key);
+      await pg.run(`UPDATE manpower_project_settings SET ${col}=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_key=?`, key);
       return res.json({ ok: true, reset: true });
     }
     const required = Math.round(+raw);
     if (!Number.isFinite(required) || required > 100000) return res.status(400).json({ error: 'required must be a positive number' });
-    db.prepare(
+    await pg.run(
       `INSERT INTO manpower_project_settings (project_key, ${col}, updated_by, updated_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(project_key) DO UPDATE SET ${col}=excluded.${col}, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`
-    ).run(key, required, req.user.id);
+       ON CONFLICT(project_key) DO UPDATE SET ${col}=excluded.${col}, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`,
+      key, required, req.user.id);
     res.json({ ok: true, required });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -249,18 +250,17 @@ router.put('/manpower-plan/required', requirePermission('hr', 'edit'), (req, res
 // PUT a project's category (mam 2026-06-12): Live / Old / Service Team /
 // Handover.  Handover means no team required + no planning.  Gated by hr
 // edit permission; an empty / unknown value clears the category.
-router.put('/manpower-plan/category', requirePermission('hr', 'edit'), (req, res) => {
-  const db = getDb();
+router.put('/manpower-plan/category', requirePermission('hr', 'edit'), async (req, res) => {
   const key = String(req.body?.key || '').trim();
   if (!key) return res.status(400).json({ error: 'project key is required' });
   const ALLOWED = ['Live', 'Hold', 'Service Team', 'Handover'];
   const category = ALLOWED.includes(req.body?.category) ? req.body.category : null;
   try {
-    db.prepare(
+    await pg.run(
       `INSERT INTO manpower_project_settings (project_key, category, updated_by, updated_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(project_key) DO UPDATE SET category=excluded.category, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`
-    ).run(key, category, req.user.id);
+       ON CONFLICT(project_key) DO UPDATE SET category=excluded.category, updated_by=excluded.updated_by, updated_at=CURRENT_TIMESTAMP`,
+      key, category, req.user.id);
     res.json({ ok: true, category });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -292,20 +292,26 @@ try {
 // Fails silently — a missing timeline row should NEVER block the
 // underlying business action (the actual candidate update is what
 // HR cares about).
-function logEvent(db, candidateId, eventType, opts = {}) {
+async function logEvent(db, candidateId, eventType, opts = {}) {
+  // db is either the root pg adapter or a transaction api (t). Inside a
+  // Postgres transaction a failed statement poisons the whole tx, so when a
+  // savepoint helper is available we run the insert under it — keeping the
+  // original "fails silently, never blocks the business action" behaviour.
+  const doInsert = () => db.run(
+    `INSERT INTO candidate_events
+       (candidate_id, event_type, from_status, to_status, note, user_id, user_name)
+     VALUES (?,?,?,?,?,?,?)`,
+    +candidateId,
+    eventType,
+    opts.from_status || null,
+    opts.to_status   || null,
+    opts.note        || null,
+    opts.user_id     || null,
+    opts.user_name   || null,
+  );
   try {
-    db.prepare(`INSERT INTO candidate_events
-                  (candidate_id, event_type, from_status, to_status, note, user_id, user_name)
-                VALUES (?,?,?,?,?,?,?)`)
-      .run(
-        +candidateId,
-        eventType,
-        opts.from_status || null,
-        opts.to_status   || null,
-        opts.note        || null,
-        opts.user_id     || null,
-        opts.user_name   || null,
-      );
+    if (typeof db.savepoint === 'function') await db.savepoint(doInsert);
+    else await doInsert();
   } catch (e) {
     console.warn('[hr/logEvent] failed:', e.message);
   }
@@ -349,7 +355,8 @@ router.post('/candidates/parse-resume', resumeUpload.single('file'), async (req,
 });
 
 // Candidates
-router.get('/candidates', (req, res) => {
+router.get('/candidates', async (req, res) => {
+  try {
   const { status, source } = req.query;
   // Join employees so the row carries the interviewer's name. md_decision /
   // interview_decision / file fields come along with the SELECT * so the
@@ -362,14 +369,15 @@ router.get('/candidates', (req, res) => {
   if (status) { sql += ' AND c.status=?'; params.push(status); }
   if (source) { sql += ' AND c.source=?'; params.push(source); }
   sql += ' ORDER BY c.created_at DESC';
-  res.json(getDb().prepare(sql).all(...params));
+  res.json(await pg.all(sql, ...params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Duplicate-detection helper (mam 2026-05-22 ATS spec) ─────────
 // "Candidate duplicate detection" — match on normalised email OR last-10-
 // digit phone.  Returns an array of {id, name, status, created_at} the
 // frontend can show in a warning dialog before letting admin save.
-function findDuplicates(db, { email, phone, excludeId } = {}) {
+async function findDuplicates(db, { email, phone, excludeId } = {}) {
   const dups = [];
   const seen = new Set();
   const push = (rows) => {
@@ -381,19 +389,19 @@ function findDuplicates(db, { email, phone, excludeId } = {}) {
     }
   };
   if (email && String(email).trim()) {
-    push(db.prepare(
+    push(await db.all(
       `SELECT id, name, status, phone, email, position, created_at
-         FROM candidates WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))`
-    ).all(email));
+         FROM candidates WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))`,
+      email));
   }
   if (phone && String(phone).trim()) {
     const last10 = String(phone).replace(/\D/g, '').slice(-10);
     if (last10.length === 10) {
-      push(db.prepare(
+      push(await db.all(
         `SELECT id, name, status, phone, email, position, created_at
            FROM candidates
-          WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+',''),'(','') LIKE '%' || ? || '%'`
-      ).all(last10));
+          WHERE REPLACE(REPLACE(REPLACE(REPLACE(phone,' ',''),'-',''),'+',''),'(','') LIKE '%' || ? || '%'`,
+        last10));
     }
   }
   return dups;
@@ -401,12 +409,14 @@ function findDuplicates(db, { email, phone, excludeId } = {}) {
 
 // Preflight duplicate check — frontend calls this before opening the
 // Add Candidate modal to warn early.  Returns { duplicates: [...] }.
-router.post('/candidates/check-duplicates', (req, res) => {
-  const { email, phone, excludeId } = req.body || {};
-  res.json({ duplicates: findDuplicates(getDb(), { email, phone, excludeId }) });
+router.post('/candidates/check-duplicates', async (req, res) => {
+  try {
+    const { email, phone, excludeId } = req.body || {};
+    res.json({ duplicates: await findDuplicates(pg, { email, phone, excludeId }) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates', (req, res) => {
+router.post('/candidates', async (req, res) => {
   try {
     const { name, phone, email, source, position, notes, resume_file,
             address, linkedin_url, tags, hiring_request_id } = req.body;
@@ -417,13 +427,12 @@ router.post('/candidates', (req, res) => {
     // HR sees a clean message ('Source must be one of...') instead of a 500.
     const allowedSources = ['facebook','naukri','linkedin','reference','other'];
     const src = source && allowedSources.includes(source) ? source : 'other';
-    const db = getDb();
     // Mam (2026-05-22): duplicate detection BEFORE insert — if email or
     // phone already exists on another candidate, refuse with 409 +
     // duplicates list so frontend can show "Existing candidate found —
     // open existing / save anyway".  Pass ?force=1 to bypass.
     if (!force) {
-      const dups = findDuplicates(db, { email, phone });
+      const dups = await findDuplicates(pg, { email, phone });
       if (dups.length) {
         return res.status(409).json({
           error: 'Duplicate candidate found',
@@ -432,13 +441,13 @@ router.post('/candidates', (req, res) => {
         });
       }
     }
-    const r = db.prepare(
+    const r = await pg.run(
       `INSERT INTO candidates (name, phone, email, source, position, notes, resume_file, address, linkedin_url, tags, hiring_request_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-    ).run(name, phone || null, email || null, src, position || null, notes || null,
-          resume_file || null, address || null, linkedin_url || null,
-          tags || null, hiring_request_id ? +hiring_request_id : null);
-    logEvent(db, r.lastInsertRowid, 'created', {
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      name, phone || null, email || null, src, position || null, notes || null,
+      resume_file || null, address || null, linkedin_url || null,
+      tags || null, hiring_request_id ? +hiring_request_id : null);
+    await logEvent(pg, r.lastInsertRowid, 'created', {
       to_status: 'lead', user_id: req.user.id, user_name: req.user.name,
       note: force ? 'Created (duplicate check bypassed)' : 'Candidate created',
     });
@@ -449,23 +458,27 @@ router.post('/candidates', (req, res) => {
   }
 });
 
-router.put('/candidates/:id', (req, res) => {
-  const { name, phone, email, source, position, status, notes, resume_file,
-          address, linkedin_url } = req.body;
-  getDb().prepare(
-    `UPDATE candidates SET name=?, phone=?, email=?, source=?, position=?, status=?, notes=?,
-       resume_file = COALESCE(?, resume_file),
-       address = COALESCE(?, address),
-       linkedin_url = COALESCE(?, linkedin_url)
-     WHERE id=?`
-  ).run(name, phone, email, source, position, status, notes,
-        resume_file || null, address || null, linkedin_url || null, req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/candidates/:id', async (req, res) => {
+  try {
+    const { name, phone, email, source, position, status, notes, resume_file,
+            address, linkedin_url } = req.body;
+    await pg.run(
+      `UPDATE candidates SET name=?, phone=?, email=?, source=?, position=?, status=?, notes=?,
+         resume_file = COALESCE(?, resume_file),
+         address = COALESCE(?, address),
+         linkedin_url = COALESCE(?, linkedin_url)
+       WHERE id=?`,
+      name, phone, email, source, position, status, notes,
+      resume_file || null, address || null, linkedin_url || null, req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/candidates/:id', (req, res) => {
-  getDb().prepare('DELETE FROM candidates WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/candidates/:id', async (req, res) => {
+  try {
+    await pg.run('DELETE FROM candidates WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------- HIRING PIPELINE STAGE ACTIONS ----------
@@ -482,74 +495,78 @@ router.delete('/candidates/:id', (req, res) => {
 //            uploaded; rejected → 'rejected'.
 //  Stage 5 — Mark accepted / onboarded as the candidate joins.
 
-router.post('/candidates/:id/schedule-interview', (req, res) => {
-  const { interviewer_id, interview_date, resume_file, notes } = req.body;
-  if (!interviewer_id) return res.status(400).json({ error: 'Pick an interviewer (employee)' });
-  if (!interview_date) return res.status(400).json({ error: 'Interview date required' });
-  const db = getDb();
-  const before = db.prepare('SELECT status FROM candidates WHERE id=?').get(req.params.id);
-  db.prepare(`UPDATE candidates SET
-                interviewer_id = ?,
-                interview_date = ?,
-                resume_file    = COALESCE(?, resume_file),
-                notes          = COALESCE(?, notes),
-                status         = 'interview_scheduled'
-              WHERE id = ?`)
-    .run(+interviewer_id, interview_date, resume_file || null, notes || null, req.params.id);
-  const intvName = db.prepare('SELECT name FROM employees WHERE id=?').get(+interviewer_id)?.name || '?';
-  logEvent(db, req.params.id, 'interview_scheduled', {
-    from_status: before?.status, to_status: 'interview_scheduled',
-    note: `Interview with ${intvName} on ${interview_date}`,
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ message: 'Interview scheduled' });
+router.post('/candidates/:id/schedule-interview', async (req, res) => {
+  try {
+    const { interviewer_id, interview_date, resume_file, notes } = req.body;
+    if (!interviewer_id) return res.status(400).json({ error: 'Pick an interviewer (employee)' });
+    if (!interview_date) return res.status(400).json({ error: 'Interview date required' });
+    const before = await pg.get('SELECT status FROM candidates WHERE id=?', req.params.id);
+    await pg.run(`UPDATE candidates SET
+                  interviewer_id = ?,
+                  interview_date = ?,
+                  resume_file    = COALESCE(?, resume_file),
+                  notes          = COALESCE(?, notes),
+                  status         = 'interview_scheduled'
+                WHERE id = ?`,
+      +interviewer_id, interview_date, resume_file || null, notes || null, req.params.id);
+    const intvName = (await pg.get('SELECT name FROM employees WHERE id=?', +interviewer_id))?.name || '?';
+    await logEvent(pg, req.params.id, 'interview_scheduled', {
+      from_status: before?.status, to_status: 'interview_scheduled',
+      note: `Interview with ${intvName} on ${interview_date}`,
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ message: 'Interview scheduled' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/interview-done', (req, res) => {
-  const { decision, notes } = req.body;
-  if (!['shortlisted','rejected','on_hold'].includes(decision)) {
-    return res.status(400).json({ error: 'decision must be shortlisted / rejected / on_hold' });
-  }
-  // shortlisted → 'qualified' (waiting for MD round)
-  // rejected    → 'rejected'
-  // on_hold     → stays 'interview_done' for HR to come back later
-  const newStatus = decision === 'shortlisted' ? 'qualified'
-                  : decision === 'rejected'    ? 'rejected'
-                  :                              'interview_done';
-  const db = getDb();
-  const before = db.prepare('SELECT status FROM candidates WHERE id=?').get(req.params.id);
-  db.prepare(`UPDATE candidates SET
-                     interview_decision = ?,
-                     interview_notes    = COALESCE(?, interview_notes),
-                     status             = ?
-                   WHERE id = ?`)
-    .run(decision, notes || null, newStatus, req.params.id);
-  logEvent(db, req.params.id, 'interview_done', {
-    from_status: before?.status, to_status: newStatus,
-    note: `Interview decision: ${decision}${notes ? ' — ' + notes : ''}`,
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ message: 'Interview decision recorded' });
+router.post('/candidates/:id/interview-done', async (req, res) => {
+  try {
+    const { decision, notes } = req.body;
+    if (!['shortlisted','rejected','on_hold'].includes(decision)) {
+      return res.status(400).json({ error: 'decision must be shortlisted / rejected / on_hold' });
+    }
+    // shortlisted → 'qualified' (waiting for MD round)
+    // rejected    → 'rejected'
+    // on_hold     → stays 'interview_done' for HR to come back later
+    const newStatus = decision === 'shortlisted' ? 'qualified'
+                    : decision === 'rejected'    ? 'rejected'
+                    :                              'interview_done';
+    const before = await pg.get('SELECT status FROM candidates WHERE id=?', req.params.id);
+    await pg.run(`UPDATE candidates SET
+                       interview_decision = ?,
+                       interview_notes    = COALESCE(?, interview_notes),
+                       status             = ?
+                     WHERE id = ?`,
+      decision, notes || null, newStatus, req.params.id);
+    await logEvent(pg, req.params.id, 'interview_done', {
+      from_status: before?.status, to_status: newStatus,
+      note: `Interview decision: ${decision}${notes ? ' — ' + notes : ''}`,
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ message: 'Interview decision recorded' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/schedule-md-interview', (req, res) => {
-  const { md_interview_date, notes } = req.body;
-  if (!md_interview_date) return res.status(400).json({ error: 'MD interview date required' });
-  // Status stays 'qualified' — md_interview_date being set marks the MD round.
-  const db = getDb();
-  db.prepare(`UPDATE candidates SET
-                     md_interview_date = ?,
-                     notes             = COALESCE(?, notes)
-                   WHERE id = ?`)
-    .run(md_interview_date, notes || null, req.params.id);
-  logEvent(db, req.params.id, 'md_scheduled', {
-    note: `Final round (MD) scheduled on ${md_interview_date}`,
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ message: 'MD interview scheduled' });
+router.post('/candidates/:id/schedule-md-interview', async (req, res) => {
+  try {
+    const { md_interview_date, notes } = req.body;
+    if (!md_interview_date) return res.status(400).json({ error: 'MD interview date required' });
+    // Status stays 'qualified' — md_interview_date being set marks the MD round.
+    await pg.run(`UPDATE candidates SET
+                       md_interview_date = ?,
+                       notes             = COALESCE(?, notes)
+                     WHERE id = ?`,
+      md_interview_date, notes || null, req.params.id);
+    await logEvent(pg, req.params.id, 'md_scheduled', {
+      note: `Final round (MD) scheduled on ${md_interview_date}`,
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ message: 'MD interview scheduled' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/md-decision', (req, res) => {
+router.post('/candidates/:id/md-decision', async (req, res) => {
+  try {
   const { decision, notes, offer_letter_file,
           offered_position, offered_salary, joining_date, reporting_to,
           salary_breakup } = req.body;
@@ -571,12 +588,11 @@ router.post('/candidates/:id/md-decision', (req, res) => {
   const offerToken = decision === 'shortlisted'
     ? require('crypto').randomBytes(32).toString('base64url')
     : null;
-  const db = getDb();
-  const before = db.prepare('SELECT status, offer_token FROM candidates WHERE id=?').get(req.params.id);
+  const before = await pg.get('SELECT status, offer_token FROM candidates WHERE id=?', req.params.id);
   // Preserve existing token if MD re-saves the decision (don't break
   // already-shared accept links).
   const finalToken = offerToken && !before?.offer_token ? offerToken : before?.offer_token;
-  db.prepare(`UPDATE candidates SET
+  await pg.run(`UPDATE candidates SET
                      md_decision        = ?,
                      md_interview_notes = COALESCE(?, md_interview_notes),
                      offer_letter_file  = COALESCE(?, offer_letter_file),
@@ -588,14 +604,14 @@ router.post('/candidates/:id/md-decision', (req, res) => {
                      salary_breakup     = COALESCE(?, salary_breakup),
                      offer_token        = ?,
                      status             = ?
-                   WHERE id = ?`)
-    .run(decision, notes || null, offer_letter_file || null, offerSentAt,
-         offered_position || null, offered_salary != null ? +offered_salary : null,
-         joining_date || null, reporting_to || null,
-         salary_breakup ? (typeof salary_breakup === 'string' ? salary_breakup : JSON.stringify(salary_breakup)) : null,
-         finalToken,
-         newStatus, req.params.id);
-  logEvent(db, req.params.id, decision === 'shortlisted' ? 'offer_generated' : 'md_decision', {
+                   WHERE id = ?`,
+    decision, notes || null, offer_letter_file || null, offerSentAt,
+    offered_position || null, offered_salary != null ? +offered_salary : null,
+    joining_date || null, reporting_to || null,
+    salary_breakup ? (typeof salary_breakup === 'string' ? salary_breakup : JSON.stringify(salary_breakup)) : null,
+    finalToken,
+    newStatus, req.params.id);
+  await logEvent(pg, req.params.id, decision === 'shortlisted' ? 'offer_generated' : 'md_decision', {
     from_status: before?.status, to_status: newStatus,
     note: decision === 'shortlisted'
       ? `MD shortlisted — offer for ${offered_position} @ ₹${offered_salary}/mo, joining ${joining_date}`
@@ -603,33 +619,39 @@ router.post('/candidates/:id/md-decision', (req, res) => {
     user_id: req.user.id, user_name: req.user.name,
   });
   res.json({ message: decision === 'shortlisted' ? 'Offer letter ready' : 'Candidate rejected by MD' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /hr/candidates/:id ──────────────────────────────────────
 // Used by the OfferLetterPrint page to render the auto-generated
 // letter.  Lightweight read of all fields the template needs.
-router.get('/candidates/:id', (req, res) => {
-  const c = getDb().prepare('SELECT * FROM candidates WHERE id=?').get(req.params.id);
-  if (!c) return res.status(404).json({ error: 'Candidate not found' });
-  res.json(c);
+// Numeric-only param so '/candidates/stats' (declared below) isn't swallowed —
+// Postgres rejects a non-numeric id cast where SQLite just returned nothing.
+router.get('/candidates/:id(\\d+)', async (req, res) => {
+  try {
+    const c = await pg.get('SELECT * FROM candidates WHERE id=?', req.params.id);
+    if (!c) return res.status(404).json({ error: 'Candidate not found' });
+    res.json(c);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/finalize', (req, res) => {
-  // Mark candidate as 'accepted' (offer accepted) or 'onboarded' (joined).
-  const { final_status, notes } = req.body;
-  if (!['accepted','onboarded','rejected'].includes(final_status)) {
-    return res.status(400).json({ error: 'final_status must be accepted / onboarded / rejected' });
-  }
-  const db = getDb();
-  const before = db.prepare('SELECT status FROM candidates WHERE id=?').get(req.params.id);
-  db.prepare(`UPDATE candidates SET status = ?, notes = COALESCE(?, notes) WHERE id = ?`)
-    .run(final_status, notes || null, req.params.id);
-  logEvent(db, req.params.id, 'finalised', {
-    from_status: before?.status, to_status: final_status,
-    note: `Final status: ${final_status}${notes ? ' — ' + notes : ''}`,
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ message: 'Status updated' });
+router.post('/candidates/:id/finalize', async (req, res) => {
+  try {
+    // Mark candidate as 'accepted' (offer accepted) or 'onboarded' (joined).
+    const { final_status, notes } = req.body;
+    if (!['accepted','onboarded','rejected'].includes(final_status)) {
+      return res.status(400).json({ error: 'final_status must be accepted / onboarded / rejected' });
+    }
+    const before = await pg.get('SELECT status FROM candidates WHERE id=?', req.params.id);
+    await pg.run(`UPDATE candidates SET status = ?, notes = COALESCE(?, notes) WHERE id = ?`,
+      final_status, notes || null, req.params.id);
+    await logEvent(pg, req.params.id, 'finalised', {
+      from_status: before?.status, to_status: final_status,
+      note: `Final status: ${final_status}${notes ? ' — ' + notes : ''}`,
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ message: 'Status updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── HR Phase 1 (mam 2026-05-22 spec) — extras on the candidate row ───
@@ -638,47 +660,52 @@ router.post('/candidates/:id/finalize', (req, res) => {
 // PUT  /candidates/:id/tags      → save free-form CSV tag chips.
 // POST /candidates/:id/hold      → toggle is_on_hold (any pipeline stage).
 //
-router.get('/candidates/:id/timeline', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT id, event_type, from_status, to_status, note, user_id, user_name, created_at
-       FROM candidate_events WHERE candidate_id = ? ORDER BY created_at DESC, id DESC`
-  ).all(req.params.id);
-  res.json(rows);
+router.get('/candidates/:id/timeline', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT id, event_type, from_status, to_status, note, user_id, user_name, created_at
+         FROM candidate_events WHERE candidate_id = ? ORDER BY created_at DESC, id DESC`,
+      req.params.id);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/candidates/:id/tags', (req, res) => {
-  const { tags } = req.body || {};
-  // Normalise: split on comma, trim, drop empties, re-join.
-  const csv = String(tags || '')
-    .split(',').map(s => s.trim()).filter(Boolean).join(',') || null;
-  const db = getDb();
-  db.prepare('UPDATE candidates SET tags = ? WHERE id = ?').run(csv, req.params.id);
-  logEvent(db, req.params.id, 'tags_updated', {
-    note: csv ? `Tags: ${csv}` : 'Tags cleared',
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ ok: true, tags: csv });
+router.put('/candidates/:id/tags', async (req, res) => {
+  try {
+    const { tags } = req.body || {};
+    // Normalise: split on comma, trim, drop empties, re-join.
+    const csv = String(tags || '')
+      .split(',').map(s => s.trim()).filter(Boolean).join(',') || null;
+    await pg.run('UPDATE candidates SET tags = ? WHERE id = ?', csv, req.params.id);
+    await logEvent(pg, req.params.id, 'tags_updated', {
+      note: csv ? `Tags: ${csv}` : 'Tags cleared',
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ ok: true, tags: csv });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/hold', (req, res) => {
-  const { is_on_hold, reason } = req.body || {};
-  const flag = is_on_hold ? 1 : 0;
-  const db = getDb();
-  db.prepare('UPDATE candidates SET is_on_hold = ?, hold_reason = ? WHERE id = ?')
-    .run(flag, flag ? (reason || null) : null, req.params.id);
-  logEvent(db, req.params.id, flag ? 'hold_on' : 'hold_off', {
-    note: flag ? `On hold: ${reason || '(no reason given)'}` : 'Hold removed',
-    user_id: req.user.id, user_name: req.user.name,
-  });
-  res.json({ ok: true, is_on_hold: flag });
+router.post('/candidates/:id/hold', async (req, res) => {
+  try {
+    const { is_on_hold, reason } = req.body || {};
+    const flag = is_on_hold ? 1 : 0;
+    await pg.run('UPDATE candidates SET is_on_hold = ?, hold_reason = ? WHERE id = ?',
+      flag, flag ? (reason || null) : null, req.params.id);
+    await logEvent(pg, req.params.id, flag ? 'hold_on' : 'hold_off', {
+      note: flag ? `On hold: ${reason || '(no reason given)'}` : 'Hold removed',
+      user_id: req.user.id, user_name: req.user.name,
+    });
+    res.json({ ok: true, is_on_hold: flag });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/candidates/stats', (req, res) => {
-  const db = getDb();
-  const total = db.prepare('SELECT COUNT(*) as count FROM candidates').get();
-  const byStatus = db.prepare('SELECT status, COUNT(*) as count FROM candidates GROUP BY status').all();
-  const bySource = db.prepare('SELECT source, COUNT(*) as count FROM candidates GROUP BY source').all();
-  res.json({ total: total.count, byStatus, bySource });
+router.get('/candidates/stats', async (req, res) => {
+  try {
+    const total = await pg.get('SELECT COUNT(*) as count FROM candidates');
+    const byStatus = await pg.all('SELECT status, COUNT(*) as count FROM candidates GROUP BY status');
+    const bySource = await pg.all('SELECT source, COUNT(*) as count FROM candidates GROUP BY source');
+    res.json({ total: total.count, byStatus, bySource });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Employees — salary is confidential; strip it from the response unless the
@@ -687,143 +714,150 @@ router.get('/candidates/stats', (req, res) => {
 // from the DB on each request. The DPR staff-cost endpoint works independently
 // via a server-side aggregate, so non-HR users never see individual figures
 // even if they are site engineers.
-const canSeeSalary = (userId, userRole) => {
+const canSeeSalary = async (userId, userRole) => {
   if (userRole === 'admin') return true;
-  const db = getDb();
-  const u = db.prepare('SELECT department FROM users WHERE id=?').get(userId);
+  const u = await pg.get('SELECT department FROM users WHERE id=?', userId);
   if (u?.department && String(u.department).toLowerCase().includes('hr')) return true;
-  const roles = db.prepare(
-    `SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id=r.id WHERE ur.user_id=?`
-  ).all(userId);
+  const roles = await pg.all(
+    `SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id=r.id WHERE ur.user_id=?`,
+    userId);
   return roles.some(r => String(r.name || '').toLowerCase().includes('hr'));
 };
 
-router.get('/employees', (req, res) => {
-  const db = getDb();
-  const today = new Date().toISOString().slice(0, 10);
-  const rows = db.prepare(
-    `SELECT e.*, u.name as linked_user_name, u.username as linked_username,
-            m1.name as reporting_manager_1_name, m2.name as reporting_manager_2_name,
-            (SELECT shift_start FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_start,
-            (SELECT shift_end   FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_end,
-            (SELECT week_off_day FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as week_off_day
-     FROM employees e
-     LEFT JOIN users u ON u.id = e.user_id
-     LEFT JOIN employees m1 ON m1.id = e.reporting_manager_id_1
-     LEFT JOIN employees m2 ON m2.id = e.reporting_manager_id_2
-     ORDER BY e.name COLLATE NOCASE`
-  ).all(today, today, today);
-  if (canSeeSalary(req.user.id, req.user.role)) return res.json(rows);
-  // Redact salary for everyone else
-  res.json(rows.map(({ salary, ...rest }) => rest));
+router.get('/employees', async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = await pg.all(
+      `SELECT e.*, u.name as linked_user_name, u.username as linked_username,
+              m1.name as reporting_manager_1_name, m2.name as reporting_manager_2_name,
+              (SELECT shift_start FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_start,
+              (SELECT shift_end   FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_end,
+              (SELECT week_off_day FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as week_off_day
+       FROM employees e
+       LEFT JOIN users u ON u.id = e.user_id
+       LEFT JOIN employees m1 ON m1.id = e.reporting_manager_id_1
+       LEFT JOIN employees m2 ON m2.id = e.reporting_manager_id_2
+       ORDER BY LOWER(e.name)`,
+      today, today, today);
+    if (await canSeeSalary(req.user.id, req.user.role)) return res.json(rows);
+    // Redact salary for everyone else
+    res.json(rows.map(({ salary, ...rest }) => rest));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Shift/week-off history for one employee — GET to list, POST to add a new
 // date-effective entry (never an UPDATE; see employee_shifts table comment
 // in schema.js — this is what keeps past attendance from being
 // retroactively reclassified when a shift or week-off day changes).
-router.get('/employees/:id/shifts', (req, res) => {
-  res.json(getShiftHistory(getDb(), +req.params.id));
+router.get('/employees/:id/shifts', async (req, res) => {
+  try {
+    res.json(await getShiftHistory(pg, +req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/employees/:id/shifts', requirePermission('employees', 'edit'), (req, res) => {
-  const { effective_from, shift_start, shift_end, week_off_day } = req.body;
-  if (!effective_from) return res.status(400).json({ error: 'Effective from date is required' });
-  const db = getDb();
-  const emp = db.prepare('SELECT id FROM employees WHERE id=?').get(req.params.id);
-  if (!emp) return res.status(404).json({ error: 'Employee not found' });
-  const r = db.prepare(
-    `INSERT INTO employee_shifts (employee_id, effective_from, shift_start, shift_end, week_off_day, created_by)
-     VALUES (?,?,?,?,?,?)`
-  ).run(req.params.id, effective_from, shift_start || null, shift_end || null,
-        (week_off_day === '' || week_off_day == null) ? null : +week_off_day, req.user.id);
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/employees/:id/shifts', requirePermission('employees', 'edit'), async (req, res) => {
+  try {
+    const { effective_from, shift_start, shift_end, week_off_day } = req.body;
+    if (!effective_from) return res.status(400).json({ error: 'Effective from date is required' });
+    const emp = await pg.get('SELECT id FROM employees WHERE id=?', req.params.id);
+    if (!emp) return res.status(404).json({ error: 'Employee not found' });
+    const r = await pg.run(
+      `INSERT INTO employee_shifts (employee_id, effective_from, shift_start, shift_end, week_off_day, created_by)
+       VALUES (?,?,?,?,?,?)`,
+      req.params.id, effective_from, shift_start || null, shift_end || null,
+      (week_off_day === '' || week_off_day == null) ? null : +week_off_day, req.user.id);
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/employees', requirePermission('employees', 'create'), (req, res) => {
-  const { name, phone, email, designation, department, join_date, salary,
-          aadhar_file, pan_file, qualification_file,
-          reporting_manager_id_1, reporting_manager_id_2 } = req.body;
-  let { user_id } = req.body;
-  const db = getDb();
-  // Auto-link by email if user_id wasn't explicitly set
-  if (!user_id && email) {
-    const u = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
-    if (u) user_id = u.id;
-  }
-  // KYC docs (Aadhar/PAN/qualification) are optional — can be added later
-  // from Edit once the employee has time to bring them in.
-  const r = db.prepare(`
-    INSERT INTO employees (user_id,name,phone,email,designation,department,join_date,salary,
-                           aadhar_file, pan_file, qualification_file,
-                           reporting_manager_id_1, reporting_manager_id_2)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).run(user_id || null, name, phone, email, designation, department, join_date, salary,
-        aadhar_file || null, pan_file || null, qualification_file || null,
-        reporting_manager_id_1 || null, reporting_manager_id_2 || null);
-  res.status(201).json({ id: r.lastInsertRowid, linked_user_id: user_id || null });
+router.post('/employees', requirePermission('employees', 'create'), async (req, res) => {
+  try {
+    const { name, phone, email, designation, department, join_date, salary,
+            aadhar_file, pan_file, qualification_file,
+            reporting_manager_id_1, reporting_manager_id_2 } = req.body;
+    let { user_id } = req.body;
+    // Auto-link by email if user_id wasn't explicitly set
+    if (!user_id && email) {
+      const u = await pg.get('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', email);
+      if (u) user_id = u.id;
+    }
+    // KYC docs (Aadhar/PAN/qualification) are optional — can be added later
+    // from Edit once the employee has time to bring them in.
+    const r = await pg.run(`
+      INSERT INTO employees (user_id,name,phone,email,designation,department,join_date,salary,
+                             aadhar_file, pan_file, qualification_file,
+                             reporting_manager_id_1, reporting_manager_id_2)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `, user_id || null, name, phone, email, designation, department, join_date, salary,
+      aadhar_file || null, pan_file || null, qualification_file || null,
+      reporting_manager_id_1 || null, reporting_manager_id_2 || null);
+    res.status(201).json({ id: r.lastInsertRowid, linked_user_id: user_id || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Auto-link existing employees to users by matching email (case-insensitive).
 // Safe to run any time — only fills rows where user_id IS NULL.
-router.post('/employees/auto-link', requirePermission('employees', 'edit'), (req, res) => {
-  const db = getDb();
-  const candidates = db.prepare(
-    `SELECT e.id, u.id as user_id FROM employees e
-     JOIN users u ON LOWER(u.email) = LOWER(e.email)
-     WHERE e.user_id IS NULL AND e.email IS NOT NULL AND e.email != ''`
-  ).all();
-  const upd = db.prepare('UPDATE employees SET user_id = ? WHERE id = ?');
-  let linked = 0;
-  for (const c of candidates) { upd.run(c.user_id, c.id); linked++; }
-  res.json({ linked, scanned: candidates.length });
+router.post('/employees/auto-link', requirePermission('employees', 'edit'), async (req, res) => {
+  try {
+    const candidates = await pg.all(
+      `SELECT e.id, u.id as user_id FROM employees e
+       JOIN users u ON LOWER(u.email) = LOWER(e.email)
+       WHERE e.user_id IS NULL AND e.email IS NOT NULL AND e.email != ''`
+    );
+    let linked = 0;
+    for (const c of candidates) { await pg.run('UPDATE employees SET user_id = ? WHERE id = ?', c.user_id, c.id); linked++; }
+    res.json({ linked, scanned: candidates.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Bulk import employees
-router.post('/employees/bulk', requirePermission('employees', 'create'), (req, res) => {
-  const { employees } = req.body;
-  if (!employees || !Array.isArray(employees) || employees.length === 0) {
-    return res.status(400).json({ error: 'No employee data provided' });
-  }
-  const db = getDb();
-  const insert = db.prepare('INSERT INTO employees (name,phone,email,designation,department,join_date,salary) VALUES (?,?,?,?,?,?,?)');
-  let added = 0, errors = [];
-  for (let i = 0; i < employees.length; i++) {
-    const e = employees[i];
-    if (!e.name || !e.name.trim()) { errors.push(`Row ${i + 1}: Name is required`); continue; }
-    try {
-      insert.run(e.name?.trim(), e.phone?.trim() || '', e.email?.trim() || '', e.designation?.trim() || '', e.department?.trim() || '', e.join_date || '', e.salary || 0);
-      added++;
-    } catch (err) { errors.push(`Row ${i + 1}: ${err.message}`); }
-  }
-  res.json({ added, errors, total: employees.length });
+router.post('/employees/bulk', requirePermission('employees', 'create'), async (req, res) => {
+  try {
+    const { employees } = req.body;
+    if (!employees || !Array.isArray(employees) || employees.length === 0) {
+      return res.status(400).json({ error: 'No employee data provided' });
+    }
+    const insertSql = 'INSERT INTO employees (name,phone,email,designation,department,join_date,salary) VALUES (?,?,?,?,?,?,?)';
+    let added = 0, errors = [];
+    for (let i = 0; i < employees.length; i++) {
+      const e = employees[i];
+      if (!e.name || !e.name.trim()) { errors.push(`Row ${i + 1}: Name is required`); continue; }
+      try {
+        await pg.run(insertSql, e.name?.trim(), e.phone?.trim() || '', e.email?.trim() || '', e.designation?.trim() || '', e.department?.trim() || '', e.join_date || '', e.salary || 0);
+        added++;
+      } catch (err) { errors.push(`Row ${i + 1}: ${err.message}`); }
+    }
+    res.json({ added, errors, total: employees.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/employees/:id', requirePermission('employees', 'edit'), (req, res) => {
-  const { name, phone, email, designation, department, salary, status, user_id,
-          aadhar_file, pan_file, qualification_file,
-          reporting_manager_id_1, reporting_manager_id_2 } = req.body;
-  const empId = +req.params.id;
-  const mgr1 = reporting_manager_id_1 ? +reporting_manager_id_1 : null;
-  const mgr2 = reporting_manager_id_2 ? +reporting_manager_id_2 : null;
-  if (mgr1 === empId || mgr2 === empId) {
-    return res.status(400).json({ error: 'An employee cannot be their own reporting manager' });
-  }
-  // COALESCE so passing undefined for a doc field doesn't wipe the existing
-  // upload — frontend can edit other fields without re-uploading docs.
-  getDb().prepare(`
-    UPDATE employees
-       SET name=?, phone=?, email=?, designation=?, department=?, salary=?, status=?, user_id=?,
-           aadhar_file        = COALESCE(?, aadhar_file),
-           pan_file           = COALESCE(?, pan_file),
-           qualification_file = COALESCE(?, qualification_file),
-           reporting_manager_id_1 = ?,
-           reporting_manager_id_2 = ?
-     WHERE id=?
-  `).run(name, phone, email, designation, department, salary, status, user_id || null,
-        aadhar_file || null, pan_file || null, qualification_file || null,
-        mgr1, mgr2, req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/employees/:id', requirePermission('employees', 'edit'), async (req, res) => {
+  try {
+    const { name, phone, email, designation, department, salary, status, user_id,
+            aadhar_file, pan_file, qualification_file,
+            reporting_manager_id_1, reporting_manager_id_2 } = req.body;
+    const empId = +req.params.id;
+    const mgr1 = reporting_manager_id_1 ? +reporting_manager_id_1 : null;
+    const mgr2 = reporting_manager_id_2 ? +reporting_manager_id_2 : null;
+    if (mgr1 === empId || mgr2 === empId) {
+      return res.status(400).json({ error: 'An employee cannot be their own reporting manager' });
+    }
+    // COALESCE so passing undefined for a doc field doesn't wipe the existing
+    // upload — frontend can edit other fields without re-uploading docs.
+    await pg.run(`
+      UPDATE employees
+         SET name=?, phone=?, email=?, designation=?, department=?, salary=?, status=?, user_id=?,
+             aadhar_file        = COALESCE(?, aadhar_file),
+             pan_file           = COALESCE(?, pan_file),
+             qualification_file = COALESCE(?, qualification_file),
+             reporting_manager_id_1 = ?,
+             reporting_manager_id_2 = ?
+       WHERE id=?
+    `, name, phone, email, designation, department, salary, status, user_id || null,
+      aadhar_file || null, pan_file || null, qualification_file || null,
+      mgr1, mgr2, req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Delete an employee. Robust like the user delete (auth.js): a bare
@@ -836,19 +870,19 @@ router.put('/employees/:id', requirePermission('employees', 'edit'), (req, res) 
 //   • Interview / hiring links (interviewer, reporting-manager) → these are
 //     nullable soft references; a normal delete surfaces a clear 409, and
 //     ?force=1 unlinks them first, then deletes.
-router.delete('/employees/:id', requirePermission('employees', 'delete'), (req, res) => {
-  const db = getDb();
+router.delete('/employees/:id', requirePermission('employees', 'delete'), async (req, res) => {
+  try {
   const id = +req.params.id;
   const force = req.query.force === '1';
-  const emp = db.prepare('SELECT id, name, status FROM employees WHERE id=?').get(id);
+  const emp = await pg.get('SELECT id, name, status FROM employees WHERE id=?', id);
   if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
   // Salary safety — an employee with ANY payroll history must never be
   // hard-deleted; deactivate (Status → inactive/terminated) instead so every
   // salary record stays intact. Blocks normal AND force delete.
   const payTotal =
-    db.prepare('SELECT COUNT(*) c FROM payroll_runs WHERE employee_id=?').get(id).c +
-    db.prepare('SELECT COUNT(*) c FROM payroll_advances WHERE employee_id=?').get(id).c;
+    (await pg.get('SELECT COUNT(*) c FROM payroll_runs WHERE employee_id=?', id)).c +
+    (await pg.get('SELECT COUNT(*) c FROM payroll_advances WHERE employee_id=?', id)).c;
   if (payTotal > 0) {
     return res.status(400).json({
       error: `"${emp.name}" has ${payTotal} salary/payroll record${payTotal === 1 ? '' : 's'} — deleting would break payroll. Set their Status to "inactive" or "terminated" instead (Edit → Status): all salary history stays intact and they drop off the active list.`,
@@ -869,15 +903,20 @@ router.delete('/employees/:id', requirePermission('employees', 'delete'), (req, 
   if (force) {
     try {
       const cleared = {};
-      db.transaction(() => {
+      // Each soft-ref UPDATE runs under a savepoint — in Postgres a failed
+      // statement would otherwise poison the whole transaction (SQLite let
+      // the per-statement try/catch continue).
+      await pg.tx(async (tx) => {
         for (const [t, c] of SOFT_REFS) {
           try {
-            const r = db.prepare(`UPDATE "${t}" SET "${c}"=NULL WHERE "${c}"=?`).run(id);
-            if (r.changes > 0) cleared[`${t}.${c}`] = r.changes;
+            await tx.savepoint(async () => {
+              const r = await tx.run(`UPDATE "${t}" SET "${c}"=NULL WHERE "${c}"=?`, id);
+              if (r.changes > 0) cleared[`${t}.${c}`] = r.changes;
+            });
           } catch (e) { console.warn('[emp-delete] could not clear', `${t}.${c}`, '-', e.message); }
         }
-        db.prepare('DELETE FROM employees WHERE id=?').run(id);
-      })();
+        await tx.run('DELETE FROM employees WHERE id=?', id);
+      });
       return res.json({ message: `Employee "${emp.name}" force-deleted`, cleared });
     } catch (e) {
       console.error('[emp-delete force] failed:', e.message);
@@ -886,12 +925,12 @@ router.delete('/employees/:id', requirePermission('employees', 'delete'), (req, 
   }
 
   try {
-    db.prepare('DELETE FROM employees WHERE id=?').run(id);
+    await pg.run('DELETE FROM employees WHERE id=?', id);
     res.json({ message: 'Deleted' });
   } catch (e) {
     let refCount = 0;
     for (const [t, c] of SOFT_REFS) {
-      try { refCount += db.prepare(`SELECT COUNT(*) c FROM "${t}" WHERE "${c}"=?`).get(id).c; } catch (_) {}
+      try { refCount += (await pg.get(`SELECT COUNT(*) c FROM "${t}" WHERE "${c}"=?`, id)).c; } catch (_) {}
     }
     res.status(409).json({
       error: `Delete blocked: "${emp.name}" is still linked to ${refCount || 'other'} interview/hiring record${refCount === 1 ? '' : 's'}.`,
@@ -899,74 +938,88 @@ router.delete('/employees/:id', requirePermission('employees', 'delete'), (req, 
       hint: 'Force Delete unlinks those (interviewer / reporting-manager) then deletes. Or set Status to inactive/terminated to keep the record.',
     });
   }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Sub-Contractors
-router.get('/sub-contractors', (req, res) => {
-  res.json(getDb().prepare('SELECT * FROM sub_contractors ORDER BY name').all());
+router.get('/sub-contractors', async (req, res) => {
+  try {
+    res.json(await pg.all('SELECT * FROM sub_contractors ORDER BY name'));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/sub-contractors', (req, res) => {
-  const { name, phone, email, specialization, rate, rate_unit, notes } = req.body;
-  const r = getDb().prepare('INSERT INTO sub_contractors (name,phone,email,specialization,rate,rate_unit,notes) VALUES (?,?,?,?,?,?,?)')
-    .run(name, phone, email, specialization, rate, rate_unit, notes);
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/sub-contractors', async (req, res) => {
+  try {
+    const { name, phone, email, specialization, rate, rate_unit, notes } = req.body;
+    const r = await pg.run('INSERT INTO sub_contractors (name,phone,email,specialization,rate,rate_unit,notes) VALUES (?,?,?,?,?,?,?)',
+      name, phone, email, specialization, rate, rate_unit, notes);
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/sub-contractors/:id', (req, res) => {
-  const { name, phone, email, specialization, rate, rate_unit, status, notes } = req.body;
-  getDb().prepare('UPDATE sub_contractors SET name=?,phone=?,email=?,specialization=?,rate=?,rate_unit=?,status=?,notes=? WHERE id=?')
-    .run(name, phone, email, specialization, rate, rate_unit, status, notes, req.params.id);
-  res.json({ message: 'Updated' });
+router.put('/sub-contractors/:id', async (req, res) => {
+  try {
+    const { name, phone, email, specialization, rate, rate_unit, status, notes } = req.body;
+    await pg.run('UPDATE sub_contractors SET name=?,phone=?,email=?,specialization=?,rate=?,rate_unit=?,status=?,notes=? WHERE id=?',
+      name, phone, email, specialization, rate, rate_unit, status, notes, req.params.id);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/sub-contractors/:id', (req, res) => {
-  getDb().prepare('DELETE FROM sub_contractors WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/sub-contractors/:id', async (req, res) => {
+  try {
+    await pg.run('DELETE FROM sub_contractors WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Expenses
-router.get('/expenses', (req, res) => {
-  res.json(getDb().prepare(`SELECT e.*, u1.name as submitted_by_name, u2.name as approved_by_name FROM expenses e
-    LEFT JOIN users u1 ON e.submitted_by=u1.id LEFT JOIN users u2 ON e.approved_by=u2.id ORDER BY e.created_at DESC`).all());
+router.get('/expenses', async (req, res) => {
+  try {
+    res.json(await pg.all(`SELECT e.*, u1.name as submitted_by_name, u2.name as approved_by_name FROM expenses e
+      LEFT JOIN users u1 ON e.submitted_by=u1.id LEFT JOIN users u2 ON e.approved_by=u2.id ORDER BY e.created_at DESC`));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/expenses', requirePermission('expenses', 'create'), (req, res) => {
-  const { title, description, amount, category, expense_date } = req.body;
-  const db = getDb();
-  // Server-side dedup — mam: "entry one time but showing data 4 to 5
-  // times". A fast double-click + flaky network was firing 2-4 POSTs
-  // before the modal could close, each writing an identical row. We
-  // reject any insert that exactly matches the same user's most-recent
-  // submission in the last 2 minutes. Returns the existing row so the
-  // client still gets a success-style response (idempotent).
-  const recent = db.prepare(`
-    SELECT id FROM expenses
-     WHERE submitted_by = ?
-       AND COALESCE(title, '') = COALESCE(?, '')
-       AND COALESCE(description, '') = COALESCE(?, '')
-       AND amount = ?
-       AND COALESCE(category, '') = COALESCE(?, '')
-       AND COALESCE(expense_date, '') = COALESCE(?, '')
-       AND created_at >= datetime('now', '-2 minutes')
-     ORDER BY id DESC LIMIT 1
-  `).get(req.user.id, title, description, +amount || 0, category, expense_date);
-  if (recent) {
-    return res.status(200).json({ id: recent.id, deduped: true, message: 'Identical entry already submitted in the last 2 minutes — kept original.' });
-  }
-  const r = db.prepare('INSERT INTO expenses (title,description,amount,category,expense_date,submitted_by) VALUES (?,?,?,?,?,?)')
-    .run(title, description, +amount || 0, category, expense_date, req.user.id);
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/expenses', requirePermission('expenses', 'create'), async (req, res) => {
+  try {
+    const { title, description, amount, category, expense_date } = req.body;
+    // Server-side dedup — mam: "entry one time but showing data 4 to 5
+    // times". A fast double-click + flaky network was firing 2-4 POSTs
+    // before the modal could close, each writing an identical row. We
+    // reject any insert that exactly matches the same user's most-recent
+    // submission in the last 2 minutes. Returns the existing row so the
+    // client still gets a success-style response (idempotent).
+    // (2-minutes-ago computed in JS — UTC text, same format SQLite stored.)
+    const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
+    const recent = await pg.get(`
+      SELECT id FROM expenses
+       WHERE submitted_by = ?
+         AND COALESCE(title, '') = COALESCE(?, '')
+         AND COALESCE(description, '') = COALESCE(?, '')
+         AND amount = ?
+         AND COALESCE(category, '') = COALESCE(?, '')
+         AND COALESCE(expense_date, '') = COALESCE(?, '')
+         AND created_at >= ?
+       ORDER BY id DESC LIMIT 1
+    `, req.user.id, title, description, +amount || 0, category, expense_date, twoMinAgo);
+    if (recent) {
+      return res.status(200).json({ id: recent.id, deduped: true, message: 'Identical entry already submitted in the last 2 minutes — kept original.' });
+    }
+    const r = await pg.run('INSERT INTO expenses (title,description,amount,category,expense_date,submitted_by) VALUES (?,?,?,?,?,?)',
+      title, description, +amount || 0, category, expense_date, req.user.id);
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/expenses/:id', requirePermission('expenses', 'edit'), (req, res) => {
+router.put('/expenses/:id', requirePermission('expenses', 'edit'), async (req, res) => {
+  try {
   // Two flows mam uses, both go through this endpoint:
   //   (1) edit the expense details (title/description/amount/category/date)
   //   (2) change status (approve / reject / mark paid / un-mark paid)
   // Body may contain any subset; missing fields are preserved.
   const { title, description, amount, category, expense_date, status } = req.body;
-  const db = getDb();
-  const existing = db.prepare('SELECT * FROM expenses WHERE id=?').get(req.params.id);
+  const existing = await pg.get('SELECT * FROM expenses WHERE id=?', req.params.id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
 
   const next = {
@@ -996,33 +1049,37 @@ router.put('/expenses/:id', requirePermission('expenses', 'edit'), (req, res) =>
     }
   }
 
-  db.prepare(`UPDATE expenses SET title=?, description=?, amount=?, category=?, expense_date=?, status=?, approved_by=?, paid_date=? WHERE id=?`)
-    .run(next.title, next.description, next.amount, next.category, next.expense_date, next.status, next.approved_by, next.paid_date, req.params.id);
+  await pg.run(`UPDATE expenses SET title=?, description=?, amount=?, category=?, expense_date=?, status=?, approved_by=?, paid_date=? WHERE id=?`,
+    next.title, next.description, next.amount, next.category, next.expense_date, next.status, next.approved_by, next.paid_date, req.params.id);
   res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/expenses/:id', requirePermission('expenses', 'delete'), (req, res) => {
-  getDb().prepare('DELETE FROM expenses WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/expenses/:id', requirePermission('expenses', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM expenses WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Checklists
 // List checklists. Admin sees all; regular users see only the ones assigned
 // to them so they don't read each other's tasks. Ordered by assignee name
 // so the frontend can group the rows under each person.
-router.get('/checklists', (req, res) => {
-  const db = getDb();
-  const isAdmin = req.user.role === 'admin';
-  const base = `SELECT c.*, u1.name as assigned_to_name, u2.name as created_by_name
-    FROM checklists c
-    LEFT JOIN users u1 ON c.assigned_to=u1.id
-    LEFT JOIN users u2 ON c.created_by=u2.id`;
-  const order = ` ORDER BY u1.name COLLATE NOCASE, c.frequency, c.due_time, c.created_at DESC`;
-  if (isAdmin) {
-    res.json(db.prepare(base + order).all());
-  } else {
-    res.json(db.prepare(base + ' WHERE c.assigned_to=?' + order).all(req.user.id));
-  }
+router.get('/checklists', async (req, res) => {
+  try {
+    const isAdmin = req.user.role === 'admin';
+    const base = `SELECT c.*, u1.name as assigned_to_name, u2.name as created_by_name
+      FROM checklists c
+      LEFT JOIN users u1 ON c.assigned_to=u1.id
+      LEFT JOIN users u2 ON c.created_by=u2.id`;
+    const order = ` ORDER BY LOWER(u1.name), c.frequency, c.due_time, c.created_at DESC`;
+    if (isAdmin) {
+      res.json(await pg.all(base + order));
+    } else {
+      res.json(await pg.all(base + ' WHERE c.assigned_to=?' + order, req.user.id));
+    }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Title is derived from the first line (80 chars) of the description since
@@ -1190,42 +1247,45 @@ function normaliseFortnightDays(v) {
   return [...new Set(arr)].sort((a, b) => a - b).slice(0, 2).join(',');
 }
 
-router.post('/checklists', requirePermission('checklists', 'create'), (req, res) => {
-  const { title, description, frequency, due_date, due_time, assigned_to, department,
-          recurrence_start_date, recurrence_end_date, proof_type, proof_label,
-          fortnight_days } = req.body;
-  const t = deriveTitle(title, description);
-  const desc = String(description || '').trim();
-  if (!desc && !title) return res.status(400).json({ error: 'Description is required' });
-  if (!assigned_to) return res.status(400).json({ error: 'Assigned To is required' });
-  // Mam (2026-05-22): if the caller didn't supply a department, fall
-  // back to the assignee's own users.department so the row is
-  // automatically tagged with the right team.
-  let dept = department && String(department).trim() ? String(department).trim() : null;
-  if (!dept) {
-    try {
-      const u = getDb().prepare('SELECT department FROM users WHERE id=?').get(assigned_to);
-      dept = u?.department || null;
-    } catch (_) {}
-  }
-  const pt = ALLOWED_PROOF_TYPES.includes(proof_type) ? proof_type : 'photo';
-  const pl = proof_label && String(proof_label).trim() ? String(proof_label).trim() : null;
-  const fd = frequency === 'fortnightly' ? (normaliseFortnightDays(fortnight_days) || '1,15') : null;
-  const r = getDb().prepare(
-    `INSERT INTO checklists
-       (title, description, frequency, due_date, due_time, assigned_to, department,
-        recurrence_start_date, recurrence_end_date, proof_type, proof_label, fortnight_days, created_by)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).run(t, desc, frequency, due_date, due_time || null, assigned_to, dept,
-        recurrence_start_date || null, recurrence_end_date || null, pt, pl, fd, req.user.id);
-  res.status(201).json({ id: r.lastInsertRowid });
+router.post('/checklists', requirePermission('checklists', 'create'), async (req, res) => {
+  try {
+    const { title, description, frequency, due_date, due_time, assigned_to, department,
+            recurrence_start_date, recurrence_end_date, proof_type, proof_label,
+            fortnight_days } = req.body;
+    const t = deriveTitle(title, description);
+    const desc = String(description || '').trim();
+    if (!desc && !title) return res.status(400).json({ error: 'Description is required' });
+    if (!assigned_to) return res.status(400).json({ error: 'Assigned To is required' });
+    // Mam (2026-05-22): if the caller didn't supply a department, fall
+    // back to the assignee's own users.department so the row is
+    // automatically tagged with the right team.
+    let dept = department && String(department).trim() ? String(department).trim() : null;
+    if (!dept) {
+      try {
+        const u = await pg.get('SELECT department FROM users WHERE id=?', assigned_to);
+        dept = u?.department || null;
+      } catch (_) {}
+    }
+    const pt = ALLOWED_PROOF_TYPES.includes(proof_type) ? proof_type : 'photo';
+    const pl = proof_label && String(proof_label).trim() ? String(proof_label).trim() : null;
+    const fd = frequency === 'fortnightly' ? (normaliseFortnightDays(fortnight_days) || '1,15') : null;
+    const r = await pg.run(
+      `INSERT INTO checklists
+         (title, description, frequency, due_date, due_time, assigned_to, department,
+          recurrence_start_date, recurrence_end_date, proof_type, proof_label, fortnight_days, created_by)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      t, desc, frequency, due_date, due_time || null, assigned_to, dept,
+      recurrence_start_date || null, recurrence_end_date || null, pt, pl, fd, req.user.id);
+    res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Mam (2026-05-22): "give me checklist bulk" — admin pastes many
 // task lines at once, all sharing the same frequency / assignee /
 // dept / dates / proof_type.  Reduces 30 single-task adds down to
 // one form fill.
-router.post('/checklists/bulk', requirePermission('checklists', 'create'), (req, res) => {
+router.post('/checklists/bulk', requirePermission('checklists', 'create'), async (req, res) => {
+  try {
   const { tasks, frequency, due_date, due_time, assigned_to, assigned_to_ids, department,
           recurrence_start_date, recurrence_end_date, proof_type, proof_label,
           fortnight_days } = req.body || {};
@@ -1245,7 +1305,7 @@ router.post('/checklists/bulk', requirePermission('checklists', 'create'), (req,
   let dept = department && String(department).trim() ? String(department).trim() : null;
   if (!dept) {
     try {
-      const u = getDb().prepare('SELECT department FROM users WHERE id=?').get(assigneeIds[0]);
+      const u = await pg.get('SELECT department FROM users WHERE id=?', assigneeIds[0]);
       dept = u?.department || null;
     } catch (_) {}
   }
@@ -1323,26 +1383,25 @@ router.post('/checklists/bulk', requirePermission('checklists', 'create'), (req,
   }
   if (rows.length === 0) return res.status(400).json({ error: 'All task lines were empty' });
 
-  const db = getDb();
   // Mam (2026-05-22): fortnight_days defaults to "1,15" when frequency
   // is fortnightly AND admin didn't pick days.  Same for every task
   // in the batch.
   const fdBulk = frequency === 'fortnightly'
     ? (normaliseFortnightDays(fortnight_days) || '1,15')
     : null;
-  const ins = db.prepare(`INSERT INTO checklists
+  const insSql = `INSERT INTO checklists
       (title, description, frequency, due_date, due_time, assigned_to, department,
        recurrence_start_date, recurrence_end_date, proof_type, proof_label, fortnight_days, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`;
 
   // Mam (2026-05-22): emit one INSERT per (task × assignee) so a
   // batch of 3 tasks × 2 users creates 6 rows in a single atomic tx.
-  const tx = db.transaction((items) => {
+  const added = await pg.tx(async (t) => {
     let added = 0;
-    for (const r of items) {
+    for (const r of rows) {
       const title = deriveTitle(null, r.description);
       for (const uid of assigneeIds) {
-        ins.run(title, r.description, frequency || 'monthly', due_date || null,
+        await t.run(insSql, title, r.description, frequency || 'monthly', due_date || null,
                 r.due_time || null,
                 uid, dept,
                 recurrence_start_date || null, recurrence_end_date || null,
@@ -1352,11 +1411,12 @@ router.post('/checklists/bulk', requirePermission('checklists', 'create'), (req,
     }
     return added;
   });
-  const added = tx(rows);
   res.status(201).json({ added, total: rows.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/checklists/:id', requirePermission('checklists', 'edit'), (req, res) => {
+router.put('/checklists/:id', requirePermission('checklists', 'edit'), async (req, res) => {
+  try {
   const { status, title, description, frequency, due_date, due_time, assigned_to, department,
           recurrence_start_date, recurrence_end_date, proof_type, proof_label,
           fortnight_days } = req.body;
@@ -1365,7 +1425,7 @@ router.put('/checklists/:id', requirePermission('checklists', 'edit'), (req, res
   let dept = department && String(department).trim() ? String(department).trim() : null;
   if (!dept) {
     try {
-      const u = getDb().prepare('SELECT department FROM users WHERE id=?').get(assigned_to);
+      const u = await pg.get('SELECT department FROM users WHERE id=?', assigned_to);
       dept = u?.department || null;
     } catch (_) {}
   }
@@ -1381,28 +1441,33 @@ router.put('/checklists/:id', requirePermission('checklists', 'edit'), (req, res
               : fortnight_days && normaliseFortnightDays(fortnight_days)
                 ? normaliseFortnightDays(fortnight_days)
                 : '';
-  getDb().prepare(
+  // ?::text casts — Postgres can't infer a parameter's type from a bare
+  // "? IS NULL" check the way SQLite could.
+  await pg.run(
     `UPDATE checklists SET status=?, title=?, description=?, frequency=?, due_date=?, due_time=?,
        assigned_to=?, department=?, recurrence_start_date=?, recurrence_end_date=?,
        proof_type = COALESCE(?, proof_type),
-       proof_label = CASE WHEN ? IS NULL THEN proof_label
+       proof_label = CASE WHEN ?::text IS NULL THEN proof_label
                           WHEN ? = '' THEN NULL
                           ELSE ? END,
-       fortnight_days = CASE WHEN ? IS NULL THEN fortnight_days
+       fortnight_days = CASE WHEN ?::text IS NULL THEN fortnight_days
                              WHEN ? = '' THEN NULL
                              ELSE ? END
-     WHERE id=?`
-  ).run(status, t, description, frequency, due_date, due_time || null, assigned_to, dept,
-        recurrence_start_date || null, recurrence_end_date || null, pt,
-        pl, pl, pl,
-        fdEdit, fdEdit, fdEdit,
-        req.params.id);
+     WHERE id=?`,
+    status, t, description, frequency, due_date, due_time || null, assigned_to, dept,
+    recurrence_start_date || null, recurrence_end_date || null, pt,
+    pl, pl, pl,
+    fdEdit, fdEdit, fdEdit,
+    req.params.id);
   res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/checklists/:id', requirePermission('checklists', 'delete'), (req, res) => {
-  getDb().prepare('DELETE FROM checklists WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/checklists/:id', requirePermission('checklists', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM checklists WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Today's checklists for the logged-in user — used by the dashboard widget.
@@ -1415,8 +1480,8 @@ router.delete('/checklists/:id', requirePermission('checklists', 'delete'), (req
 //   once        → exact due_date match
 // Each entry is joined with today's completion row (if any) so the UI knows
 // whether proof has been uploaded.
-router.get('/checklists/my-today', (req, res) => {
-  const db = getDb();
+router.get('/checklists/my-today', async (req, res) => {
+  try {
   const today = new Date().toISOString().split('T')[0];
   const d = new Date(today + 'T00:00:00');
   const todayDow = d.getDay();            // 0..6
@@ -1426,14 +1491,14 @@ router.get('/checklists/my-today', (req, res) => {
   const uid = req.user.id;
 
   // Pull checklists assigned to this user OR unassigned (applies to everyone)
-  const rows = db.prepare(
+  const rows = await pg.all(
     `SELECT c.*, cc.id as completion_id, cc.proof_url, cc.submitted_at, cc.notes
      FROM checklists c
      LEFT JOIN checklist_completions cc
        ON cc.checklist_id = c.id AND cc.user_id = ? AND cc.completion_date = ?
      WHERE (c.assigned_to = ? OR c.assigned_to IS NULL)
-       AND (c.status IS NULL OR c.status = 'pending' OR c.status = 'active' OR c.status = '')`
-  ).all(uid, today, uid);
+       AND (c.status IS NULL OR c.status = 'pending' OR c.status = 'active' OR c.status = '')`,
+    uid, today, uid);
 
   const out = rows.filter(c => {
     const f = String(c.frequency || '').toLowerCase();
@@ -1453,15 +1518,14 @@ router.get('/checklists/my-today', (req, res) => {
   });
 
   res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Approval columns — mam (2026-05-16): "after need to approval".
-// Idempotent ALTER TABLE.  approval_status defaults to 'pending'
-// so every new completion shows up in the admin's approval queue.
-try { getDb().exec(`ALTER TABLE checklist_completions ADD COLUMN approval_status TEXT DEFAULT 'pending'`); } catch (_) {}
-try { getDb().exec(`ALTER TABLE checklist_completions ADD COLUMN approved_by INTEGER REFERENCES users(id)`); } catch (_) {}
-try { getDb().exec(`ALTER TABLE checklist_completions ADD COLUMN approved_at DATETIME`); } catch (_) {}
-try { getDb().exec(`ALTER TABLE checklist_completions ADD COLUMN approval_note TEXT`); } catch (_) {}
+// approval_status defaults to 'pending' so every new completion shows up in
+// the admin's approval queue.  (The idempotent SQLite ALTERs that used to
+// live here are gone — the migrated Postgres schema already has
+// approval_status / approved_by / approved_at / approval_note.)
 
 // Mark a checklist as done for a given date (with optional proof_url
 // + notes).  Mam (2026-05-22): users need to back-date submissions
@@ -1473,14 +1537,14 @@ try { getDb().exec(`ALTER TABLE checklist_completions ADD COLUMN approval_note T
 //
 // Uses UPSERT so re-submitting overwrites the proof.  Resets the
 // approval status to 'pending' on re-submit so the admin re-reviews.
-router.post('/checklists/:id/complete', (req, res) => {
+router.post('/checklists/:id/complete', async (req, res) => {
+  try {
   const { proof_url, notes } = req.body;
   let date = req.body.completion_date && String(req.body.completion_date).trim()
     ? String(req.body.completion_date).trim().slice(0, 10)
     : new Date().toISOString().split('T')[0];
 
-  const db = getDb();
-  const c = db.prepare('SELECT * FROM checklists WHERE id=?').get(req.params.id);
+  const c = await pg.get('SELECT * FROM checklists WHERE id=?', req.params.id);
   if (!c) return res.status(404).json({ error: 'Checklist not found' });
 
   // Non-admin clamp: must be inside the recurrence window if one is set.
@@ -1504,7 +1568,7 @@ router.post('/checklists/:id/complete', (req, res) => {
   }
   // pt === 'none' → no requirement (just mark done)
 
-  db.prepare(
+  await pg.run(
     `INSERT INTO checklist_completions (checklist_id, user_id, completion_date, proof_url, notes, approval_status)
      VALUES (?, ?, ?, ?, ?, 'pending')
      ON CONFLICT(checklist_id, user_id, completion_date) DO UPDATE SET
@@ -1512,9 +1576,10 @@ router.post('/checklists/:id/complete', (req, res) => {
        notes = excluded.notes,
        submitted_at = CURRENT_TIMESTAMP,
        approval_status = 'pending',
-       approved_by = NULL, approved_at = NULL, approval_note = NULL`
-  ).run(req.params.id, req.user.id, date, proof_url || null, notes || null);
+       approved_by = NULL, approved_at = NULL, approval_note = NULL`,
+    req.params.id, req.user.id, date, proof_url || null, notes || null);
   res.json({ message: `Checklist marked complete for ${date} — pending admin approval`, date });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /hr/checklists/by-date?date=YYYY-MM-DD ──────────────────
@@ -1523,12 +1588,12 @@ router.post('/checklists/:id/complete', (req, res) => {
 // on that date with its completion status (if any), proof URL,
 // and approval status.  Admin sees all; non-admin sees only their
 // own assignments.
-router.get('/checklists/by-date', (req, res) => {
-  const db = getDb();
+router.get('/checklists/by-date', async (req, res) => {
+  try {
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   let canManage = req.user.role === 'admin';
   if (!canManage) {
-    const _cp = db.prepare("SELECT rp.can_see_all, rp.can_edit, rp.can_create FROM role_permissions rp JOIN user_roles ur ON rp.role_id = ur.role_id WHERE ur.user_id = ? AND rp.module = 'checklists'").get(req.user.id);
+    const _cp = await pg.get("SELECT rp.can_see_all, rp.can_edit, rp.can_create FROM role_permissions rp JOIN user_roles ur ON rp.role_id = ur.role_id WHERE ur.user_id = ? AND rp.module = 'checklists'", req.user.id);
     canManage = !!(_cp && (_cp.can_see_all || _cp.can_edit || _cp.can_create));
   }
   const scope = canManage ? '' : 'AND c.assigned_to = ?';
@@ -1540,7 +1605,7 @@ router.get('/checklists/by-date', (req, res) => {
   if (!canManage) args.push(req.user.id);         // for the scope ... = ?
   args.push(date, date);                        // start ≤ ? and end ≥ ?
 
-  const rows = db.prepare(`
+  const rows = await pg.all(`
     SELECT c.id, c.description, c.title, c.frequency, c.due_date, c.due_time,
            c.department, c.recurrence_start_date, c.recurrence_end_date,
            c.fortnight_days,
@@ -1558,7 +1623,7 @@ router.get('/checklists/by-date', (req, res) => {
       AND (c.recurrence_start_date IS NULL OR c.recurrence_start_date <= ?)
       AND (c.recurrence_end_date   IS NULL OR c.recurrence_end_date   >= ?)
     ORDER BY u.name, c.department, c.description
-  `).all(...args);
+  `, ...args);
   // Mam (2026-05-22): post-filter so each frequency only fires on its
   // intended day(s).  Uses due_date as the recurrence anchor for
   // monthly / quarterly / yearly — matches the followup's applies()
@@ -1585,6 +1650,7 @@ router.get('/checklists/by-date', (req, res) => {
     return true;                                    // daily / weekly / unknown
   });
   res.json({ date, rows: filtered });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /hr/checklists/followup?back=7&forward=7 ────────────────
@@ -1597,12 +1663,12 @@ router.get('/checklists/by-date', (req, res) => {
 //   'today'   (current day, no completion yet)
 //   'future'  (upcoming + frequency-applicable)
 //   'na'      (frequency says this task doesn't apply on that date)
-router.get('/checklists/followup', (req, res) => {
-  const db = getDb();
+router.get('/checklists/followup', async (req, res) => {
+  try {
   const back = Math.min(30, Math.max(0, parseInt(req.query.back || '7', 10)));
   const forward = Math.min(30, Math.max(0, parseInt(req.query.forward || '7', 10)));
   let isAdmin = req.user.role === 'admin';
-  if (!isAdmin) { const _cp = db.prepare("SELECT rp.can_see_all, rp.can_edit, rp.can_create FROM role_permissions rp JOIN user_roles ur ON rp.role_id = ur.role_id WHERE ur.user_id = ? AND rp.module = 'checklists'").get(req.user.id); isAdmin = !!(_cp && (_cp.can_see_all || _cp.can_edit || _cp.can_create)); }
+  if (!isAdmin) { const _cp = await pg.get("SELECT rp.can_see_all, rp.can_edit, rp.can_create FROM role_permissions rp JOIN user_roles ur ON rp.role_id = ur.role_id WHERE ur.user_id = ? AND rp.module = 'checklists'", req.user.id); isAdmin = !!(_cp && (_cp.can_see_all || _cp.can_edit || _cp.can_create)); }
 
   // Build the date window (ISO YYYY-MM-DD strings, IST).
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -1620,23 +1686,23 @@ router.get('/checklists/followup', (req, res) => {
               c.department, c.assigned_to, u.name AS assigned_to_name,
               c.recurrence_start_date, c.recurrence_end_date, c.fortnight_days
        FROM checklists c LEFT JOIN users u ON c.assigned_to = u.id
-       ORDER BY u.name COLLATE NOCASE, c.department, c.description`
+       ORDER BY LOWER(u.name), c.department, c.description`
     : `SELECT c.id, c.description, c.title, c.frequency, c.due_date, c.due_time,
               c.department, c.assigned_to, u.name AS assigned_to_name,
               c.recurrence_start_date, c.recurrence_end_date, c.fortnight_days
        FROM checklists c LEFT JOIN users u ON c.assigned_to = u.id
        WHERE c.assigned_to = ?
        ORDER BY c.department, c.description`;
-  const tasks = isAdmin ? db.prepare(taskSql).all() : db.prepare(taskSql).all(req.user.id);
+  const tasks = isAdmin ? await pg.all(taskSql) : await pg.all(taskSql, req.user.id);
 
   // Pull ALL completions in the window (one query, then bucket
   // client-side by checklist_id + date).
-  const compRows = db.prepare(`
+  const compRows = await pg.all(`
     SELECT checklist_id, user_id, completion_date, proof_url,
            approval_status, submitted_at
     FROM checklist_completions
     WHERE completion_date BETWEEN ? AND ?
-  `).all(fromDate, toDate);
+  `, fromDate, toDate);
   const compMap = {};
   for (const r of compRows) {
     compMap[`${r.checklist_id}::${r.completion_date}`] = r;
@@ -1730,24 +1796,26 @@ router.get('/checklists/followup', (req, res) => {
   });
 
   res.json({ from: fromDate, to: toDate, dates, today_index: back, rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── POST /hr/checklists/completions/:id/decision (admin only) ───
 // Approve or reject a checklist completion.  Body: { status, note }.
-router.post('/checklists/completions/:id/decision', (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
-  const { status, note } = req.body || {};
-  if (status !== 'approved' && status !== 'rejected') {
-    return res.status(400).json({ error: 'status must be "approved" or "rejected"' });
-  }
-  const db = getDb();
-  const r = db.prepare(`
-    UPDATE checklist_completions
-    SET approval_status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_note = ?
-    WHERE id = ?
-  `).run(status, req.user.id, note || null, req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Completion not found' });
-  res.json({ message: `Marked ${status}` });
+router.post('/checklists/completions/:id/decision', async (req, res) => {
+  try {
+    if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+    const { status, note } = req.body || {};
+    if (status !== 'approved' && status !== 'rejected') {
+      return res.status(400).json({ error: 'status must be "approved" or "rejected"' });
+    }
+    const r = await pg.run(`
+      UPDATE checklist_completions
+      SET approval_status = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, approval_note = ?
+      WHERE id = ?
+    `, status, req.user.id, note || null, req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Completion not found' });
+    res.json({ message: `Marked ${status}` });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -1767,18 +1835,18 @@ router.post('/checklists/completions/:id/decision', (req, res) => {
 // Helper — only admin / HR can approve or reject.  Hiring manager who
 // raised the request CANNOT approve their own (separation of duties,
 // same rule we enforce on Indent).
-function isHrOrAdmin(req) {
+async function isHrOrAdmin(req) {
   if (req.user.role === 'admin') return true;
-  const db = getDb();
-  const u = db.prepare('SELECT department FROM users WHERE id=?').get(req.user.id);
+  const u = await pg.get('SELECT department FROM users WHERE id=?', req.user.id);
   if (u?.department && String(u.department).toLowerCase().includes('hr')) return true;
-  const roles = db.prepare(
-    `SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id=r.id WHERE ur.user_id=?`
-  ).all(req.user.id);
+  const roles = await pg.all(
+    `SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id=r.id WHERE ur.user_id=?`,
+    req.user.id);
   return roles.some(r => String(r.name || '').toLowerCase().includes('hr'));
 }
 
-router.get('/hiring-requests', (req, res) => {
+router.get('/hiring-requests', async (req, res) => {
+  try {
   const { status, department } = req.query;
   let sql = `SELECT hr.*, e.name AS reporting_manager_name,
                     (SELECT COUNT(*) FROM candidates c WHERE c.hiring_request_id = hr.id) AS candidates_count
@@ -1789,27 +1857,29 @@ router.get('/hiring-requests', (req, res) => {
   if (status)     { sql += ' AND hr.status = ?';     args.push(status); }
   if (department) { sql += ' AND hr.department = ?'; args.push(department); }
   sql += ' ORDER BY hr.created_at DESC';
-  res.json(getDb().prepare(sql).all(...args));
+  res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/hiring-requests/:id', (req, res) => {
-  const db = getDb();
-  const row = db.prepare(
-    `SELECT hr.*, e.name AS reporting_manager_name
-       FROM hiring_requests hr
-       LEFT JOIN employees e ON e.id = hr.reporting_manager_id
-      WHERE hr.id = ?`
-  ).get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'Hiring request not found' });
-  // Inline candidate list — manager wants to see "X applied for this role".
-  row.candidates = db.prepare(
-    `SELECT id, name, phone, email, status, created_at
-       FROM candidates WHERE hiring_request_id = ? ORDER BY created_at DESC`
-  ).all(req.params.id);
-  res.json(row);
+router.get('/hiring-requests/:id', async (req, res) => {
+  try {
+    const row = await pg.get(
+      `SELECT hr.*, e.name AS reporting_manager_name
+         FROM hiring_requests hr
+         LEFT JOIN employees e ON e.id = hr.reporting_manager_id
+        WHERE hr.id = ?`,
+      req.params.id);
+    if (!row) return res.status(404).json({ error: 'Hiring request not found' });
+    // Inline candidate list — manager wants to see "X applied for this role".
+    row.candidates = await pg.all(
+      `SELECT id, name, phone, email, status, created_at
+         FROM candidates WHERE hiring_request_id = ? ORDER BY created_at DESC`,
+      req.params.id);
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/hiring-requests', (req, res) => {
+router.post('/hiring-requests', async (req, res) => {
   try {
     const { department, position_title, num_openings, salary_min, salary_max,
             experience_required, employment_type, hiring_deadline,
@@ -1818,15 +1888,14 @@ router.post('/hiring-requests', (req, res) => {
     if (!position_title || !String(position_title).trim()) return res.status(400).json({ error: 'Position title is required' });
     const allowedTypes = ['full_time','part_time','contract','internship','freelance'];
     const empType = allowedTypes.includes(employment_type) ? employment_type : 'full_time';
-    const db = getDb();
-    const r = db.prepare(`
+    const r = await pg.run(`
       INSERT INTO hiring_requests
         (department, position_title, num_openings, salary_min, salary_max,
          experience_required, employment_type, hiring_deadline,
          reporting_manager_id, job_description,
          status, requested_by, requested_by_name)
       VALUES (?,?,?,?,?,?,?,?,?,?, 'pending', ?, ?)
-    `).run(
+    `,
       department.trim(), position_title.trim(),
       num_openings ? +num_openings : 1,
       salary_min != null && salary_min !== '' ? +salary_min : null,
@@ -1843,97 +1912,102 @@ router.post('/hiring-requests', (req, res) => {
   }
 });
 
-router.put('/hiring-requests/:id', (req, res) => {
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM hiring_requests WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  // Approved / closed / rejected rows are frozen — admin override only.
-  if (cur.status !== 'pending' && req.user.role !== 'admin') {
-    return res.status(403).json({ error: `Cannot edit a ${cur.status} request — admin only` });
-  }
-  const { department, position_title, num_openings, salary_min, salary_max,
-          experience_required, employment_type, hiring_deadline,
-          reporting_manager_id, job_description } = req.body || {};
-  db.prepare(`
-    UPDATE hiring_requests SET
-      department = COALESCE(?, department),
-      position_title = COALESCE(?, position_title),
-      num_openings = COALESCE(?, num_openings),
-      salary_min = ?,
-      salary_max = ?,
-      experience_required = COALESCE(?, experience_required),
-      employment_type = COALESCE(?, employment_type),
-      hiring_deadline = ?,
-      reporting_manager_id = ?,
-      job_description = COALESCE(?, job_description)
-    WHERE id = ?
-  `).run(
-    department || null, position_title || null,
-    num_openings != null ? +num_openings : null,
-    salary_min != null && salary_min !== '' ? +salary_min : null,
-    salary_max != null && salary_max !== '' ? +salary_max : null,
-    experience_required || null, employment_type || null,
-    hiring_deadline || null,
-    reporting_manager_id ? +reporting_manager_id : null,
-    job_description || null,
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/hiring-requests/:id', async (req, res) => {
+  try {
+    const cur = await pg.get('SELECT * FROM hiring_requests WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    // Approved / closed / rejected rows are frozen — admin override only.
+    if (cur.status !== 'pending' && req.user.role !== 'admin') {
+      return res.status(403).json({ error: `Cannot edit a ${cur.status} request — admin only` });
+    }
+    const { department, position_title, num_openings, salary_min, salary_max,
+            experience_required, employment_type, hiring_deadline,
+            reporting_manager_id, job_description } = req.body || {};
+    await pg.run(`
+      UPDATE hiring_requests SET
+        department = COALESCE(?, department),
+        position_title = COALESCE(?, position_title),
+        num_openings = COALESCE(?, num_openings),
+        salary_min = ?,
+        salary_max = ?,
+        experience_required = COALESCE(?, experience_required),
+        employment_type = COALESCE(?, employment_type),
+        hiring_deadline = ?,
+        reporting_manager_id = ?,
+        job_description = COALESCE(?, job_description)
+      WHERE id = ?
+    `,
+      department || null, position_title || null,
+      num_openings != null ? +num_openings : null,
+      salary_min != null && salary_min !== '' ? +salary_min : null,
+      salary_max != null && salary_max !== '' ? +salary_max : null,
+      experience_required || null, employment_type || null,
+      hiring_deadline || null,
+      reporting_manager_id ? +reporting_manager_id : null,
+      job_description || null,
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/hiring-requests/:id/approve', (req, res) => {
-  if (!isHrOrAdmin(req)) return res.status(403).json({ error: 'HR or Admin only' });
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM hiring_requests WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  if (cur.status !== 'pending') return res.status(409).json({ error: `Already ${cur.status}` });
-  // Separation of duties — the requester cannot approve their own request.
-  if (cur.requested_by === req.user.id && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'You raised this request; another HR must approve it' });
-  }
-  const { notes } = req.body || {};
-  db.prepare(`UPDATE hiring_requests
-                 SET status='approved', approval_notes=?, approved_by=?, approved_at=CURRENT_TIMESTAMP
-               WHERE id=?`)
-    .run(notes || null, req.user.id, req.params.id);
-  res.json({ message: 'Hiring request approved — position is now open for sourcing' });
+router.post('/hiring-requests/:id/approve', async (req, res) => {
+  try {
+    if (!(await isHrOrAdmin(req))) return res.status(403).json({ error: 'HR or Admin only' });
+    const cur = await pg.get('SELECT * FROM hiring_requests WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    if (cur.status !== 'pending') return res.status(409).json({ error: `Already ${cur.status}` });
+    // Separation of duties — the requester cannot approve their own request.
+    if (cur.requested_by === req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'You raised this request; another HR must approve it' });
+    }
+    const { notes } = req.body || {};
+    await pg.run(`UPDATE hiring_requests
+                   SET status='approved', approval_notes=?, approved_by=?, approved_at=CURRENT_TIMESTAMP
+                 WHERE id=?`,
+      notes || null, req.user.id, req.params.id);
+    res.json({ message: 'Hiring request approved — position is now open for sourcing' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/hiring-requests/:id/reject', (req, res) => {
-  if (!isHrOrAdmin(req)) return res.status(403).json({ error: 'HR or Admin only' });
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM hiring_requests WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  if (cur.status !== 'pending') return res.status(409).json({ error: `Already ${cur.status}` });
-  const { reason } = req.body || {};
-  if (!reason || !String(reason).trim()) return res.status(400).json({ error: 'Rejection reason required' });
-  db.prepare(`UPDATE hiring_requests
-                 SET status='rejected', approval_notes=?, approved_by=?, approved_at=CURRENT_TIMESTAMP
-               WHERE id=?`)
-    .run(reason, req.user.id, req.params.id);
-  res.json({ message: 'Hiring request rejected' });
+router.post('/hiring-requests/:id/reject', async (req, res) => {
+  try {
+    if (!(await isHrOrAdmin(req))) return res.status(403).json({ error: 'HR or Admin only' });
+    const cur = await pg.get('SELECT * FROM hiring_requests WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    if (cur.status !== 'pending') return res.status(409).json({ error: `Already ${cur.status}` });
+    const { reason } = req.body || {};
+    if (!reason || !String(reason).trim()) return res.status(400).json({ error: 'Rejection reason required' });
+    await pg.run(`UPDATE hiring_requests
+                   SET status='rejected', approval_notes=?, approved_by=?, approved_at=CURRENT_TIMESTAMP
+                 WHERE id=?`,
+      reason, req.user.id, req.params.id);
+    res.json({ message: 'Hiring request rejected' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/hiring-requests/:id/close', (req, res) => {
-  if (!isHrOrAdmin(req)) return res.status(403).json({ error: 'HR or Admin only' });
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM hiring_requests WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  if (cur.status === 'closed') return res.json({ message: 'Already closed' });
-  db.prepare(`UPDATE hiring_requests
-                 SET status='closed', closed_at=CURRENT_TIMESTAMP
-               WHERE id=?`).run(req.params.id);
-  res.json({ message: 'Hiring request closed' });
+router.post('/hiring-requests/:id/close', async (req, res) => {
+  try {
+    if (!(await isHrOrAdmin(req))) return res.status(403).json({ error: 'HR or Admin only' });
+    const cur = await pg.get('SELECT * FROM hiring_requests WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    if (cur.status === 'closed') return res.json({ message: 'Already closed' });
+    await pg.run(`UPDATE hiring_requests
+                   SET status='closed', closed_at=CURRENT_TIMESTAMP
+                 WHERE id=?`, req.params.id);
+    res.json({ message: 'Hiring request closed' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/hiring-requests/:id', (req, res) => {
-  if (!isHrOrAdmin(req)) return res.status(403).json({ error: 'HR or Admin only' });
-  const db = getDb();
-  // Don't orphan candidates — null out their hiring_request_id first.
-  db.prepare('UPDATE candidates SET hiring_request_id = NULL WHERE hiring_request_id = ?').run(req.params.id);
-  const r = db.prepare('DELETE FROM hiring_requests WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/hiring-requests/:id', async (req, res) => {
+  try {
+    if (!(await isHrOrAdmin(req))) return res.status(403).json({ error: 'HR or Admin only' });
+    // Don't orphan candidates — null out their hiring_request_id first.
+    await pg.run('UPDATE candidates SET hiring_request_id = NULL WHERE hiring_request_id = ?', req.params.id);
+    const r = await pg.run('DELETE FROM hiring_requests WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -1945,25 +2019,26 @@ router.delete('/hiring-requests/:id', (req, res) => {
 // (sanitised for external boards).  Status: draft → published → archived.
 
 // ── JD TEMPLATES ──
-router.get('/jd-templates', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT id, name, description, template_content, is_default, created_at
-       FROM jd_templates ORDER BY is_default DESC, name`
-  ).all();
-  // Parse JSON content for the client.
-  res.json(rows.map(r => ({ ...r, template_content: safeParseJson(r.template_content) })));
+router.get('/jd-templates', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT id, name, description, template_content, is_default, created_at
+         FROM jd_templates ORDER BY is_default DESC, name`
+    );
+    // Parse JSON content for the client.
+    res.json(rows.map(r => ({ ...r, template_content: safeParseJson(r.template_content) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/jd-templates', (req, res) => {
+router.post('/jd-templates', async (req, res) => {
   try {
     const { name, description, template_content, is_default } = req.body || {};
     if (!name || !String(name).trim()) return res.status(400).json({ error: 'Template name is required' });
-    const db = getDb();
-    if (is_default) db.prepare('UPDATE jd_templates SET is_default = 0').run();
-    const r = db.prepare(`
+    if (is_default) await pg.run('UPDATE jd_templates SET is_default = 0');
+    const r = await pg.run(`
       INSERT INTO jd_templates (name, description, template_content, is_default, created_by)
       VALUES (?,?,?,?,?)
-    `).run(
+    `,
       name.trim(), description || null,
       template_content ? JSON.stringify(template_content) : null,
       is_default ? 1 : 0,
@@ -1976,34 +2051,38 @@ router.post('/jd-templates', (req, res) => {
   }
 });
 
-router.put('/jd-templates/:id', (req, res) => {
-  const { name, description, template_content, is_default } = req.body || {};
-  const db = getDb();
-  if (is_default) db.prepare('UPDATE jd_templates SET is_default = 0 WHERE id != ?').run(req.params.id);
-  db.prepare(`
-    UPDATE jd_templates SET
-      name = COALESCE(?, name),
-      description = COALESCE(?, description),
-      template_content = COALESCE(?, template_content),
-      is_default = COALESCE(?, is_default)
-    WHERE id = ?
-  `).run(
-    name || null, description || null,
-    template_content ? JSON.stringify(template_content) : null,
-    is_default != null ? (is_default ? 1 : 0) : null,
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/jd-templates/:id', async (req, res) => {
+  try {
+    const { name, description, template_content, is_default } = req.body || {};
+    if (is_default) await pg.run('UPDATE jd_templates SET is_default = 0 WHERE id != ?', req.params.id);
+    await pg.run(`
+      UPDATE jd_templates SET
+        name = COALESCE(?, name),
+        description = COALESCE(?, description),
+        template_content = COALESCE(?, template_content),
+        is_default = COALESCE(?, is_default)
+      WHERE id = ?
+    `,
+      name || null, description || null,
+      template_content ? JSON.stringify(template_content) : null,
+      is_default != null ? (is_default ? 1 : 0) : null,
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/jd-templates/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM jd_templates WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/jd-templates/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM jd_templates WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── JOB DESCRIPTIONS ──
-router.get('/job-descriptions', (req, res) => {
+router.get('/job-descriptions', async (req, res) => {
+  try {
   const { hiring_request_id, status } = req.query;
   let sql = `SELECT jd.*, hr.position_title AS hiring_request_position,
                     hr.department AS hiring_request_department,
@@ -2016,37 +2095,40 @@ router.get('/job-descriptions', (req, res) => {
   if (hiring_request_id) { sql += ' AND jd.hiring_request_id = ?'; args.push(+hiring_request_id); }
   if (status)            { sql += ' AND jd.status = ?';            args.push(status); }
   sql += ' ORDER BY jd.created_at DESC';
-  res.json(getDb().prepare(sql).all(...args));
+  res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/job-descriptions/:id', (req, res) => {
-  const row = getDb().prepare(
-    `SELECT jd.*, hr.position_title AS hiring_request_position,
-            hr.department AS hiring_request_department,
-            t.name AS template_name
-       FROM job_descriptions jd
-       LEFT JOIN hiring_requests hr ON hr.id = jd.hiring_request_id
-       LEFT JOIN jd_templates    t  ON t.id  = jd.template_id
-      WHERE jd.id = ?`
-  ).get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'JD not found' });
-  res.json(row);
+router.get('/job-descriptions/:id', async (req, res) => {
+  try {
+    const row = await pg.get(
+      `SELECT jd.*, hr.position_title AS hiring_request_position,
+              hr.department AS hiring_request_department,
+              t.name AS template_name
+         FROM job_descriptions jd
+         LEFT JOIN hiring_requests hr ON hr.id = jd.hiring_request_id
+         LEFT JOIN jd_templates    t  ON t.id  = jd.template_id
+        WHERE jd.id = ?`,
+      req.params.id);
+    if (!row) return res.status(404).json({ error: 'JD not found' });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/job-descriptions', (req, res) => {
+router.post('/job-descriptions', async (req, res) => {
   try {
     const { hiring_request_id, template_id, title, description, responsibilities,
             required_skills, required_experience, education_required,
             internal_jd, public_job_post, status } = req.body || {};
     if (!title || !String(title).trim()) return res.status(400).json({ error: 'Title is required' });
     const st = ['draft','published','archived'].includes(status) ? status : 'draft';
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO job_descriptions
         (hiring_request_id, template_id, title, description, responsibilities,
          required_skills, required_experience, education_required,
          internal_jd, public_job_post, status, created_by)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
+    `,
       hiring_request_id ? +hiring_request_id : null,
       template_id ? +template_id : null,
       title.trim(), description || null, responsibilities || null,
@@ -2061,40 +2143,44 @@ router.post('/job-descriptions', (req, res) => {
   }
 });
 
-router.put('/job-descriptions/:id', (req, res) => {
-  const { hiring_request_id, template_id, title, description, responsibilities,
-          required_skills, required_experience, education_required,
-          internal_jd, public_job_post, status } = req.body || {};
-  getDb().prepare(`
-    UPDATE job_descriptions SET
-      hiring_request_id = ?,
-      template_id = ?,
-      title = COALESCE(?, title),
-      description = COALESCE(?, description),
-      responsibilities = COALESCE(?, responsibilities),
-      required_skills = COALESCE(?, required_skills),
-      required_experience = COALESCE(?, required_experience),
-      education_required = COALESCE(?, education_required),
-      internal_jd = COALESCE(?, internal_jd),
-      public_job_post = COALESCE(?, public_job_post),
-      status = COALESCE(?, status),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(
-    hiring_request_id ? +hiring_request_id : null,
-    template_id ? +template_id : null,
-    title || null, description || null, responsibilities || null,
-    required_skills || null, required_experience || null, education_required || null,
-    internal_jd || null, public_job_post || null,
-    status || null, req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/job-descriptions/:id', async (req, res) => {
+  try {
+    const { hiring_request_id, template_id, title, description, responsibilities,
+            required_skills, required_experience, education_required,
+            internal_jd, public_job_post, status } = req.body || {};
+    await pg.run(`
+      UPDATE job_descriptions SET
+        hiring_request_id = ?,
+        template_id = ?,
+        title = COALESCE(?, title),
+        description = COALESCE(?, description),
+        responsibilities = COALESCE(?, responsibilities),
+        required_skills = COALESCE(?, required_skills),
+        required_experience = COALESCE(?, required_experience),
+        education_required = COALESCE(?, education_required),
+        internal_jd = COALESCE(?, internal_jd),
+        public_job_post = COALESCE(?, public_job_post),
+        status = COALESCE(?, status),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `,
+      hiring_request_id ? +hiring_request_id : null,
+      template_id ? +template_id : null,
+      title || null, description || null, responsibilities || null,
+      required_skills || null, required_experience || null, education_required || null,
+      internal_jd || null, public_job_post || null,
+      status || null, req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/job-descriptions/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM job_descriptions WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/job-descriptions/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM job_descriptions WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2104,15 +2190,17 @@ router.delete('/job-descriptions/:id', (req, res) => {
 // 'first' (interviewer round) or 'final' (MD round).  Saved alongside
 // the existing interview_decision so legacy data is untouched.
 
-router.get('/candidates/:id/scorecards', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT * FROM interview_scorecards
-      WHERE candidate_id = ? ORDER BY created_at DESC`
-  ).all(req.params.id);
-  res.json(rows);
+router.get('/candidates/:id/scorecards', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT * FROM interview_scorecards
+        WHERE candidate_id = ? ORDER BY created_at DESC`,
+      req.params.id);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/scorecard', (req, res) => {
+router.post('/candidates/:id/scorecard', async (req, res) => {
   try {
     const { interviewer_id, stage, technical_score, communication_score,
             culture_fit_score, problem_solving_score, overall_recommend,
@@ -2127,17 +2215,16 @@ router.post('/candidates/:id/scorecard', (req, res) => {
       if (isNaN(n)) return null;
       return Math.min(5, Math.max(1, Math.round(n)));
     };
-    const db = getDb();
     const intvName = interviewer_id
-      ? (db.prepare('SELECT name FROM employees WHERE id=?').get(+interviewer_id)?.name || null)
+      ? ((await pg.get('SELECT name FROM employees WHERE id=?', +interviewer_id))?.name || null)
       : null;
-    const r = db.prepare(`
+    const r = await pg.run(`
       INSERT INTO interview_scorecards
         (candidate_id, interviewer_id, interviewer_name, stage,
          technical_score, communication_score, culture_fit_score, problem_solving_score,
          overall_recommend, strengths, weaknesses, overall_feedback, created_by)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
+    `,
       +req.params.id,
       interviewer_id ? +interviewer_id : null,
       intvName, st,
@@ -2146,7 +2233,7 @@ router.post('/candidates/:id/scorecard', (req, res) => {
       rec, strengths || null, weaknesses || null, overall_feedback || null,
       req.user.id,
     );
-    logEvent(db, req.params.id, 'scorecard_added', {
+    await logEvent(pg, req.params.id, 'scorecard_added', {
       note: `Scorecard (${st}) by ${intvName || `#${interviewer_id}`} — ${rec || 'no overall rating'}`,
       user_id: req.user.id, user_name: req.user.name,
     });
@@ -2157,10 +2244,12 @@ router.post('/candidates/:id/scorecard', (req, res) => {
   }
 });
 
-router.delete('/scorecards/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM interview_scorecards WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/scorecards/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM interview_scorecards WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2169,45 +2258,49 @@ router.delete('/scorecards/:id', (req, res) => {
 // Curated questions for the MD / final round, organised by category.
 // 25 starter questions seeded in schema.js (seed_final_round_questions_v1).
 
-router.get('/final-round-questions', (req, res) => {
-  const { category, for_role, difficulty, active } = req.query;
-  let sql = 'SELECT * FROM final_round_questions WHERE 1=1';
-  const args = [];
-  if (category)   { sql += ' AND category = ?';   args.push(category); }
-  if (for_role)   { sql += ' AND (for_role = ? OR for_role = "Any" OR for_role IS NULL)'; args.push(for_role); }
-  if (difficulty) { sql += ' AND difficulty = ?'; args.push(difficulty); }
-  if (active === '1') sql += ' AND is_active = 1';
-  sql += ' ORDER BY category, id';
-  res.json(getDb().prepare(sql).all(...args));
+router.get('/final-round-questions', async (req, res) => {
+  try {
+    const { category, for_role, difficulty, active } = req.query;
+    let sql = 'SELECT * FROM final_round_questions WHERE 1=1';
+    const args = [];
+    if (category)   { sql += ' AND category = ?';   args.push(category); }
+    if (for_role)   { sql += " AND (for_role = ? OR for_role = 'Any' OR for_role IS NULL)"; args.push(for_role); }
+    if (difficulty) { sql += ' AND difficulty = ?'; args.push(difficulty); }
+    if (active === '1') sql += ' AND is_active = 1';
+    sql += ' ORDER BY category, id';
+    res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Pick N random ACTIVE questions, optionally filtered by category /
 // role / difficulty.  Used by the "Random pick" button before an MD
 // round so the panel has a starting set without scrolling.
-router.get('/final-round-questions/pick', (req, res) => {
-  const n = Math.min(20, Math.max(1, +req.query.n || 5));
-  const { category, for_role, difficulty } = req.query;
-  let sql = 'SELECT * FROM final_round_questions WHERE is_active = 1';
-  const args = [];
-  if (category)   { sql += ' AND category = ?';   args.push(category); }
-  if (for_role)   { sql += ' AND (for_role = ? OR for_role = "Any" OR for_role IS NULL)'; args.push(for_role); }
-  if (difficulty) { sql += ' AND difficulty = ?'; args.push(difficulty); }
-  sql += ' ORDER BY RANDOM() LIMIT ?';
-  args.push(n);
-  res.json(getDb().prepare(sql).all(...args));
+router.get('/final-round-questions/pick', async (req, res) => {
+  try {
+    const n = Math.min(20, Math.max(1, +req.query.n || 5));
+    const { category, for_role, difficulty } = req.query;
+    let sql = 'SELECT * FROM final_round_questions WHERE is_active = 1';
+    const args = [];
+    if (category)   { sql += ' AND category = ?';   args.push(category); }
+    if (for_role)   { sql += " AND (for_role = ? OR for_role = 'Any' OR for_role IS NULL)"; args.push(for_role); }
+    if (difficulty) { sql += ' AND difficulty = ?'; args.push(difficulty); }
+    sql += ' ORDER BY RANDOM() LIMIT ?';
+    args.push(n);
+    res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/final-round-questions', (req, res) => {
+router.post('/final-round-questions', async (req, res) => {
   try {
     const { category, question_text, for_role, difficulty, notes, is_active } = req.body || {};
     if (!category || !String(category).trim())       return res.status(400).json({ error: 'Category is required' });
     if (!question_text || !String(question_text).trim()) return res.status(400).json({ error: 'Question text is required' });
     const diff = ['easy','medium','hard'].includes(difficulty) ? difficulty : 'medium';
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO final_round_questions
         (category, question_text, for_role, difficulty, notes, is_active, created_by)
       VALUES (?,?,?,?,?,?,?)
-    `).run(
+    `,
       category.trim(), question_text.trim(),
       for_role || null, diff, notes || null,
       is_active === false ? 0 : 1,
@@ -2220,30 +2313,34 @@ router.post('/final-round-questions', (req, res) => {
   }
 });
 
-router.put('/final-round-questions/:id', (req, res) => {
-  const { category, question_text, for_role, difficulty, notes, is_active } = req.body || {};
-  getDb().prepare(`
-    UPDATE final_round_questions SET
-      category = COALESCE(?, category),
-      question_text = COALESCE(?, question_text),
-      for_role = ?,
-      difficulty = COALESCE(?, difficulty),
-      notes = ?,
-      is_active = COALESCE(?, is_active)
-    WHERE id = ?
-  `).run(
-    category || null, question_text || null,
-    for_role || null, difficulty || null, notes || null,
-    is_active == null ? null : (is_active ? 1 : 0),
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/final-round-questions/:id', async (req, res) => {
+  try {
+    const { category, question_text, for_role, difficulty, notes, is_active } = req.body || {};
+    await pg.run(`
+      UPDATE final_round_questions SET
+        category = COALESCE(?, category),
+        question_text = COALESCE(?, question_text),
+        for_role = ?,
+        difficulty = COALESCE(?, difficulty),
+        notes = ?,
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `,
+      category || null, question_text || null,
+      for_role || null, difficulty || null, notes || null,
+      is_active == null ? null : (is_active ? 1 : 0),
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/final-round-questions/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM final_round_questions WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/final-round-questions/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM final_round_questions WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2253,24 +2350,26 @@ router.delete('/final-round-questions/:id', (req, res) => {
 // Company Culture / HR Policies / IT-Security / SOPs).  Employees
 // view a read-only digest at /induction (separate page wired in App.jsx).
 
-router.get('/induction', (req, res) => {
-  const { active } = req.query;
-  let sql = `SELECT * FROM induction_items WHERE 1=1`;
-  if (active === '1') sql += ' AND is_active = 1';
-  sql += ' ORDER BY section, order_index, id';
-  res.json(getDb().prepare(sql).all());
+router.get('/induction', async (req, res) => {
+  try {
+    const { active } = req.query;
+    let sql = `SELECT * FROM induction_items WHERE 1=1`;
+    if (active === '1') sql += ' AND is_active = 1';
+    sql += ' ORDER BY section, order_index, id';
+    res.json(await pg.all(sql));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/induction', (req, res) => {
+router.post('/induction', async (req, res) => {
   try {
     const { section, title, content_type, content_url, content_text, order_index } = req.body || {};
     if (!section || !title) return res.status(400).json({ error: 'Section and title required' });
     const ct = ['text','video','pdf','link'].includes(content_type) ? content_type : 'text';
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO induction_items (section, title, content_type, content_url, content_text, order_index, is_active, created_by)
       VALUES (?,?,?,?,?,?, 1, ?)
-    `).run(section.trim(), title.trim(), ct, content_url || null, content_text || null,
-           order_index != null ? +order_index : 0, req.user.id);
+    `, section.trim(), title.trim(), ct, content_url || null, content_text || null,
+      order_index != null ? +order_index : 0, req.user.id);
     res.status(201).json({ id: r.lastInsertRowid });
   } catch (err) {
     console.error('POST /hr/induction error', err);
@@ -2278,66 +2377,72 @@ router.post('/induction', (req, res) => {
   }
 });
 
-router.put('/induction/:id', (req, res) => {
-  const { section, title, content_type, content_url, content_text, order_index, is_active } = req.body || {};
-  getDb().prepare(`
-    UPDATE induction_items SET
-      section = COALESCE(?, section),
-      title = COALESCE(?, title),
-      content_type = COALESCE(?, content_type),
-      content_url = ?,
-      content_text = ?,
-      order_index = COALESCE(?, order_index),
-      is_active = COALESCE(?, is_active)
-    WHERE id = ?
-  `).run(
-    section || null, title || null, content_type || null,
-    content_url || null, content_text || null,
-    order_index != null ? +order_index : null,
-    is_active != null ? (is_active ? 1 : 0) : null,
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/induction/:id', async (req, res) => {
+  try {
+    const { section, title, content_type, content_url, content_text, order_index, is_active } = req.body || {};
+    await pg.run(`
+      UPDATE induction_items SET
+        section = COALESCE(?, section),
+        title = COALESCE(?, title),
+        content_type = COALESCE(?, content_type),
+        content_url = ?,
+        content_text = ?,
+        order_index = COALESCE(?, order_index),
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `,
+      section || null, title || null, content_type || null,
+      content_url || null, content_text || null,
+      order_index != null ? +order_index : null,
+      is_active != null ? (is_active ? 1 : 0) : null,
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/induction/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM induction_items WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/induction/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM induction_items WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
 // TRAINING LIBRARY + ASSIGNMENTS (mam 2026-05-22 Phase 1 Batch E, #12)
 // ═════════════════════════════════════════════════════════════════
 
-router.get('/training/videos', (req, res) => {
-  const { active, type } = req.query;
-  let sql = `SELECT v.*,
-                    (SELECT COUNT(*) FROM training_assignments a WHERE a.video_id = v.id) AS assigned_count,
-                    (SELECT COUNT(*) FROM training_assignments a WHERE a.video_id = v.id AND a.completed_at IS NOT NULL) AS completed_count
-               FROM training_videos v WHERE 1=1`;
-  const args = [];
-  if (active === '1') sql += ' AND v.is_active = 1';
-  if (type)           { sql += ' AND v.training_type = ?'; args.push(type); }
-  sql += ' ORDER BY v.created_at DESC';
-  res.json(getDb().prepare(sql).all(...args));
+router.get('/training/videos', async (req, res) => {
+  try {
+    const { active, type } = req.query;
+    let sql = `SELECT v.*,
+                      (SELECT COUNT(*) FROM training_assignments a WHERE a.video_id = v.id) AS assigned_count,
+                      (SELECT COUNT(*) FROM training_assignments a WHERE a.video_id = v.id AND a.completed_at IS NOT NULL) AS completed_count
+                 FROM training_videos v WHERE 1=1`;
+    const args = [];
+    if (active === '1') sql += ' AND v.is_active = 1';
+    if (type)           { sql += ' AND v.training_type = ?'; args.push(type); }
+    sql += ' ORDER BY v.created_at DESC';
+    res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/training/videos', (req, res) => {
+router.post('/training/videos', async (req, res) => {
   try {
     const { title, description, video_url, training_type, duration_minutes,
             target_dept, target_role, is_mandatory } = req.body || {};
     if (!title || !video_url) return res.status(400).json({ error: 'Title and video URL required' });
     const tt = ['product','process','communication','sop','other'].includes(training_type) ? training_type : 'sop';
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO training_videos
         (title, description, video_url, training_type, duration_minutes,
          target_dept, target_role, is_mandatory, is_active, created_by)
       VALUES (?,?,?,?,?,?,?,?, 1, ?)
-    `).run(title.trim(), description || null, video_url.trim(), tt,
-           duration_minutes ? +duration_minutes : null,
-           target_dept || null, target_role || null,
-           is_mandatory ? 1 : 0, req.user.id);
+    `, title.trim(), description || null, video_url.trim(), tt,
+      duration_minutes ? +duration_minutes : null,
+      target_dept || null, target_role || null,
+      is_mandatory ? 1 : 0, req.user.id);
     res.status(201).json({ id: r.lastInsertRowid });
   } catch (err) {
     console.error('POST /hr/training/videos error', err);
@@ -2345,108 +2450,123 @@ router.post('/training/videos', (req, res) => {
   }
 });
 
-router.put('/training/videos/:id', (req, res) => {
-  const { title, description, video_url, training_type, duration_minutes,
-          target_dept, target_role, is_mandatory, is_active } = req.body || {};
-  getDb().prepare(`
-    UPDATE training_videos SET
-      title = COALESCE(?, title),
-      description = ?,
-      video_url = COALESCE(?, video_url),
-      training_type = COALESCE(?, training_type),
-      duration_minutes = ?,
-      target_dept = ?,
-      target_role = ?,
-      is_mandatory = COALESCE(?, is_mandatory),
-      is_active = COALESCE(?, is_active)
-    WHERE id = ?
-  `).run(
-    title || null, description || null, video_url || null,
-    training_type || null,
-    duration_minutes ? +duration_minutes : null,
-    target_dept || null, target_role || null,
-    is_mandatory != null ? (is_mandatory ? 1 : 0) : null,
-    is_active != null ? (is_active ? 1 : 0) : null,
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/training/videos/:id', async (req, res) => {
+  try {
+    const { title, description, video_url, training_type, duration_minutes,
+            target_dept, target_role, is_mandatory, is_active } = req.body || {};
+    await pg.run(`
+      UPDATE training_videos SET
+        title = COALESCE(?, title),
+        description = ?,
+        video_url = COALESCE(?, video_url),
+        training_type = COALESCE(?, training_type),
+        duration_minutes = ?,
+        target_dept = ?,
+        target_role = ?,
+        is_mandatory = COALESCE(?, is_mandatory),
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `,
+      title || null, description || null, video_url || null,
+      training_type || null,
+      duration_minutes ? +duration_minutes : null,
+      target_dept || null, target_role || null,
+      is_mandatory != null ? (is_mandatory ? 1 : 0) : null,
+      is_active != null ? (is_active ? 1 : 0) : null,
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/training/videos/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM training_videos WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/training/videos/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM training_videos WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Assign a video to one or more employees (bulk).
 // Body: { employee_ids: [...] }  → upserts (UNIQUE on employee_id+video_id)
-router.post('/training/videos/:id/assign', (req, res) => {
-  const { employee_ids } = req.body || {};
-  if (!Array.isArray(employee_ids) || employee_ids.length === 0) {
-    return res.status(400).json({ error: 'employee_ids required' });
-  }
-  const db = getDb();
-  const ins = db.prepare(`
-    INSERT OR IGNORE INTO training_assignments (employee_id, video_id, assigned_by)
-    VALUES (?,?,?)
-  `);
-  let added = 0;
-  for (const eid of employee_ids) {
-    const r = ins.run(+eid, +req.params.id, req.user.id);
-    if (r.changes) added++;
-  }
-  res.json({ assigned: added, skipped: employee_ids.length - added });
+router.post('/training/videos/:id/assign', async (req, res) => {
+  try {
+    const { employee_ids } = req.body || {};
+    if (!Array.isArray(employee_ids) || employee_ids.length === 0) {
+      return res.status(400).json({ error: 'employee_ids required' });
+    }
+    const insSql = `
+      INSERT INTO training_assignments (employee_id, video_id, assigned_by)
+      VALUES (?,?,?)
+      ON CONFLICT DO NOTHING
+    `;
+    let added = 0;
+    for (const eid of employee_ids) {
+      const r = await pg.run(insSql, +eid, +req.params.id, req.user.id);
+      if (r.changes) added++;
+    }
+    res.json({ assigned: added, skipped: employee_ids.length - added });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Pull assignments for a specific video (admin view)
-router.get('/training/videos/:id/assignments', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT a.*, e.name AS employee_name, e.department AS employee_department
-       FROM training_assignments a
-       LEFT JOIN employees e ON e.id = a.employee_id
-      WHERE a.video_id = ?
-      ORDER BY a.assigned_at DESC`
-  ).all(req.params.id);
-  res.json(rows);
+router.get('/training/videos/:id/assignments', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT a.*, e.name AS employee_name, e.department AS employee_department
+         FROM training_assignments a
+         LEFT JOIN employees e ON e.id = a.employee_id
+        WHERE a.video_id = ?
+        ORDER BY a.assigned_at DESC`,
+      req.params.id);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/training/assignments/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM training_assignments WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Unassigned' });
+router.delete('/training/assignments/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM training_assignments WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Unassigned' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // "My Training" — what's assigned to the logged-in user (via their
 // employees.user_id link).  Used by the employee-facing /training page.
-router.get('/training/mine', (req, res) => {
-  const db = getDb();
-  const emp = db.prepare('SELECT id FROM employees WHERE user_id = ?').get(req.user.id);
-  if (!emp) return res.json([]);
-  const rows = db.prepare(
-    `SELECT a.*, v.title, v.description, v.video_url, v.training_type, v.duration_minutes, v.is_mandatory
-       FROM training_assignments a
-       JOIN training_videos v ON v.id = a.video_id
-      WHERE a.employee_id = ? AND v.is_active = 1
-      ORDER BY v.is_mandatory DESC, a.assigned_at DESC`
-  ).all(emp.id);
-  res.json(rows);
+router.get('/training/mine', async (req, res) => {
+  try {
+    const emp = await pg.get('SELECT id FROM employees WHERE user_id = ?', req.user.id);
+    if (!emp) return res.json([]);
+    const rows = await pg.all(
+      `SELECT a.*, v.title, v.description, v.video_url, v.training_type, v.duration_minutes, v.is_mandatory
+         FROM training_assignments a
+         JOIN training_videos v ON v.id = a.video_id
+        WHERE a.employee_id = ? AND v.is_active = 1
+        ORDER BY v.is_mandatory DESC, a.assigned_at DESC`,
+      emp.id);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/training/assignments/:id/start', (req, res) => {
-  getDb().prepare(`UPDATE training_assignments
-                     SET started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
-                   WHERE id = ?`).run(req.params.id);
-  res.json({ ok: true });
+router.post('/training/assignments/:id/start', async (req, res) => {
+  try {
+    await pg.run(`UPDATE training_assignments
+                       SET started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
+                     WHERE id = ?`, req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/training/assignments/:id/complete', (req, res) => {
-  const { note } = req.body || {};
-  getDb().prepare(`UPDATE training_assignments
-                     SET completed_at = CURRENT_TIMESTAMP,
-                         completion_note = ?,
-                         started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
-                   WHERE id = ?`).run(note || null, req.params.id);
-  res.json({ ok: true });
+router.post('/training/assignments/:id/complete', async (req, res) => {
+  try {
+    const { note } = req.body || {};
+    await pg.run(`UPDATE training_assignments
+                       SET completed_at = CURRENT_TIMESTAMP,
+                           completion_note = ?,
+                           started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
+                     WHERE id = ?`, note || null, req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2455,28 +2575,34 @@ router.post('/training/assignments/:id/complete', (req, res) => {
 // Created by routes (manual) + the hrAutomationsCron scanner.
 // Bell-icon in the Layout polls /my-notifications every 60 sec.
 
-router.get('/my-notifications', (req, res) => {
-  const { unread } = req.query;
-  let sql = 'SELECT * FROM notifications WHERE user_id = ?';
-  if (unread === '1') sql += ' AND read_at IS NULL';
-  sql += ' ORDER BY created_at DESC LIMIT 50';
-  res.json(getDb().prepare(sql).all(req.user.id));
+router.get('/my-notifications', async (req, res) => {
+  try {
+    const { unread } = req.query;
+    let sql = 'SELECT * FROM notifications WHERE user_id = ?';
+    if (unread === '1') sql += ' AND read_at IS NULL';
+    sql += ' ORDER BY created_at DESC LIMIT 50';
+    res.json(await pg.all(sql, req.user.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/notifications/:id/read', (req, res) => {
-  getDb().prepare(
-    `UPDATE notifications SET read_at = CURRENT_TIMESTAMP
-     WHERE id = ? AND user_id = ? AND read_at IS NULL`
-  ).run(req.params.id, req.user.id);
-  res.json({ ok: true });
+router.put('/notifications/:id/read', async (req, res) => {
+  try {
+    await pg.run(
+      `UPDATE notifications SET read_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND user_id = ? AND read_at IS NULL`,
+      req.params.id, req.user.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/notifications/mark-all-read', (req, res) => {
-  getDb().prepare(
-    `UPDATE notifications SET read_at = CURRENT_TIMESTAMP
-     WHERE user_id = ? AND read_at IS NULL`
-  ).run(req.user.id);
-  res.json({ ok: true });
+router.post('/notifications/mark-all-read', async (req, res) => {
+  try {
+    await pg.run(
+      `UPDATE notifications SET read_at = CURRENT_TIMESTAMP
+       WHERE user_id = ? AND read_at IS NULL`,
+      req.user.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // JSON helper — never throws.
@@ -2496,24 +2622,26 @@ function safeParseJson(s) {
 // candidate with eligibility_status: eligible | partial | rejected.
 
 // ── QUESTIONS CRUD ──
-router.get('/screening-questions', (req, res) => {
-  const { hiring_request_id, active } = req.query;
-  let sql = `SELECT * FROM screening_questions WHERE 1=1`;
-  const args = [];
-  if (hiring_request_id === 'global') {
-    sql += ' AND hiring_request_id IS NULL';
-  } else if (hiring_request_id) {
-    // Both this position's questions AND any global ones apply.
-    sql += ' AND (hiring_request_id = ? OR hiring_request_id IS NULL)';
-    args.push(+hiring_request_id);
-  }
-  if (active === '1') sql += ' AND is_active = 1';
-  sql += ' ORDER BY hiring_request_id NULLS FIRST, order_index, id';
-  const rows = getDb().prepare(sql).all(...args);
-  res.json(rows.map(r => ({ ...r, options: safeParseJson(r.options) })));
+router.get('/screening-questions', async (req, res) => {
+  try {
+    const { hiring_request_id, active } = req.query;
+    let sql = `SELECT * FROM screening_questions WHERE 1=1`;
+    const args = [];
+    if (hiring_request_id === 'global') {
+      sql += ' AND hiring_request_id IS NULL';
+    } else if (hiring_request_id) {
+      // Both this position's questions AND any global ones apply.
+      sql += ' AND (hiring_request_id = ? OR hiring_request_id IS NULL)';
+      args.push(+hiring_request_id);
+    }
+    if (active === '1') sql += ' AND is_active = 1';
+    sql += ' ORDER BY hiring_request_id NULLS FIRST, order_index, id';
+    const rows = await pg.all(sql, ...args);
+    res.json(rows.map(r => ({ ...r, options: safeParseJson(r.options) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/screening-questions', (req, res) => {
+router.post('/screening-questions', async (req, res) => {
   try {
     const { hiring_request_id, question_text, question_type, options,
             is_mandatory, auto_reject_op, auto_reject_value,
@@ -2523,13 +2651,13 @@ router.post('/screening-questions', (req, res) => {
     const qt = allowedTypes.includes(question_type) ? question_type : 'descriptive';
     const allowedOps = ['gt','lt','gte','lte','eq','neq','contains','not_contains','in','not_in'];
     const op = auto_reject_op && allowedOps.includes(auto_reject_op) ? auto_reject_op : null;
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO screening_questions
         (hiring_request_id, question_text, question_type, options,
          is_mandatory, auto_reject_op, auto_reject_value, auto_reject_reason,
          order_index, is_active, created_by)
       VALUES (?,?,?,?,?,?,?,?,?,1,?)
-    `).run(
+    `,
       hiring_request_id ? +hiring_request_id : null,
       question_text.trim(), qt,
       options ? (typeof options === 'string' ? options : JSON.stringify(options)) : null,
@@ -2546,44 +2674,47 @@ router.post('/screening-questions', (req, res) => {
   }
 });
 
-router.put('/screening-questions/:id', (req, res) => {
-  const { hiring_request_id, question_text, question_type, options,
-          is_mandatory, auto_reject_op, auto_reject_value,
-          auto_reject_reason, order_index, is_active } = req.body || {};
-  getDb().prepare(`
-    UPDATE screening_questions SET
-      hiring_request_id = ?,
-      question_text = COALESCE(?, question_text),
-      question_type = COALESCE(?, question_type),
-      options = ?,
-      is_mandatory = COALESCE(?, is_mandatory),
-      auto_reject_op = ?,
-      auto_reject_value = ?,
-      auto_reject_reason = ?,
-      order_index = COALESCE(?, order_index),
-      is_active = COALESCE(?, is_active)
-    WHERE id = ?
-  `).run(
-    hiring_request_id != null ? (hiring_request_id ? +hiring_request_id : null) : null,
-    question_text || null, question_type || null,
-    options != null ? (typeof options === 'string' ? options : JSON.stringify(options)) : null,
-    is_mandatory != null ? (is_mandatory ? 1 : 0) : null,
-    auto_reject_op || null,
-    auto_reject_value != null ? String(auto_reject_value) : null,
-    auto_reject_reason || null,
-    order_index != null ? +order_index : null,
-    is_active != null ? (is_active ? 1 : 0) : null,
-    req.params.id,
-  );
-  res.json({ message: 'Updated' });
+router.put('/screening-questions/:id', async (req, res) => {
+  try {
+    const { hiring_request_id, question_text, question_type, options,
+            is_mandatory, auto_reject_op, auto_reject_value,
+            auto_reject_reason, order_index, is_active } = req.body || {};
+    await pg.run(`
+      UPDATE screening_questions SET
+        hiring_request_id = ?,
+        question_text = COALESCE(?, question_text),
+        question_type = COALESCE(?, question_type),
+        options = ?,
+        is_mandatory = COALESCE(?, is_mandatory),
+        auto_reject_op = ?,
+        auto_reject_value = ?,
+        auto_reject_reason = ?,
+        order_index = COALESCE(?, order_index),
+        is_active = COALESCE(?, is_active)
+      WHERE id = ?
+    `,
+      hiring_request_id != null ? (hiring_request_id ? +hiring_request_id : null) : null,
+      question_text || null, question_type || null,
+      options != null ? (typeof options === 'string' ? options : JSON.stringify(options)) : null,
+      is_mandatory != null ? (is_mandatory ? 1 : 0) : null,
+      auto_reject_op || null,
+      auto_reject_value != null ? String(auto_reject_value) : null,
+      auto_reject_reason || null,
+      order_index != null ? +order_index : null,
+      is_active != null ? (is_active ? 1 : 0) : null,
+      req.params.id,
+    );
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/screening-questions/:id', (req, res) => {
-  const db = getDb();
-  // Cascade deletes answers via ON DELETE CASCADE.
-  const r = db.prepare('DELETE FROM screening_questions WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/screening-questions/:id', async (req, res) => {
+  try {
+    // Cascade deletes answers via ON DELETE CASCADE.
+    const r = await pg.run('DELETE FROM screening_questions WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── EVALUATION HELPERS ──
@@ -2618,14 +2749,13 @@ function evalRule(answerRaw, op, value) {
 }
 
 // ── ANSWER SUBMIT + AUTO-EVALUATE ──
-router.post('/candidates/:id/screening-answers', (req, res) => {
+router.post('/candidates/:id/screening-answers', async (req, res) => {
   try {
     const candidateId = +req.params.id;
     const { answers } = req.body || {};        // [{ question_id, answer_text }]
     if (!Array.isArray(answers)) return res.status(400).json({ error: 'answers must be an array' });
 
-    const db = getDb();
-    const candidate = db.prepare('SELECT id, hiring_request_id FROM candidates WHERE id=?').get(candidateId);
+    const candidate = await pg.get('SELECT id, hiring_request_id FROM candidates WHERE id=?', candidateId);
     if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
 
     // Pull applicable questions (this position + globals)
@@ -2637,15 +2767,14 @@ router.post('/candidates/:id/screening-answers', (req, res) => {
     } else {
       qSql += ' AND hiring_request_id IS NULL';
     }
-    const questions = db.prepare(qSql).all(...qArgs);
+    const questions = await pg.all(qSql, ...qArgs);
 
     // Delete + reinsert the candidate's answers (re-screening is allowed)
-    const tx = db.transaction(() => {
-      db.prepare('DELETE FROM screening_answers WHERE candidate_id = ?').run(candidateId);
-      const ins = db.prepare(
+    const out = await pg.tx(async (t) => {
+      await t.run('DELETE FROM screening_answers WHERE candidate_id = ?', candidateId);
+      const insSql =
         `INSERT INTO screening_answers (candidate_id, question_id, answer_text, auto_rejected, created_by)
-         VALUES (?,?,?,?,?)`
-      );
+         VALUES (?,?,?,?,?)`;
 
       // Build a quick lookup of submitted answers
       const ansByQ = {};
@@ -2668,7 +2797,7 @@ router.post('/candidates/:id/screening-answers', (req, res) => {
         }
         // Save the answer (only for questions the user actually answered)
         if (ans != null && String(ans).trim() !== '') {
-          ins.run(candidateId, q.id, String(ans), rejected ? 1 : 0, req.user.id);
+          await t.run(insSql, candidateId, q.id, String(ans), rejected ? 1 : 0, req.user.id);
         }
       }
 
@@ -2684,13 +2813,13 @@ router.post('/candidates/:id/screening-answers', (req, res) => {
         status = 'eligible';
         reason = null;
       }
-      db.prepare(`UPDATE candidates
+      await t.run(`UPDATE candidates
                      SET eligibility_status = ?,
                          eligibility_reason = ?,
                          screened_at = CURRENT_TIMESTAMP
-                   WHERE id = ?`).run(status, reason, candidateId);
+                   WHERE id = ?`, status, reason, candidateId);
 
-      logEvent(db, candidateId, 'screening_done', {
+      await logEvent(t, candidateId, 'screening_done', {
         note: `Screening: ${status}${reason ? ' — ' + reason : ''}`,
         user_id: req.user.id, user_name: req.user.name,
       });
@@ -2698,7 +2827,6 @@ router.post('/candidates/:id/screening-answers', (req, res) => {
       return { status, reason };
     });
 
-    const out = tx();
     res.json({ ok: true, ...out });
   } catch (err) {
     console.error('POST /hr/candidates/:id/screening-answers error', err);
@@ -2706,16 +2834,18 @@ router.post('/candidates/:id/screening-answers', (req, res) => {
   }
 });
 
-router.get('/candidates/:id/screening-answers', (req, res) => {
-  const rows = getDb().prepare(
-    `SELECT a.*, q.question_text, q.question_type, q.options, q.is_mandatory,
-            q.auto_reject_op, q.auto_reject_value, q.auto_reject_reason
-       FROM screening_answers a
-       JOIN screening_questions q ON q.id = a.question_id
-      WHERE a.candidate_id = ?
-      ORDER BY q.order_index, q.id`
-  ).all(req.params.id);
-  res.json(rows.map(r => ({ ...r, options: safeParseJson(r.options) })));
+router.get('/candidates/:id/screening-answers', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT a.*, q.question_text, q.question_type, q.options, q.is_mandatory,
+              q.auto_reject_op, q.auto_reject_value, q.auto_reject_reason
+         FROM screening_answers a
+         JOIN screening_questions q ON q.id = a.question_id
+        WHERE a.candidate_id = ?
+        ORDER BY q.order_index, q.id`,
+      req.params.id);
+    res.json(rows.map(r => ({ ...r, options: safeParseJson(r.options) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2738,75 +2868,82 @@ const DEFAULT_DOC_TYPES = [
   { type: 'education',   label: 'Education Certificates' },
 ];
 
-router.get('/candidates/:id/docs', (req, res) => {
-  const db = getDb();
+router.get('/candidates/:id/docs', async (req, res) => {
+  try {
   const cid = +req.params.id;
   // Guard against a bad/non-numeric id — otherwise the seed INSERT below
   // trips a FOREIGN KEY / NOT NULL constraint and 500s instead of 404ing.
   if (!Number.isInteger(cid) || cid <= 0) {
     return res.status(400).json({ error: 'invalid candidate id' });
   }
-  if (!db.prepare('SELECT 1 FROM candidates WHERE id = ?').get(cid)) {
+  if (!(await pg.get('SELECT 1 FROM candidates WHERE id = ?', cid))) {
     return res.status(404).json({ error: 'candidate not found' });
   }
   // Seed defaults if nothing exists yet for this candidate.
-  const existing = db.prepare('SELECT doc_type FROM candidate_docs WHERE candidate_id = ?').all(cid);
+  const existing = await pg.all('SELECT doc_type FROM candidate_docs WHERE candidate_id = ?', cid);
   if (existing.length === 0) {
-    const ins = db.prepare(
-      `INSERT INTO candidate_docs (candidate_id, doc_type, doc_label, status)
-       VALUES (?,?,?, 'pending')`
-    );
-    for (const d of DEFAULT_DOC_TYPES) ins.run(cid, d.type, d.label);
+    for (const d of DEFAULT_DOC_TYPES) {
+      await pg.run(
+        `INSERT INTO candidate_docs (candidate_id, doc_type, doc_label, status)
+         VALUES (?,?,?, 'pending')`,
+        cid, d.type, d.label);
+    }
   }
   // If the candidate has a resume_file on the candidate row, mark
   // the 'resume' doc as received automatically (one-time convenience
   // — admin can always override).
-  const cand = db.prepare('SELECT resume_file FROM candidates WHERE id=?').get(cid);
+  const cand = await pg.get('SELECT resume_file FROM candidates WHERE id=?', cid);
   if (cand?.resume_file) {
-    db.prepare(
+    await pg.run(
       `UPDATE candidate_docs
           SET file_url   = COALESCE(file_url, ?),
               status     = CASE WHEN status = 'pending' THEN 'received' ELSE status END,
               uploaded_at = COALESCE(uploaded_at, CURRENT_TIMESTAMP)
-        WHERE candidate_id = ? AND doc_type = 'resume'`
-    ).run(cand.resume_file, cid);
+        WHERE candidate_id = ? AND doc_type = 'resume'`,
+      cand.resume_file, cid);
   }
-  const rows = db.prepare(
-    `SELECT * FROM candidate_docs WHERE candidate_id = ? ORDER BY id`
-  ).all(cid);
+  const rows = await pg.all(
+    `SELECT * FROM candidate_docs WHERE candidate_id = ? ORDER BY id`, cid);
   res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/candidates/:id/docs', (req, res) => {
+router.post('/candidates/:id/docs', async (req, res) => {
+  try {
   const { doc_type, doc_label, file_url, status, notes } = req.body || {};
   if (!doc_type || !String(doc_type).trim()) return res.status(400).json({ error: 'doc_type is required' });
   const st = ['pending','received','verified','rejected'].includes(status) ? status : 'pending';
-  const r = getDb().prepare(`
+  // ?::text cast — Postgres can't infer a parameter's type from a bare
+  // "? IS NOT NULL" check the way SQLite could.
+  const r = await pg.run(`
     INSERT INTO candidate_docs (candidate_id, doc_type, doc_label, file_url, status, notes, uploaded_at)
-    VALUES (?,?,?,?,?,?, CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
-  `).run(+req.params.id, doc_type.trim(), doc_label || null, file_url || null, st, notes || null, file_url || null);
+    VALUES (?,?,?,?,?,?, CASE WHEN ?::text IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
+  `, +req.params.id, doc_type.trim(), doc_label || null, file_url || null, st, notes || null, file_url || null);
   res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/docs/:id', (req, res) => {
+router.put('/docs/:id', async (req, res) => {
+  try {
   const { doc_label, file_url, status, notes } = req.body || {};
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM candidate_docs WHERE id=?').get(req.params.id);
+  const cur = await pg.get('SELECT * FROM candidate_docs WHERE id=?', req.params.id);
   if (!cur) return res.status(404).json({ error: 'Not found' });
   const verifying = status === 'verified' && cur.status !== 'verified';
   // First file upload → stamp uploaded_at
   const willUpload = file_url && !cur.file_url;
-  db.prepare(`
+  // Postgres CASE needs a boolean — the 1/0 flags are compared explicitly
+  // (SQLite accepted a bare integer as the condition).
+  await pg.run(`
     UPDATE candidate_docs SET
       doc_label = COALESCE(?, doc_label),
       file_url = COALESCE(?, file_url),
       status = COALESCE(?, status),
       notes = ?,
-      uploaded_at = COALESCE(uploaded_at, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END),
-      verified_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE verified_at END,
-      verified_by = CASE WHEN ? THEN ?               ELSE verified_by END
+      uploaded_at = COALESCE(uploaded_at, CASE WHEN ?::int = 1 THEN CURRENT_TIMESTAMP ELSE NULL END),
+      verified_at = CASE WHEN ?::int = 1 THEN CURRENT_TIMESTAMP ELSE verified_at END,
+      verified_by = CASE WHEN ?::int = 1 THEN ?               ELSE verified_by END
     WHERE id = ?
-  `).run(
+  `,
     doc_label || null,
     file_url || null,
     status || null,
@@ -2818,12 +2955,15 @@ router.put('/docs/:id', (req, res) => {
     req.params.id,
   );
   res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/docs/:id', (req, res) => {
-  const r = getDb().prepare('DELETE FROM candidate_docs WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/docs/:id', async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM candidate_docs WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ═════════════════════════════════════════════════════════════════
@@ -2835,19 +2975,23 @@ router.delete('/docs/:id', (req, res) => {
 // at a few thousand rows since SQLite indexes the candidate.status
 // column implicitly via the CHECK constraint.
 
-router.get('/dashboard', (req, res) => {
-  const db = getDb();
+router.get('/dashboard', async (req, res) => {
+  try {
+  // Date anchors computed in JS (UTC, same as SQLite's DATE('now') was).
+  const today = new Date().toISOString().slice(0, 10);
+  const plus30 = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const monthStart = today.slice(0, 7) + '-01';
 
   // ── 1. Open positions: approved + not closed
-  const openPositions = db.prepare(
+  const openPositions = (await pg.get(
     `SELECT COUNT(*) AS c FROM hiring_requests WHERE status = 'approved'`
-  ).get().c;
+  )).c;
 
   // ── 2. Candidates in pipeline: NOT rejected/onboarded
-  const inPipeline = db.prepare(
+  const inPipeline = (await pg.get(
     `SELECT COUNT(*) AS c FROM candidates
       WHERE status NOT IN ('rejected','onboarded')`
-  ).get().c;
+  )).c;
 
   // ── 3. Time to hire: avg(joining_date - created_at) for onboarded
   //
@@ -2856,76 +3000,76 @@ router.get('/dashboard', (req, res) => {
   // have a joining_date.  If joining_date is NULL it's a data bug;
   // we should exclude that row from the average, not substitute today
   // (which gives a misleadingly small number for "missing data" rows).
-  const tth = db.prepare(`
-    SELECT AVG(julianday(joining_date) - julianday(DATE(created_at))) AS days,
+  const tth = await pg.get(`
+    SELECT AVG(LEFT(joining_date,10)::date - LEFT(created_at,10)::date) AS days,
            COUNT(*) AS n
     FROM candidates
    WHERE status = 'onboarded' AND joining_date IS NOT NULL
-  `).get();
+  `);
   const timeToHireDays = tth.days != null ? Math.round(tth.days) : null;
 
   // ── 4. Offer acceptance rate: accepted+onboarded / (offer_sent+accepted+onboarded)
   //     "rejected after offer" isn't tracked separately yet, so we
   //     approximate using post-offer statuses.
-  const offers = db.prepare(`
+  const offers = await pg.get(`
     SELECT
       SUM(CASE WHEN status IN ('accepted','onboarded') THEN 1 ELSE 0 END) AS accepted_count,
       SUM(CASE WHEN status IN ('offer_sent','accepted','onboarded') THEN 1 ELSE 0 END) AS offer_count
     FROM candidates
-  `).get();
+  `);
   const offerAcceptRate = offers.offer_count > 0
     ? Math.round((offers.accepted_count / offers.offer_count) * 1000) / 10   // 1-decimal %
     : null;
 
   // ── 5. Joining status: candidates with offers accepted (joining pending)
   //     Split into "this month" vs "later" for the dashboard tile.
-  const joining = db.prepare(`
+  const joining = await pg.get(`
     SELECT
       SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS pending,
       SUM(CASE WHEN status = 'onboarded' THEN 1 ELSE 0 END) AS onboarded,
       SUM(CASE WHEN status = 'accepted' AND joining_date IS NOT NULL
-                AND joining_date BETWEEN DATE('now') AND DATE('now','+30 days')
+                AND LEFT(joining_date,10) BETWEEN ? AND ?
                THEN 1 ELSE 0 END) AS joining_next_30
     FROM candidates
-  `).get();
+  `, today, plus30);
 
   // ── 6. Pending interviews: scheduled and date is today or future
-  const pendingInterviews = db.prepare(`
+  const pendingInterviews = (await pg.get(`
     SELECT COUNT(*) AS c FROM candidates
      WHERE status = 'interview_scheduled'
-       AND (interview_date IS NULL OR DATE(interview_date) >= DATE('now'))
-  `).get().c;
+       AND (interview_date IS NULL OR LEFT(interview_date,10) >= ?)
+  `, today)).c;
 
   // ── Extras for the dashboard charts
-  const byStage = db.prepare(`
+  const byStage = await pg.all(`
     SELECT status, COUNT(*) AS c FROM candidates
      WHERE is_on_hold = 0 OR is_on_hold IS NULL
      GROUP BY status
-  `).all();
+  `);
 
-  const bySource = db.prepare(`
+  const bySource = await pg.all(`
     SELECT source, COUNT(*) AS c FROM candidates
      WHERE source IS NOT NULL GROUP BY source
-  `).all();
+  `);
 
-  const newThisMonth = db.prepare(`
+  const newThisMonth = (await pg.get(`
     SELECT COUNT(*) AS c FROM candidates
-     WHERE created_at >= DATE('now','start of month')
-  `).get().c;
+     WHERE created_at >= ?
+  `, monthStart)).c;
 
-  const eligibility = db.prepare(`
+  const eligibility = await pg.get(`
     SELECT
       SUM(CASE WHEN eligibility_status = 'eligible' THEN 1 ELSE 0 END) AS eligible,
       SUM(CASE WHEN eligibility_status = 'partial' THEN 1 ELSE 0 END) AS partial,
       SUM(CASE WHEN eligibility_status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
       SUM(CASE WHEN eligibility_status IS NULL THEN 1 ELSE 0 END) AS not_screened
     FROM candidates
-  `).get();
+  `);
 
   // ── Hiring requests by status (for the dashboard's "open" tile drill-down)
-  const reqsByStatus = db.prepare(`
+  const reqsByStatus = await pg.all(`
     SELECT status, COUNT(*) AS c FROM hiring_requests GROUP BY status
-  `).all();
+  `);
 
   res.json({
     kpis: {
@@ -2943,6 +3087,7 @@ router.get('/dashboard', (req, res) => {
     by_source:      bySource,
     reqs_by_status: reqsByStatus,
   });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

@@ -39,12 +39,12 @@ const GEO_DEFAULTS = {
 
 // Read the (optional) tunable thresholds from payroll_settings. Falls back to
 // GEO_DEFAULTS if the columns/table aren't present (stale DB) or are blank.
-function geoSettings(db) {
+async function geoSettings(db) {
   const s = { ...GEO_DEFAULTS };
   try {
-    const r = db.prepare(
+    const r = await db.get(
       'SELECT geo_accuracy_floor_m AS f, geo_accuracy_ceiling_m AS c, geo_trust_accuracy_m AS t FROM payroll_settings WHERE id=1'
-    ).get();
+    );
     if (r) {
       if (+r.f > 0) s.floor = +r.f;
       if (+r.c > 0) s.ceiling = +r.c;

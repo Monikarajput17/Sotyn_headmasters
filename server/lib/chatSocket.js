@@ -5,17 +5,16 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const { getSecret } = require('../middleware/auth');
-const { getChatDb } = require('../db/chatDb');
+const pg = require('../db/pg');
 
 let io = null;
 
-function roomsFor(uid, admin) {
-  const db = getChatDb();
+async function roomsFor(uid, admin) {
   // Admin joins every GROUP room but only the DM rooms they're a member of —
   // private DMs are never delivered to admin/COO (mam 2026-06-19).
   const rows = admin
-    ? db.prepare('SELECT id AS gid FROM chat_groups WHERE is_dm=0 OR id IN (SELECT group_id FROM chat_group_members WHERE user_id=?)').all(uid)
-    : db.prepare('SELECT group_id AS gid FROM chat_group_members WHERE user_id=?').all(uid);
+    ? await pg.all('SELECT id AS gid FROM chat_groups WHERE is_dm=0 OR id IN (SELECT group_id FROM chat_group_members WHERE user_id=?)', uid)
+    : await pg.all('SELECT group_id AS gid FROM chat_group_members WHERE user_id=?', uid);
   return rows.map(r => `g:${r.gid}`);
 }
 
@@ -32,9 +31,9 @@ function initChatSocket(httpServer) {
     } catch (e) { next(new Error('Auth failed')); }
   });
 
-  io.on('connection', (socket) => {
+  io.on('connection', async (socket) => {
     const uid = socket.user.id, admin = socket.user.role === 'admin';
-    try { for (const r of roomsFor(uid, admin)) socket.join(r); } catch (_) {}
+    try { for (const r of await roomsFor(uid, admin)) socket.join(r); } catch (_) {}
     try { socket.join('u:' + uid); } catch (_) {}     // personal room for 1-on-1 call signalling
 
     // WebRTC call signalling (mam 2026-06-19) — relay offer/answer/ICE/end to
@@ -49,12 +48,12 @@ function initChatSocket(httpServer) {
 
     // Re-join when a client opens / is added to a group. Members always may;
     // admin may join GROUP rooms but NOT a private DM they're not part of.
-    socket.on('join', (gid) => {
+    socket.on('join', async (gid) => {
       try {
-        const db = getChatDb(); const g = +gid;
-        const isMem = !!db.prepare('SELECT 1 FROM chat_group_members WHERE group_id=? AND user_id=?').get(g, uid);
+        const g = +gid;
+        const isMem = !!(await pg.get('SELECT 1 FROM chat_group_members WHERE group_id=? AND user_id=?', g, uid));
         if (isMem) return socket.join(`g:${g}`);
-        if (admin) { const row = db.prepare('SELECT is_dm FROM chat_groups WHERE id=?').get(g); if (row && !row.is_dm) socket.join(`g:${g}`); }
+        if (admin) { const row = await pg.get('SELECT is_dm FROM chat_groups WHERE id=?', g); if (row && !row.is_dm) socket.join(`g:${g}`); }
       } catch (_) {}
     });
   });

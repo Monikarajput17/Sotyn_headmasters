@@ -1,5 +1,5 @@
 const express = require('express');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { validatePoNumber } = require('../utils/validate');
 const router = express.Router();
@@ -41,24 +41,25 @@ const computeFinance = (saleAmt, discPct, discAmt) => {
 };
 
 // Idempotent backfill at module load.
-try {
-  const db = getDb();
-  db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`);
-  const flag = db.prepare(`SELECT value FROM app_settings WHERE key='bb_po_eq_sale_x118_v1'`).get();
-  if (!flag) {
-    const r = db.prepare(`
-      UPDATE business_book
-      SET po_amount = ROUND(COALESCE(sale_amount_without_gst, 0) * 1.18, 2),
-          balance_amount = ROUND(COALESCE(sale_amount_without_gst, 0) * 1.18, 2) - COALESCE(advance_received, 0),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE COALESCE(sale_amount_without_gst, 0) > 0
-    `).run();
-    db.prepare(`INSERT INTO app_settings (key, value) VALUES ('bb_po_eq_sale_x118_v1', '1')`).run();
-    console.log(`[business_book] PO=Sale×1.18 backfill: ${r.changes} rows updated`);
+(async () => {
+  try {
+    await pg.run(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`);
+    const flag = await pg.get(`SELECT value FROM app_settings WHERE key='bb_po_eq_sale_x118_v1'`);
+    if (!flag) {
+      const r = await pg.run(`
+        UPDATE business_book
+        SET po_amount = ROUND((COALESCE(sale_amount_without_gst, 0) * 1.18)::numeric, 2),
+            balance_amount = ROUND((COALESCE(sale_amount_without_gst, 0) * 1.18)::numeric, 2) - COALESCE(advance_received, 0),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE COALESCE(sale_amount_without_gst, 0) > 0
+      `);
+      await pg.run(`INSERT INTO app_settings (key, value) VALUES ('bb_po_eq_sale_x118_v1', '1')`);
+      console.log(`[business_book] PO=Sale×1.18 backfill: ${r.changes} rows updated`);
+    }
+  } catch (e) {
+    console.warn('[business_book] PO backfill skipped:', e.message);
   }
-} catch (e) {
-  console.warn('[business_book] PO backfill skipped:', e.message);
-}
+})();
 
 // All fields from Master Business Sheet
 const ALL_FIELDS = [
@@ -88,48 +89,52 @@ const ALL_FIELDS = [
 ];
 
 // GET all with filters
-router.get('/', requirePermission('business_book', 'view'), (req, res) => {
-  const { status, category, order_type, lead_type, search, date_from, date_to } = req.query;
-  let sql = `SELECT bb.*, u.name as emp_name FROM business_book bb
-    LEFT JOIN users u ON bb.employee_id=u.id WHERE 1=1`;
-  const params = [];
-  if (status) { sql += ' AND bb.status=?'; params.push(status); }
-  if (category) { sql += ' AND bb.category=?'; params.push(category); }
-  if (order_type) { sql += ' AND bb.order_type=?'; params.push(order_type); }
-  if (lead_type) { sql += ' AND bb.lead_type=?'; params.push(lead_type); }
-  if (date_from) { sql += ' AND bb.created_at >= ?'; params.push(date_from); }
-  if (date_to) { sql += ' AND bb.created_at <= ?'; params.push(date_to + ' 23:59:59'); }
-  if (search) {
-    sql += ' AND (bb.client_name LIKE ? OR bb.company_name LIKE ? OR bb.lead_no LIKE ? OR bb.project_name LIKE ? OR bb.district LIKE ? OR bb.state LIKE ? OR bb.po_number LIKE ? OR bb.customer_code LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
-  }
-  sql += ' ORDER BY bb.created_at DESC';
-  res.json(getDb().prepare(sql).all(...params));
+router.get('/', requirePermission('business_book', 'view'), async (req, res) => {
+  try {
+    const { status, category, order_type, lead_type, search, date_from, date_to } = req.query;
+    let sql = `SELECT bb.*, u.name as emp_name FROM business_book bb
+      LEFT JOIN users u ON bb.employee_id=u.id WHERE 1=1`;
+    const params = [];
+    if (status) { sql += ' AND bb.status=?'; params.push(status); }
+    if (category) { sql += ' AND bb.category=?'; params.push(category); }
+    if (order_type) { sql += ' AND bb.order_type=?'; params.push(order_type); }
+    if (lead_type) { sql += ' AND bb.lead_type=?'; params.push(lead_type); }
+    if (date_from) { sql += ' AND bb.created_at >= ?'; params.push(date_from); }
+    if (date_to) { sql += ' AND bb.created_at <= ?'; params.push(date_to + ' 23:59:59'); }
+    if (search) {
+      sql += ' AND (bb.client_name ILIKE ? OR bb.company_name ILIKE ? OR bb.lead_no ILIKE ? OR bb.project_name ILIKE ? OR bb.district ILIKE ? OR bb.state ILIKE ? OR bb.po_number ILIKE ? OR bb.customer_code ILIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    sql += ' ORDER BY bb.created_at DESC';
+    res.json(await pg.all(sql, ...params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET summary/stats (must be before /:id)
-router.get('/stats/summary', requirePermission('business_book', 'view'), (req, res) => {
-  const db = getDb();
-  const total = db.prepare('SELECT COUNT(*) as count FROM business_book').get();
-  const amounts = db.prepare('SELECT COALESCE(SUM(po_amount),0) as total_po, COALESCE(SUM(advance_received),0) as total_advance, COALESCE(SUM(balance_amount),0) as total_balance, COALESCE(SUM(sale_amount_without_gst),0) as total_sale FROM business_book').get();
-  const byStatus = db.prepare("SELECT status, COUNT(*) as count FROM business_book GROUP BY status").all();
-  const byCategory = db.prepare("SELECT category, COUNT(*) as count, COALESCE(SUM(po_amount),0) as amount FROM business_book WHERE category IS NOT NULL AND category != '' GROUP BY category").all();
-  const byOrderType = db.prepare("SELECT order_type, COUNT(*) as count, COALESCE(SUM(po_amount),0) as amount FROM business_book GROUP BY order_type").all();
-  res.json({ total: total.count, ...amounts, byStatus, byCategory, byOrderType });
+router.get('/stats/summary', requirePermission('business_book', 'view'), async (req, res) => {
+  try {
+    const total = await pg.get('SELECT COUNT(*) as count FROM business_book');
+    const amounts = await pg.get('SELECT COALESCE(SUM(po_amount),0) as total_po, COALESCE(SUM(advance_received),0) as total_advance, COALESCE(SUM(balance_amount),0) as total_balance, COALESCE(SUM(sale_amount_without_gst),0) as total_sale FROM business_book');
+    const byStatus = await pg.all("SELECT status, COUNT(*) as count FROM business_book GROUP BY status");
+    const byCategory = await pg.all("SELECT category, COUNT(*) as count, COALESCE(SUM(po_amount),0) as amount FROM business_book WHERE category IS NOT NULL AND category != '' GROUP BY category");
+    const byOrderType = await pg.all("SELECT order_type, COUNT(*) as count, COALESCE(SUM(po_amount),0) as amount FROM business_book GROUP BY order_type");
+    res.json({ total: total.count, ...amounts, byStatus, byCategory, byOrderType });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET single entry by ID
-router.get('/:id', requirePermission('business_book', 'view'), (req, res) => {
-  const entry = getDb().prepare(`SELECT bb.*, u.name as emp_name FROM business_book bb
-    LEFT JOIN users u ON bb.employee_id=u.id WHERE bb.id=?`).get(req.params.id);
-  if (!entry) return res.status(404).json({ error: 'Entry not found' });
-  res.json(entry);
+router.get('/:id', requirePermission('business_book', 'view'), async (req, res) => {
+  try {
+    const entry = await pg.get(`SELECT bb.*, u.name as emp_name FROM business_book bb
+      LEFT JOIN users u ON bb.employee_id=u.id WHERE bb.id=?`, req.params.id);
+    if (!entry) return res.status(404).json({ error: 'Entry not found' });
+    res.json(entry);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST create
-router.post('/', requirePermission('business_book', 'create'), (req, res) => {
+router.post('/', requirePermission('business_book', 'create'), async (req, res) => {
   const b = req.body;
-  const db = getDb();
 
   if (!b.client_name || !String(b.client_name).trim()) {
     return res.status(400).json({ error: 'Client name is required' });
@@ -151,13 +156,13 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
   // different client names by mistake.
   const { findDuplicate, sendDuplicate } = require('../utils/duplicateGuard');
   if (b.po_number && String(b.po_number).trim()) {
-    const dup = findDuplicate(db, {
+    const dup = await findDuplicate(pg, {
       table: 'business_book', fields: { po_number: b.po_number },
       codeColumn: 'lead_no',
     });
     if (sendDuplicate(res, dup, `BB entry with PO ${b.po_number}`)) return;
   }
-  const dup = findDuplicate(db, {
+  const dup = await findDuplicate(pg, {
     table: 'business_book',
     fields: { client_name: b.client_name, project_name: b.project_name || '' },
     codeColumn: 'lead_no',
@@ -166,8 +171,8 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
 
   // Auto-generate Lead No. Uses nextSequence so deletes don't cause
   // UNIQUE-constraint collisions on the next insert.
-  const { nextSequence } = require('../db/nextSequence');
-  const leadNo = nextSequence(db, 'business_book', 'lead_no', 'SEPL', { startFrom: 20000, pad: 5 });
+  const { nextSequencePg } = require('../db/nextSequence');
+  const leadNo = await nextSequencePg(pg, 'business_book', 'lead_no', 'SEPL', { startFrom: 20000, pad: 5 });
 
   // Force PO = NET Sale × 1.18 (mam, 2026-05-21 + discount 2026-06-16).
   // Override any value the client sent — the rule is non-negotiable.
@@ -178,7 +183,7 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
   b.net_sale_amount = fin.netSale;
   const balanceAmount = (b.po_amount || 0) - (b.advance_received || 0);
 
-  const r = db.prepare(`INSERT INTO business_book (
+  const r = await pg.run(`INSERT INTO business_book (
     lead_no, lead_type, client_name, company_name, project_name, client_contact, client_email, email_address,
     source_of_enquiry, district, state, state_code, gstin, billing_address, shipping_address,
     guarantee_required, guarantee_percentage, sale_amount_without_gst, po_amount,
@@ -202,7 +207,7 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
     tpa_labour_link, tpa_labour_signed_link, final_drawing_link,
     working_sheet_link,
     remarks, created_by
-  ) VALUES (${Array(75).fill('?').join(',')})`).run(
+  ) VALUES (${Array(75).fill('?').join(',')})`,
     leadNo, b.lead_type || 'Private', b.client_name, b.company_name, b.project_name, b.client_contact, b.client_email, b.email_address,
     b.source_of_enquiry, b.district, b.state, b.state_code || null, b.gstin || null, b.billing_address, b.shipping_address,
     b.guarantee_required || 'No', b.guarantee_percentage, b.sale_amount_without_gst || 0, b.po_amount || 0,
@@ -230,42 +235,42 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
   const bbId = r.lastInsertRowid;
 
   // Auto-create Order Planning
-  const planResult = db.prepare(
-    'INSERT INTO order_planning (business_book_id, planned_start, planned_end, notes, created_by) VALUES (?,?,?,?,?)'
-  ).run(bbId, b.committed_start_date || null, b.committed_completion_date || null,
+  const planResult = await pg.run(
+    'INSERT INTO order_planning (business_book_id, planned_start, planned_end, notes, created_by) VALUES (?,?,?,?,?)',
+    bbId, b.committed_start_date || null, b.committed_completion_date || null,
     `Auto: ${leadNo} - ${b.project_name || b.client_name} [${b.category || ''} | ${b.order_type || 'Supply'}]`, req.user.id);
 
   // Auto-create DPR Site
   const siteName = b.company_name || b.project_name || `${b.client_name} - ${b.category || 'Project'}`;
   const siteAddress = b.shipping_address || b.billing_address || `${b.district || ''}, ${b.state || ''}`;
-  const siteResult = db.prepare(
-    'INSERT INTO sites (name, address, client_name, business_book_id, supervisor) VALUES (?,?,?,?,?)'
-  ).run(siteName, siteAddress, b.client_name || b.company_name, bbId, b.employee_assigned || b.management_person_name);
+  const siteResult = await pg.run(
+    'INSERT INTO sites (name, address, client_name, business_book_id, supervisor) VALUES (?,?,?,?,?)',
+    siteName, siteAddress, b.client_name || b.company_name, bbId, b.employee_assigned || b.management_person_name);
   const siteId = siteResult.lastInsertRowid;
 
   // Auto-create Cash Flow entry for advance
   if (b.advance_received && b.advance_received > 0) {
     const today = new Date().toISOString().split('T')[0];
-    let daily = db.prepare('SELECT id FROM cash_flow_daily WHERE date=?').get(today);
+    let daily = await pg.get('SELECT id FROM cash_flow_daily WHERE date=?', today);
     if (!daily) {
-      const prev = db.prepare('SELECT closing_balance FROM cash_flow_daily WHERE date < ? ORDER BY date DESC LIMIT 1').get(today);
-      const dr = db.prepare('INSERT INTO cash_flow_daily (date, opening_balance, closing_balance) VALUES (?,?,?)').run(today, prev?.closing_balance || 0, prev?.closing_balance || 0);
+      const prev = await pg.get('SELECT closing_balance FROM cash_flow_daily WHERE date < ? ORDER BY date DESC LIMIT 1', today);
+      const dr = await pg.run('INSERT INTO cash_flow_daily (date, opening_balance, closing_balance) VALUES (?,?,?)', today, prev?.closing_balance || 0, prev?.closing_balance || 0);
       daily = { id: dr.lastInsertRowid };
     }
-    db.prepare('INSERT INTO cash_flow_entries (daily_id, date, type, category, description, amount, party_name, created_by) VALUES (?,?,?,?,?,?,?,?)')
-      .run(daily.id, today, 'inflow', 'Advance Received', `Advance from ${b.client_name} - ${leadNo}`, b.advance_received, b.client_name, req.user.id);
-    const inflows = db.prepare("SELECT COALESCE(SUM(amount),0) as t FROM cash_flow_entries WHERE daily_id=? AND type='inflow'").get(daily.id);
-    const outflows = db.prepare("SELECT COALESCE(SUM(amount),0) as t FROM cash_flow_entries WHERE daily_id=? AND type='outflow'").get(daily.id);
-    const opening = db.prepare('SELECT opening_balance FROM cash_flow_daily WHERE id=?').get(daily.id);
-    db.prepare('UPDATE cash_flow_daily SET total_inflows=?, total_outflows=?, closing_balance=?, updated_at=CURRENT_TIMESTAMP WHERE id=?')
-      .run(inflows.t, outflows.t, (opening?.opening_balance || 0) + inflows.t - outflows.t, daily.id);
+    await pg.run('INSERT INTO cash_flow_entries (daily_id, date, type, category, description, amount, party_name, created_by) VALUES (?,?,?,?,?,?,?,?)',
+      daily.id, today, 'inflow', 'Advance Received', `Advance from ${b.client_name} - ${leadNo}`, b.advance_received, b.client_name, req.user.id);
+    const inflows = await pg.get("SELECT COALESCE(SUM(amount),0) as t FROM cash_flow_entries WHERE daily_id=? AND type='inflow'", daily.id);
+    const outflows = await pg.get("SELECT COALESCE(SUM(amount),0) as t FROM cash_flow_entries WHERE daily_id=? AND type='outflow'", daily.id);
+    const opening = await pg.get('SELECT opening_balance FROM cash_flow_daily WHERE id=?', daily.id);
+    await pg.run('UPDATE cash_flow_daily SET total_inflows=?, total_outflows=?, closing_balance=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+      inflows.t, outflows.t, (opening?.opening_balance || 0) + inflows.t - outflows.t, daily.id);
   }
 
   // Auto-create receivable for balance
   if ((b.po_amount || 0) > (b.advance_received || 0)) {
     const dueDate = new Date(Date.now() + (b.credit_days || 30) * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-    db.prepare('INSERT INTO receivables (client_name, project_name, invoice_amount, received_amount, outstanding_amount, due_date, status, created_by) VALUES (?,?,?,?,?,?,?,?)')
-      .run(b.client_name, b.company_name || b.project_name, b.po_amount, b.advance_received || 0, balanceAmount, dueDate, 'green', req.user.id);
+    await pg.run('INSERT INTO receivables (client_name, project_name, invoice_amount, received_amount, outstanding_amount, due_date, status, created_by) VALUES (?,?,?,?,?,?,?,?)',
+      b.client_name, b.company_name || b.project_name, b.po_amount, b.advance_received || 0, balanceAmount, dueDate, 'green', req.user.id);
   }
 
   res.status(201).json({
@@ -279,7 +284,8 @@ router.post('/', requirePermission('business_book', 'create'), (req, res) => {
 });
 
 // PUT update
-router.put('/:id', requirePermission('business_book', 'edit'), (req, res) => {
+router.put('/:id', requirePermission('business_book', 'edit'), async (req, res) => {
+  try {
   const b = req.body;
   // Same PO regex guard on edit so historical junk can't be re-saved.
   if (b.po_number !== undefined && b.po_number !== null && String(b.po_number).trim() !== '') {
@@ -295,7 +301,7 @@ router.put('/:id', requirePermission('business_book', 'edit'), (req, res) => {
   b.net_sale_amount = fin.netSale;
   const computedBalance = b.balance_amount !== undefined ? b.balance_amount : (b.po_amount || 0) - (b.advance_received || 0);
 
-  getDb().prepare(`UPDATE business_book SET
+  await pg.run(`UPDATE business_book SET
     lead_type=?, client_name=?, company_name=?, project_name=?, client_contact=?, client_email=?, email_address=?,
     source_of_enquiry=?, district=?, state=?, state_code=?, gstin=?, billing_address=?, shipping_address=?,
     guarantee_required=?, guarantee_percentage=?, sale_amount_without_gst=?, po_amount=?,
@@ -318,7 +324,7 @@ router.put('/:id', requirePermission('business_book', 'edit'), (req, res) => {
     boq_file_link=?, boq_signed_link=?, tpa_material_link=?, tpa_material_signed_link=?,
     tpa_labour_link=?, tpa_labour_signed_link=?, final_drawing_link=?,
     working_sheet_link=?,
-    remarks=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(
+    remarks=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
     b.lead_type, b.client_name, b.company_name, b.project_name, b.client_contact, b.client_email, b.email_address,
     b.source_of_enquiry, b.district, b.state, b.state_code || null, b.gstin || null, b.billing_address, b.shipping_address,
     b.guarantee_required || 'No', b.guarantee_percentage, b.sale_amount_without_gst || 0, b.po_amount || 0,
@@ -344,12 +350,12 @@ router.put('/:id', requirePermission('business_book', 'edit'), (req, res) => {
     b.remarks, b.status, req.params.id
   );
   res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE (also removes linked sites, POs, items, planning)
-router.delete('/:id', requirePermission('business_book', 'delete'), (req, res) => {
+router.delete('/:id', requirePermission('business_book', 'delete'), async (req, res) => {
   try {
-    const db = getDb();
     const id = req.params.id;
     // Safety guard (mam 2026-06-15: a mistaken delete cascade-wiped Hero Homes'
     // DPRs).  Deleting a Business Book order ALSO erases its sites' DPRs +
@@ -357,8 +363,8 @@ router.delete('/:id', requirePermission('business_book', 'delete'), (req, res) =
     // accidental click can't destroy filled DPRs.
     if (req.query.force !== '1') {
       const sub = '(SELECT id FROM sites WHERE business_book_id=?)';
-      const dprCount = db.prepare(`SELECT COUNT(*) c FROM dpr WHERE site_id IN ${sub}`).get(id).c;
-      const attCount = db.prepare(`SELECT COUNT(*) c FROM attendance WHERE site_id IN ${sub}`).get(id).c;
+      const dprCount = (await pg.get(`SELECT COUNT(*) c FROM dpr WHERE site_id IN ${sub}`, id)).c;
+      const attCount = (await pg.get(`SELECT COUNT(*) c FROM attendance WHERE site_id IN ${sub}`, id)).c;
       if (dprCount > 0 || attCount > 0) {
         return res.status(409).json({
           error: `This order has ${dprCount} DPR(s) and ${attCount} attendance record(s) under its site(s). Deleting will permanently erase them.`,
@@ -366,30 +372,31 @@ router.delete('/:id', requirePermission('business_book', 'delete'), (req, res) =
         });
       }
     }
-    // Disable foreign keys temporarily for clean delete
-    db.pragma('foreign_keys = OFF');
-    db.prepare('DELETE FROM project_finance WHERE business_book_id=?').run(id);
-    db.prepare('DELETE FROM po_items WHERE business_book_id=?').run(id);
-    db.prepare('DELETE FROM order_planning WHERE business_book_id=?').run(id);
-    // Delete DPR data linked to sites of this business_book
-    const siteIds = db.prepare('SELECT id FROM sites WHERE business_book_id=?').all(id).map(s => s.id);
-    if (siteIds.length > 0) {
-      const ids = siteIds.join(',');
-      db.prepare(`DELETE FROM dpr_work_items WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`).run();
-      db.prepare(`DELETE FROM dpr_manpower WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`).run();
-      db.prepare(`DELETE FROM dpr_machinery WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`).run();
-      db.prepare(`DELETE FROM dpr WHERE site_id IN (${ids})`).run();
-      db.prepare(`DELETE FROM attendance WHERE site_id IN (${ids})`).run();
-      db.prepare(`DELETE FROM geofence_settings WHERE site_id IN (${ids})`).run();
-    }
-    db.prepare('DELETE FROM sites WHERE business_book_id=?').run(id);
-    db.prepare('DELETE FROM purchase_orders WHERE business_book_id=?').run(id);
-    db.prepare('DELETE FROM receivables WHERE po_id IN (SELECT id FROM purchase_orders WHERE business_book_id=?)').run(id);
-    db.prepare('DELETE FROM business_book WHERE id=?').run(id);
-    db.pragma('foreign_keys = ON');
+    // Postgres can't switch foreign keys off like SQLite's pragma could, so the
+    // whole cascade runs in ONE transaction, children before parents (receivables
+    // before their purchase_orders).
+    await pg.tx(async (t) => {
+      await t.run('DELETE FROM project_finance WHERE business_book_id=?', id);
+      await t.run('DELETE FROM po_items WHERE business_book_id=?', id);
+      await t.run('DELETE FROM order_planning WHERE business_book_id=?', id);
+      // Delete DPR data linked to sites of this business_book
+      const siteIds = (await t.all('SELECT id FROM sites WHERE business_book_id=?', id)).map(s => s.id);
+      if (siteIds.length > 0) {
+        const ids = siteIds.join(',');
+        await t.run(`DELETE FROM dpr_work_items WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`);
+        await t.run(`DELETE FROM dpr_manpower WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`);
+        await t.run(`DELETE FROM dpr_machinery WHERE dpr_id IN (SELECT id FROM dpr WHERE site_id IN (${ids}))`);
+        await t.run(`DELETE FROM dpr WHERE site_id IN (${ids})`);
+        await t.run(`DELETE FROM attendance WHERE site_id IN (${ids})`);
+        await t.run(`DELETE FROM geofence_settings WHERE site_id IN (${ids})`);
+      }
+      await t.run('DELETE FROM sites WHERE business_book_id=?', id);
+      await t.run('DELETE FROM receivables WHERE po_id IN (SELECT id FROM purchase_orders WHERE business_book_id=?)', id);
+      await t.run('DELETE FROM purchase_orders WHERE business_book_id=?', id);
+      await t.run('DELETE FROM business_book WHERE id=?', id);
+    });
     res.json({ message: 'Deleted' });
   } catch (err) {
-    try { getDb().pragma('foreign_keys = ON'); } catch(e) {}
     res.status(500).json({ error: err.message });
   }
 });

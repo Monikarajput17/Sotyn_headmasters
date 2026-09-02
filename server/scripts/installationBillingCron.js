@@ -10,20 +10,19 @@
 // "Sent to Client" in the Sales Billing screen, so nothing reaches a client
 // unattended. Skip via ERP_DISABLE_INSTALL_BILLING=1.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 function isFortnightDay() {
   const d = new Date().getDate();
   return d === 1 || d === 16;
 }
 
-function runOnce(force = false) {
+async function runOnce(force = false) {
   if (!force && !isFortnightDay()) return;
   try {
-    const db = getDb();
     const gen = require('../routes/salesBilling').generateInstallationBills;
     if (typeof gen !== 'function') return;
-    const r = gen(db, null, { draft: false });
+    const r = await gen(pg, null, { draft: false });
     if (r && r.created) console.log(`[install-billing] generated ${r.created} installation bill(s)`);
   } catch (e) {
     console.error('[install-billing] run failed:', e.message);
@@ -37,9 +36,9 @@ function scheduleAt(hour, minute, fn, label) {
   if (next <= now) next.setDate(next.getDate() + 1);
   const msUntil = next - now;
   console.log(`[install-billing] ${label} scheduled for ${next.toLocaleString()}`);
-  setTimeout(() => {
-    try { fn(); } catch (e) { console.error('[install-billing]', e.message); }
-    setInterval(() => { try { fn(); } catch (e) { console.error('[install-billing]', e.message); } }, 24 * 60 * 60 * 1000);
+  setTimeout(async () => {
+    try { await fn(); } catch (e) { console.error('[install-billing]', e.message); }
+    setInterval(async () => { try { await fn(); } catch (e) { console.error('[install-billing]', e.message); } }, 24 * 60 * 60 * 1000);
   }, msUntil);
 }
 

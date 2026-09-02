@@ -6,33 +6,38 @@
 // subscription.
 
 const webpush = require('web-push');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 let initialised = false;
+let initPromise = null;   // dedupe concurrent first-boot initialisations
 
-function ensureVapid() {
+async function ensureVapid() {
   if (initialised) return true;
-  const db = getDb();
-  let pub = db.prepare(`SELECT value FROM app_settings WHERE key='vapid_public_key'`).get()?.value;
-  let priv = db.prepare(`SELECT value FROM app_settings WHERE key='vapid_private_key'`).get()?.value;
-  if (!pub || !priv) {
-    const keys = webpush.generateVAPIDKeys();
-    pub = keys.publicKey;
-    priv = keys.privateKey;
-    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('vapid_public_key', ?)`).run(pub);
-    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('vapid_private_key', ?)`).run(priv);
-    console.log('[push] generated new VAPID keys');
+  if (!initPromise) {
+    initPromise = (async () => {
+      let pub = (await pg.get(`SELECT value FROM app_settings WHERE key='vapid_public_key'`))?.value;
+      let priv = (await pg.get(`SELECT value FROM app_settings WHERE key='vapid_private_key'`))?.value;
+      if (!pub || !priv) {
+        const keys = webpush.generateVAPIDKeys();
+        pub = keys.publicKey;
+        priv = keys.privateKey;
+        await pg.run(`INSERT INTO app_settings (key, value) VALUES ('vapid_public_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, pub);
+        await pg.run(`INSERT INTO app_settings (key, value) VALUES ('vapid_private_key', ?) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`, priv);
+        console.log('[push] generated new VAPID keys');
+      }
+      const subject = process.env.VAPID_SUBJECT || 'mailto:admin@securedengineers.com';
+      webpush.setVapidDetails(subject, pub, priv);
+      initialised = true;
+      return true;
+    })();
+    initPromise.catch(() => { initPromise = null; });   // allow retry after a failure
   }
-  const subject = process.env.VAPID_SUBJECT || 'mailto:admin@securedengineers.com';
-  webpush.setVapidDetails(subject, pub, priv);
-  initialised = true;
-  return true;
+  return initPromise;
 }
 
-function getPublicKey() {
-  ensureVapid();
-  const db = getDb();
-  return db.prepare(`SELECT value FROM app_settings WHERE key='vapid_public_key'`).get()?.value;
+async function getPublicKey() {
+  await ensureVapid();
+  return (await pg.get(`SELECT value FROM app_settings WHERE key='vapid_public_key'`))?.value;
 }
 
 // Send a single push to one subscription
@@ -47,7 +52,7 @@ async function sendOne(sub, payload) {
     // 404 / 410 = subscription expired — deactivate it
     if (err.statusCode === 404 || err.statusCode === 410) {
       try {
-        getDb().prepare(`UPDATE push_subscriptions SET active=0 WHERE endpoint=?`).run(sub.endpoint);
+        await pg.run(`UPDATE push_subscriptions SET active=0 WHERE endpoint=?`, sub.endpoint);
       } catch {}
       return { ok: false, reason: 'expired' };
     }
@@ -58,8 +63,8 @@ async function sendOne(sub, payload) {
 // Send to one user (all their active devices)
 async function pushToUser(userId, payload) {
   if (!userId) return { sent: 0 };
-  ensureVapid();
-  const subs = getDb().prepare(`SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id=? AND active=1`).all(userId);
+  await ensureVapid();
+  const subs = await pg.all(`SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id=? AND active=1`, userId);
   let sent = 0;
   for (const s of subs) {
     const r = await sendOne(s, payload);
@@ -84,13 +89,13 @@ async function pushToUsers(userIds, payload) {
 
 // Send to every active user (announcements)
 async function pushToAll(payload) {
-  ensureVapid();
-  const subs = getDb().prepare(`
+  await ensureVapid();
+  const subs = await pg.all(`
     SELECT ps.endpoint, ps.p256dh, ps.auth
     FROM push_subscriptions ps
     JOIN users u ON u.id = ps.user_id
     WHERE ps.active=1 AND COALESCE(u.active, 1)=1
-  `).all();
+  `);
   let sent = 0;
   for (const s of subs) {
     const r = await sendOne(s, payload);

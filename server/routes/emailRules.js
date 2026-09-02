@@ -3,7 +3,7 @@
 // Engine: server/lib/emailRules.js  ·  Catalog: server/lib/emailEvents.js
 
 const express = require('express');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, adminOnly } = require('../middleware/auth');
 const { listEvents, EVENTS, SAMPLE_CONTEXT } = require('../lib/emailEvents');
 const { runRulesForEvent } = require('../lib/emailRules');
@@ -13,28 +13,29 @@ router.use(authMiddleware);
 
 // Catalog of fireable events + their variables / dynamic recipients, plus
 // the roles the UI can offer for by-role recipients.
-router.get('/events', (req, res) => {
+router.get('/events', async (req, res) => {
   let roles = [];
-  try { roles = getDb().prepare('SELECT name FROM roles ORDER BY name').all().map(r => r.name); }
+  try { roles = (await pg.all('SELECT name FROM roles ORDER BY name')).map(r => r.name); }
   catch { roles = []; }
   res.json({ events: listEvents(), roles, sample: SAMPLE_CONTEXT });
 });
 
 // List all rules (admin).
-router.get('/', adminOnly, (req, res) => {
-  const rows = getDb().prepare('SELECT * FROM email_rules ORDER BY event_key, id').all();
-  res.json(rows.map(parseRow));
+router.get('/', adminOnly, async (req, res) => {
+  try {
+    const rows = await pg.all('SELECT * FROM email_rules ORDER BY event_key, id');
+    res.json(rows.map(parseRow));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', adminOnly, (req, res) => {
+router.post('/', adminOnly, async (req, res) => {
+  try {
   const b = req.body || {};
   if (!b.name || !String(b.name).trim()) return res.status(400).json({ error: 'Rule name is required' });
   if (!b.event_key || !EVENTS[b.event_key]) return res.status(400).json({ error: 'Pick a valid event' });
-  const db = getDb();
-  const r = db.prepare(
+  const r = await pg.run(
     `INSERT INTO email_rules (name, event_key, enabled, conditions, recipients, from_addr, subject_tpl, body_tpl, created_by)
-     VALUES (?,?,?,?,?,?,?,?,?)`
-  ).run(
+     VALUES (?,?,?,?,?,?,?,?,?)`,
     String(b.name).trim(), b.event_key,
     b.enabled === false ? 0 : 1,
     JSON.stringify(b.conditions || []),
@@ -44,18 +45,18 @@ router.post('/', adminOnly, (req, res) => {
     req.user.id,
   );
   res.status(201).json({ id: r.lastInsertRowid });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', adminOnly, (req, res) => {
+router.put('/:id', adminOnly, async (req, res) => {
+  try {
   const b = req.body || {};
-  const db = getDb();
-  const existing = db.prepare('SELECT id FROM email_rules WHERE id=?').get(req.params.id);
+  const existing = await pg.get('SELECT id FROM email_rules WHERE id=?', req.params.id);
   if (!existing) return res.status(404).json({ error: 'Rule not found' });
-  db.prepare(
+  await pg.run(
     `UPDATE email_rules SET name=?, event_key=?, enabled=?, conditions=?, recipients=?,
                             from_addr=?, subject_tpl=?, body_tpl=?, updated_at=CURRENT_TIMESTAMP
-       WHERE id=?`
-  ).run(
+       WHERE id=?`,
     String(b.name || '').trim(), b.event_key,
     b.enabled === false ? 0 : 1,
     JSON.stringify(b.conditions || []),
@@ -65,27 +66,31 @@ router.put('/:id', adminOnly, (req, res) => {
     req.params.id,
   );
   res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Quick enable/disable toggle.
-router.put('/:id/toggle', adminOnly, (req, res) => {
-  const db = getDb();
-  const row = db.prepare('SELECT enabled FROM email_rules WHERE id=?').get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'Rule not found' });
-  const next = row.enabled ? 0 : 1;
-  db.prepare('UPDATE email_rules SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(next, req.params.id);
-  res.json({ enabled: next });
+router.put('/:id/toggle', adminOnly, async (req, res) => {
+  try {
+    const row = await pg.get('SELECT enabled FROM email_rules WHERE id=?', req.params.id);
+    if (!row) return res.status(404).json({ error: 'Rule not found' });
+    const next = row.enabled ? 0 : 1;
+    await pg.run('UPDATE email_rules SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', next, req.params.id);
+    res.json({ enabled: next });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', adminOnly, (req, res) => {
-  getDb().prepare('DELETE FROM email_rules WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/:id', adminOnly, async (req, res) => {
+  try {
+    await pg.run('DELETE FROM email_rules WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Send a test of THIS rule using sample data + an optional override recipient.
 router.post('/:id/test', adminOnly, async (req, res) => {
-  const db = getDb();
-  const rule = db.prepare('SELECT * FROM email_rules WHERE id=?').get(req.params.id);
+  try {
+  const rule = await pg.get('SELECT * FROM email_rules WHERE id=?', req.params.id);
   if (!rule) return res.status(404).json({ error: 'Rule not found' });
   // Build a sample context; let the tester force a To address so they can
   // send the preview to themselves regardless of the rule's recipients.
@@ -101,6 +106,7 @@ router.post('/:id/test', adminOnly, async (req, res) => {
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 function parseRow(r) {

@@ -7,9 +7,9 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
-const { nextSequence } = require('../db/nextSequence');
+const { nextSequencePg } = require('../db/nextSequence');
 const { validateFunnelSource } = require('../utils/validate');
 const router = express.Router();
 router.use(authMiddleware);
@@ -40,34 +40,39 @@ function persistBoqFile(req) {
 }
 
 // GET list — filters: q (search), step (1|2|3|all|open), state, source, type
-router.get('/', requirePermission('crm_funnel', 'view'), (req, res) => {
-  const { q, step, state, source, type } = req.query;
-  let sql = 'SELECT * FROM crm_funnel WHERE 1=1';
-  const params = [];
+router.get('/', requirePermission('crm_funnel', 'view'), async (req, res) => {
+  try {
+    const { q, step, state, source, type } = req.query;
+    let sql = 'SELECT * FROM crm_funnel WHERE 1=1';
+    const params = [];
 
-  if (step === 'open') { sql += " AND (final_status IS NULL OR final_status='')"; }
-  if (step === '1') { sql += ' AND quotation_submitted=0'; }
-  if (step === '2') { sql += " AND quotation_submitted=1 AND (final_status IS NULL OR final_status='')"; }
-  if (step === '3') { sql += " AND final_status IN ('win','loss')"; }
-  if (state) { sql += ' AND state=?'; params.push(state); }
-  if (source) { sql += ' AND source=?'; params.push(source); }
-  if (type) { sql += ' AND type=?'; params.push(type); }
-  if (q) {
-    sql += ' AND (client_name LIKE ? OR company_name LIKE ? OR mobile LIKE ? OR lead_no LIKE ?)';
-    const like = `%${q}%`;
-    params.push(like, like, like, like);
-  }
-  sql += ' ORDER BY created_at DESC';
-  res.json(getDb().prepare(sql).all(...params));
+    if (step === 'open') { sql += " AND (final_status IS NULL OR final_status='')"; }
+    if (step === '1') { sql += ' AND quotation_submitted=0'; }
+    if (step === '2') { sql += " AND quotation_submitted=1 AND (final_status IS NULL OR final_status='')"; }
+    if (step === '3') { sql += " AND final_status IN ('win','loss')"; }
+    if (state) { sql += ' AND state=?'; params.push(state); }
+    if (source) { sql += ' AND source=?'; params.push(source); }
+    if (type) { sql += ' AND type=?'; params.push(type); }
+    if (q) {
+      sql += ' AND (client_name ILIKE ? OR company_name ILIKE ? OR mobile ILIKE ? OR lead_no ILIKE ?)';
+      const like = `%${q}%`;
+      params.push(like, like, like, like);
+    }
+    sql += ' ORDER BY created_at DESC';
+    res.json(await pg.all(sql, ...params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/:id', requirePermission('crm_funnel', 'view'), (req, res) => {
-  const row = getDb().prepare('SELECT * FROM crm_funnel WHERE id=?').get(req.params.id);
-  if (!row) return res.status(404).json({ error: 'Not found' });
-  res.json(row);
+router.get('/:id', requirePermission('crm_funnel', 'view'), async (req, res) => {
+  try {
+    const row = await pg.get('SELECT * FROM crm_funnel WHERE id=?', req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/', requirePermission('crm_funnel', 'create'), boqUpload.single('boq_file'), (req, res) => {
+router.post('/', requirePermission('crm_funnel', 'create'), boqUpload.single('boq_file'), async (req, res) => {
+  try {
   const b = req.body || {};
   if (!b.client_name || !String(b.client_name).trim()) {
     return res.status(400).json({ error: 'Client name is required' });
@@ -76,17 +81,16 @@ router.post('/', requirePermission('crm_funnel', 'create'), boqUpload.single('bo
   // Tenders / Referral / Direct / Website / Channel.  Blank = OK (legacy rows).
   const srcErr = validateFunnelSource(b.source);
   if (srcErr) return res.status(400).json({ error: srcErr });
-  const db = getDb();
-  const leadNo = nextSequence(db, 'crm_funnel', 'lead_no', 'CRM-', { startFrom: 0, pad: 4 });
+  const leadNo = await nextSequencePg(pg, 'crm_funnel', 'lead_no', 'CRM-', { startFrom: 0, pad: 4 });
   const leadType = ALLOWED_LEAD_TYPES.includes(b.lead_type) ? b.lead_type : null;
   const boqFileLink = persistBoqFile(req) || b.boq_file_link || null;
-  const r = db.prepare(`INSERT INTO crm_funnel
+  const r = await pg.run(`INSERT INTO crm_funnel
     (lead_no, client_name, company_name, mobile, email, source, address, state, district,
      remarks, category, type, lead_type, boq_file_link,
      cust_boq_link, quotation_link, quotation_amount, quotation_submitted, quotation_submit_date,
      negotiation_status, negotiation_amount, negotiation_remarks,
      final_status, loss_reason, closed_at, created_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     leadNo,
     String(b.client_name).trim(),
     b.company_name || null, b.mobile || null, b.email || null, b.source || null,
@@ -102,9 +106,11 @@ router.post('/', requirePermission('crm_funnel', 'create'), boqUpload.single('bo
     req.user.id,
   );
   res.status(201).json({ id: r.lastInsertRowid, lead_no: leadNo, boq_file_link: boqFileLink });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.put('/:id', requirePermission('crm_funnel', 'edit'), boqUpload.single('boq_file'), (req, res) => {
+router.put('/:id', requirePermission('crm_funnel', 'edit'), boqUpload.single('boq_file'), async (req, res) => {
+  try {
   const b = req.body || {};
   // Same source enforcement on edit so historical rows can't be saved
   // with a free-text source value.
@@ -112,8 +118,7 @@ router.put('/:id', requirePermission('crm_funnel', 'edit'), boqUpload.single('bo
     const srcErr = validateFunnelSource(b.source);
     if (srcErr) return res.status(400).json({ error: srcErr });
   }
-  const db = getDb();
-  const existing = db.prepare('SELECT * FROM crm_funnel WHERE id=?').get(req.params.id);
+  const existing = await pg.get('SELECT * FROM crm_funnel WHERE id=?', req.params.id);
   if (!existing) return res.status(404).json({ error: 'Not found' });
 
   // Stamp dates on the transition (Y/N → Y or final_status set the first time).
@@ -126,14 +131,14 @@ router.put('/:id', requirePermission('crm_funnel', 'edit'), boqUpload.single('bo
   const boqFileLink = persistBoqFile(req) ||
     (b.boq_file_link !== undefined ? (b.boq_file_link || null) : existing.boq_file_link);
 
-  db.prepare(`UPDATE crm_funnel SET
+  await pg.run(`UPDATE crm_funnel SET
     client_name=?, company_name=?, mobile=?, email=?, source=?, address=?, state=?, district=?,
     remarks=?, category=?, type=?, lead_type=?, boq_file_link=?,
     cust_boq_link=?, quotation_link=?, quotation_amount=?, quotation_submitted=?, quotation_submit_date=?,
     negotiation_status=?, negotiation_amount=?, negotiation_remarks=?,
     final_status=?, loss_reason=?, closed_at=?,
     updated_at=CURRENT_TIMESTAMP
-    WHERE id=?`).run(
+    WHERE id=?`,
     b.client_name !== undefined ? String(b.client_name).trim() : existing.client_name,
     b.company_name !== undefined ? b.company_name : existing.company_name,
     b.mobile !== undefined ? b.mobile : existing.mobile,
@@ -160,12 +165,15 @@ router.put('/:id', requirePermission('crm_funnel', 'edit'), boqUpload.single('bo
     req.params.id,
   );
   res.json({ message: 'Updated', boq_file_link: boqFileLink });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.delete('/:id', requirePermission('crm_funnel', 'delete'), (req, res) => {
-  const r = getDb().prepare('DELETE FROM crm_funnel WHERE id=?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/:id', requirePermission('crm_funnel', 'delete'), async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM crm_funnel WHERE id=?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

@@ -28,16 +28,16 @@ function getStatusColor(outstandingAmount, ageingDays) {
 // found, no-op (some receivables are advance / standalone).  When
 // found, recomputes payment_status from sum of all collections on
 // the receivable vs the bill's total_amount.
-function syncSalesBillPaymentStatus(db, receivableId) {
+async function syncSalesBillPaymentStatus(db, receivableId) {
   try {
-    const rec = db.prepare(
-      'SELECT id, invoice_number, received_amount FROM receivables WHERE id=?'
-    ).get(receivableId);
+    const rec = await db.get(
+      'SELECT id, invoice_number, received_amount FROM receivables WHERE id=?', receivableId
+    );
     if (!rec || !rec.invoice_number) return { synced: 0 };
 
-    const bill = db.prepare(
-      'SELECT id, total_amount FROM sales_bills WHERE bill_number=?'
-    ).get(rec.invoice_number);
+    const bill = await db.get(
+      'SELECT id, total_amount FROM sales_bills WHERE bill_number=?', rec.invoice_number
+    );
     if (!bill) return { synced: 0 };
 
     const received = rec.received_amount || 0;
@@ -47,9 +47,7 @@ function syncSalesBillPaymentStatus(db, receivableId) {
     else if (received >= total) status = 'paid';
     else status = 'partial';
 
-    db.prepare(
-      'UPDATE sales_bills SET payment_status=? WHERE id=?'
-    ).run(status, bill.id);
+    await db.run('UPDATE sales_bills SET payment_status=? WHERE id=?', status, bill.id);
     return { synced: 1, bill_id: bill.id, status };
   } catch (e) {
     console.warn('[cashSync] syncSalesBillPaymentStatus failed:', e.message);
@@ -63,36 +61,36 @@ function syncSalesBillPaymentStatus(db, receivableId) {
 //   - midnight cron (so dashboards stay accurate even on no-txn days)
 //   - the on-demand /collect path (already creates the row but using
 //     the same code keeps both branches in sync)
-function ensureTodayCashFlowDaily(db, dateIso) {
+async function ensureTodayCashFlowDaily(db, dateIso) {
   const today = dateIso || new Date().toISOString().slice(0, 10);
-  const existing = db.prepare(
-    'SELECT id FROM cash_flow_daily WHERE date=?'
-  ).get(today);
+  const existing = await db.get('SELECT id FROM cash_flow_daily WHERE date=?', today);
   if (existing) return { created: 0, id: existing.id };
-  const prev = db.prepare(
-    'SELECT closing_balance FROM cash_flow_daily WHERE date < ? ORDER BY date DESC LIMIT 1'
-  ).get(today);
+  const prev = await db.get(
+    'SELECT closing_balance FROM cash_flow_daily WHERE date < ? ORDER BY date DESC LIMIT 1', today
+  );
   const openingBalance = prev?.closing_balance || 0;
-  const r = db.prepare(
-    'INSERT INTO cash_flow_daily (date, opening_balance, closing_balance) VALUES (?, ?, ?)'
-  ).run(today, openingBalance, openingBalance);
+  const r = await db.run(
+    'INSERT INTO cash_flow_daily (date, opening_balance, closing_balance) VALUES (?, ?, ?)',
+    today, openingBalance, openingBalance
+  );
   return { created: 1, id: r.lastInsertRowid, opening_balance: openingBalance };
 }
 
 // A7 — Recompute ageing for every receivable with outstanding > 0.
 // Returns counts.  Called from the 01:00 cron AND can be triggered
 // manually via POST /api/collections/refresh-ageing.
-function refreshAllAgeing(db) {
-  const rows = db.prepare(
+async function refreshAllAgeing(db) {
+  const rows = await db.all(
     'SELECT id, due_date, outstanding_amount FROM receivables WHERE outstanding_amount > 0'
-  ).all();
+  );
   let updated = 0;
   for (const r of rows) {
     const { days, bucket } = calculateAgeing(r.due_date);
     const statusColor = getStatusColor(r.outstanding_amount, days);
-    db.prepare(
-      'UPDATE receivables SET ageing_days=?, ageing_bucket=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?'
-    ).run(days, bucket, statusColor, r.id);
+    await db.run(
+      'UPDATE receivables SET ageing_days=?, ageing_bucket=?, status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+      days, bucket, statusColor, r.id
+    );
     updated += 1;
   }
   return { updated, total: rows.length };

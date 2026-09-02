@@ -5,14 +5,14 @@
 
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, adminOnly } = require('../middleware/auth');
 const { getPublicKey, pushToUser, pushToAll } = require('../lib/push');
 
 // Public key — anyone can fetch (the public half is meant to be public).
-router.get('/vapid', (req, res) => {
+router.get('/vapid', async (req, res) => {
   try {
-    const key = getPublicKey();
+    const key = await getPublicKey();
     if (!key) return res.status(503).json({ error: 'VAPID keys not initialised yet' });
     res.json({ publicKey: key });
   } catch (err) {
@@ -25,15 +25,14 @@ router.use(authMiddleware);
 // Save / refresh a subscription. Called by the client right after the
 // browser grants notification permission AND on every login (in case
 // the endpoint rotated).
-router.post('/subscribe', (req, res) => {
+router.post('/subscribe', async (req, res) => {
   try {
     const { endpoint, keys, device_label } = req.body;
     if (!endpoint || !keys?.p256dh || !keys?.auth) {
       return res.status(400).json({ error: 'endpoint + keys.p256dh + keys.auth required' });
     }
     const ua = req.headers['user-agent'] || '';
-    const db = getDb();
-    db.prepare(`
+    await pg.run(`
       INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, device_label, active, last_seen_at)
       VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
       ON CONFLICT(endpoint) DO UPDATE SET
@@ -41,10 +40,10 @@ router.post('/subscribe', (req, res) => {
         p256dh=excluded.p256dh,
         auth=excluded.auth,
         user_agent=excluded.user_agent,
-        device_label=COALESCE(excluded.device_label, device_label),
+        device_label=COALESCE(excluded.device_label, push_subscriptions.device_label),
         active=1,
         last_seen_at=CURRENT_TIMESTAMP
-    `).run(req.user.id, endpoint, keys.p256dh, keys.auth, ua, device_label || null);
+    `, req.user.id, endpoint, keys.p256dh, keys.auth, ua, device_label || null);
     res.json({ message: 'Subscribed' });
   } catch (err) {
     console.error('subscribe error', err);
@@ -52,12 +51,12 @@ router.post('/subscribe', (req, res) => {
   }
 });
 
-router.post('/unsubscribe', (req, res) => {
+router.post('/unsubscribe', async (req, res) => {
   try {
     const { endpoint } = req.body;
     if (!endpoint) return res.status(400).json({ error: 'endpoint required' });
-    getDb().prepare(`UPDATE push_subscriptions SET active=0 WHERE endpoint=? AND user_id=?`)
-      .run(endpoint, req.user.id);
+    await pg.run(`UPDATE push_subscriptions SET active=0 WHERE endpoint=? AND user_id=?`,
+      endpoint, req.user.id);
     res.json({ message: 'Unsubscribed' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -65,12 +64,14 @@ router.post('/unsubscribe', (req, res) => {
 });
 
 // List my devices
-router.get('/devices', (req, res) => {
-  const rows = getDb().prepare(`
-    SELECT id, device_label, user_agent, active, last_seen_at, created_at
-    FROM push_subscriptions WHERE user_id = ? ORDER BY last_seen_at DESC
-  `).all(req.user.id);
-  res.json(rows);
+router.get('/devices', async (req, res) => {
+  try {
+    const rows = await pg.all(`
+      SELECT id, device_label, user_agent, active, last_seen_at, created_at
+      FROM push_subscriptions WHERE user_id = ? ORDER BY last_seen_at DESC
+    `, req.user.id);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Test push to current user (anyone can fire to their own devices)

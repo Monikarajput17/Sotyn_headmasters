@@ -10,7 +10,7 @@
 //
 // Skip via ERP_DISABLE_DPR_PROMPT=1 in dev / staging.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 const TARGET_HOUR = 18;   // 18:00 = 6 PM
 const TARGET_MIN = 0;
@@ -23,13 +23,13 @@ function isWeekend() {
 
 // Find site engineers who own at least one active site but who haven't
 // submitted a DPR today for any of those sites.
-function findEngineersOwingDpr(db) {
+async function findEngineersOwingDpr() {
   const today = todayIso();
   // sites.site_engineer_id is the primary; some sites also store a
   // CSV in a sister column.  Stick with the FK column for simplicity.
-  return db.prepare(`
+  return pg.all(`
     SELECT DISTINCT u.id user_id, u.name user_name, COUNT(s.id) site_count,
-           GROUP_CONCAT(s.name, ' · ') site_names
+           STRING_AGG(s.name, ' · ') site_names
     FROM sites s
     JOIN users u ON s.site_engineer_id = u.id
     WHERE s.status = 'active'
@@ -39,13 +39,13 @@ function findEngineersOwingDpr(db) {
         WHERE d.site_id = s.id AND d.report_date = ?
       )
     GROUP BY u.id, u.name
-  `).all(today);
+  `, today);
 }
 
 // Also notify the directors / admin pool when adherence is below 50%
 // so management knows before tomorrow's standup.
-function findAdminsForRollup(db) {
-  return db.prepare(`SELECT id FROM users WHERE role='admin' AND active=1`).all().map(r => r.id);
+async function findAdminsForRollup() {
+  return (await pg.all(`SELECT id FROM users WHERE role='admin' AND active=1`)).map(r => r.id);
 }
 
 async function runOnce() {
@@ -55,9 +55,8 @@ async function runOnce() {
   try { pushLib = require('../lib/push'); }
   catch (e) { console.warn('[dpr-prompt] push lib missing:', e.message); return; }
 
-  const db = getDb();
   const today = todayIso();
-  const owing = findEngineersOwingDpr(db);
+  const owing = await findEngineersOwingDpr();
 
   if (owing.length === 0) {
     console.log(`[dpr-prompt] ${today} 18:00 — every active site has a DPR submitted, no prompts sent`);
@@ -78,11 +77,11 @@ async function runOnce() {
   }
 
   // Rollup notification to admins if adherence is below 50%
-  const totalActiveSites = db.prepare(`SELECT COUNT(*) c FROM sites WHERE status='active'`).get()?.c || 0;
-  const sitesWithDprToday = db.prepare(`SELECT COUNT(DISTINCT site_id) c FROM dpr WHERE report_date=?`).get(today)?.c || 0;
+  const totalActiveSites = (await pg.get(`SELECT COUNT(*) c FROM sites WHERE status='active'`))?.c || 0;
+  const sitesWithDprToday = (await pg.get(`SELECT COUNT(DISTINCT site_id) c FROM dpr WHERE report_date=?`, today))?.c || 0;
   const adherence = totalActiveSites > 0 ? Math.round((sitesWithDprToday / totalActiveSites) * 100) : 100;
   if (adherence < 50) {
-    const adminIds = findAdminsForRollup(db);
+    const adminIds = await findAdminsForRollup();
     pushLib.notifyMany(adminIds, {
       title: '⚠ DPR adherence below 50%',
       body: `Only ${sitesWithDprToday}/${totalActiveSites} sites submitted DPR today (${adherence}%). ${owing.length} engineers notified.`,

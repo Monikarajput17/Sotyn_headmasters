@@ -14,32 +14,53 @@
 //   email_director_to     (default recipient for alerts;
 //                          falls back to director@securedengineers.com)
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
-function getSetting(key) {
-  const row = getDb().prepare('SELECT value FROM app_settings WHERE key=?').get(key);
+async function getSetting(key) {
+  const row = await pg.get('SELECT value FROM app_settings WHERE key=?', key);
   return row?.value ?? null;
 }
 
-function getEmailConfig() {
-  return {
-    host: getSetting('email_smtp_host'),
-    port: +getSetting('email_smtp_port') || 587,
-    secure: getSetting('email_smtp_secure') === '1',
-    user: getSetting('email_smtp_user'),
-    pass: getSetting('email_smtp_pass'),
-    from: getSetting('email_from') || getSetting('email_smtp_user'),
-    director: getSetting('email_director_to') || 'director@securedengineers.com',
+const DEFAULT_DIRECTOR = 'director@securedengineers.com';
+let _cached = null;   // last-known config; lets sync hot paths read the director address
+
+async function getEmailConfig() {
+  const [host, port, secure, user, pass, from, director] = await Promise.all([
+    getSetting('email_smtp_host'),
+    getSetting('email_smtp_port'),
+    getSetting('email_smtp_secure'),
+    getSetting('email_smtp_user'),
+    getSetting('email_smtp_pass'),
+    getSetting('email_from'),
+    getSetting('email_director_to'),
+  ]);
+  _cached = {
+    host,
+    port: +port || 587,
+    secure: secure === '1',
+    user,
+    pass,
+    from: from || user,
+    director: director || DEFAULT_DIRECTOR,
   };
+  return _cached;
 }
 
-function isConfigured() {
-  const c = getEmailConfig();
+// Synchronous accessor for routes that only need the director address while
+// building an email payload (Supabase migration: getEmailConfig became async).
+// Served from the cache warmed at boot and refreshed on every send.
+function getDirectorEmail() {
+  return (_cached && _cached.director) || DEFAULT_DIRECTOR;
+}
+getEmailConfig().catch(() => { /* DB not ready yet — default director until first send */ });
+
+async function isConfigured() {
+  const c = await getEmailConfig();
   return !!(c.host && c.user && c.pass);
 }
 
 async function sendEmail({ to, subject, html, text, from }) {
-  const c = getEmailConfig();
+  const c = await getEmailConfig();
   if (!c.host || !c.user || !c.pass) {
     return { skipped: true, reason: 'SMTP not configured' };
   }
@@ -61,4 +82,4 @@ async function sendEmail({ to, subject, html, text, from }) {
   return { sent: true, messageId: info?.messageId };
 }
 
-module.exports = { sendEmail, isConfigured, getEmailConfig };
+module.exports = { sendEmail, isConfigured, getEmailConfig, getDirectorEmail };

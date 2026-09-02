@@ -16,7 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { sendEmail, isConfigured } = require('../lib/email');
 
 const SNAPSHOT_ROOT = path.join(__dirname, '..', '..', 'data', 'audit-snapshots');
@@ -24,7 +24,7 @@ const SNAPSHOT_ROOT = path.join(__dirname, '..', '..', 'data', 'audit-snapshots'
 function todayIso() { return new Date().toISOString().slice(0, 10); }
 function isSunday() { return new Date().getDay() === 0; }
 
-function readSnapshotOrLive(db) {
+async function readSnapshotOrLive(db) {
   const today = todayIso();
   const dir = path.join(SNAPSHOT_ROOT, today);
   const files = ['kpi.json', 'audit.json'];
@@ -41,7 +41,7 @@ function readSnapshotOrLive(db) {
   if (!out['kpi.json']) {
     try {
       const { computeKpiPayload } = require('../routes/auditReport');
-      out['kpi.json'] = computeKpiPayload(db, 30);
+      out['kpi.json'] = await computeKpiPayload(db, 30);
       out._live_fallback = true;
     } catch (_) {}
   }
@@ -170,17 +170,16 @@ async function runOnce() {
     console.log('[cmd-email] Sunday — skipping');
     return;
   }
-  if (!isConfigured()) {
+  if (!(await isConfigured())) {
     console.log('[cmd-email] SMTP not configured (Admin → Email Settings) — skipping');
     return;
   }
-  const db = getDb();
-  const snapshot = readSnapshotOrLive(db);
+  const snapshot = await readSnapshotOrLive(pg);
   const subject = `SEPL ERP · Daily Audit · ${todayIso()}`;
   try {
     const r = await sendEmail({
       subject,
-      html: buildHtml(snapshot, db),
+      html: buildHtml(snapshot, pg),
       text: buildText(snapshot),
     });
     if (r.sent) console.log(`[cmd-email] sent ${todayIso()}: ${r.messageId}`);

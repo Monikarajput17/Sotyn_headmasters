@@ -5,10 +5,14 @@
 
 const express = require('express');
 const router = express.Router();
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission, adminOnly } = require('../middleware/auth');
 
 router.use(authMiddleware);
+
+// UTC date helpers — parity with SQLite's date('now') / date('now','+N days').
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const daysFromNow = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 
 // ---------- PIN CODE → METRO / NON-METRO ----------
 // Metro = the 8 major cities (mam 2026-06-23). A PIN is "verified" via the
@@ -53,20 +57,19 @@ router.get('/pincode/:pin', requirePermission('rentals', 'view'), async (req, re
 });
 
 // ---------- DASHBOARD STATS ----------
-router.get('/stats', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/stats', requirePermission('rentals', 'view'), async (req, res) => {
   try {
-    const db = getDb();
-    const totalProps = db.prepare(`SELECT COUNT(*) as c FROM rental_properties WHERE status='active'`).get().c;
-    const totalRooms = db.prepare(`SELECT COUNT(*) as c FROM rental_rooms`).get().c;
-    const occupiedRooms = db.prepare(`SELECT COUNT(*) as c FROM rental_rooms WHERE status='occupied'`).get().c;
-    const monthlyBurn = db.prepare(`SELECT COALESCE(SUM(monthly_rent),0) as s FROM rental_properties WHERE status='active'`).get().s;
-    const totalDeposit = db.prepare(`SELECT COALESCE(SUM(deposit_paid),0) as s FROM rental_properties WHERE status='active'`).get().s;
-    const expiringSoon = db.prepare(`
+    const totalProps = (await pg.get(`SELECT COUNT(*) as c FROM rental_properties WHERE status='active'`)).c;
+    const totalRooms = (await pg.get(`SELECT COUNT(*) as c FROM rental_rooms`)).c;
+    const occupiedRooms = (await pg.get(`SELECT COUNT(*) as c FROM rental_rooms WHERE status='occupied'`)).c;
+    const monthlyBurn = (await pg.get(`SELECT COALESCE(SUM(monthly_rent),0) as s FROM rental_properties WHERE status='active'`)).s;
+    const totalDeposit = (await pg.get(`SELECT COALESCE(SUM(deposit_paid),0) as s FROM rental_properties WHERE status='active'`)).s;
+    const expiringSoon = (await pg.get(`
       SELECT COUNT(*) as c FROM rental_properties
       WHERE status='active' AND agreement_end_date IS NOT NULL
-        AND agreement_end_date <= date('now', '+30 days')
-    `).get().c;
-    const activeBookings = db.prepare(`SELECT COUNT(*) as c FROM rental_bookings WHERE status='active'`).get().c;
+        AND agreement_end_date <= ?
+    `, daysFromNow(30))).c;
+    const activeBookings = (await pg.get(`SELECT COUNT(*) as c FROM rental_bookings WHERE status='active'`)).c;
     res.json({
       total_properties: totalProps,
       total_rooms: totalRooms,
@@ -81,7 +84,7 @@ router.get('/stats', requirePermission('rentals', 'view'), (req, res) => {
 });
 
 // ---------- PROPERTIES ----------
-router.get('/properties', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/properties', requirePermission('rentals', 'view'), async (req, res) => {
   try {
     const { status, search, city } = req.query;
     let sql = `
@@ -102,43 +105,43 @@ router.get('/properties', requirePermission('rentals', 'view'), (req, res) => {
       params.push(q, q, q);
     }
     sql += ' ORDER BY p.created_at DESC';
-    res.json(getDb().prepare(sql).all(...params));
+    res.json(await pg.all(sql, ...params));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.get('/properties/:id', requirePermission('rentals', 'view'), (req, res) => {
-  const db = getDb();
-  const prop = db.prepare(`
-    SELECT p.*, s.name as site_name FROM rental_properties p
-    LEFT JOIN sites s ON s.id = p.site_id
-    WHERE p.id = ?
-  `).get(req.params.id);
-  if (!prop) return res.status(404).json({ error: 'Not found' });
-  const rooms = db.prepare(`
-    SELECT r.*,
-           (SELECT COUNT(*) FROM rental_bookings b WHERE b.room_id = r.id AND b.status='active') as occupant_count
-    FROM rental_rooms r WHERE r.property_id = ? ORDER BY r.id
-  `).all(req.params.id);
-  const bookings = db.prepare(`
-    SELECT b.*, r.room_name, u.name as occupant_user_name
-    FROM rental_bookings b
-    LEFT JOIN rental_rooms r ON r.id = b.room_id
-    LEFT JOIN users u ON u.id = b.occupant_user_id
-    WHERE b.property_id = ?
-    ORDER BY b.status='active' DESC, b.check_in_date DESC
-  `).all(req.params.id);
-  const payments = db.prepare(`
-    SELECT * FROM rental_payments WHERE property_id = ? ORDER BY period_month DESC
-  `).all(req.params.id);
-  res.json({ ...prop, rooms, bookings, payments });
+router.get('/properties/:id', requirePermission('rentals', 'view'), async (req, res) => {
+  try {
+    const prop = await pg.get(`
+      SELECT p.*, s.name as site_name FROM rental_properties p
+      LEFT JOIN sites s ON s.id = p.site_id
+      WHERE p.id = ?
+    `, req.params.id);
+    if (!prop) return res.status(404).json({ error: 'Not found' });
+    const rooms = await pg.all(`
+      SELECT r.*,
+             (SELECT COUNT(*) FROM rental_bookings b WHERE b.room_id = r.id AND b.status='active') as occupant_count
+      FROM rental_rooms r WHERE r.property_id = ? ORDER BY r.id
+    `, req.params.id);
+    const bookings = await pg.all(`
+      SELECT b.*, r.room_name, u.name as occupant_user_name
+      FROM rental_bookings b
+      LEFT JOIN rental_rooms r ON r.id = b.room_id
+      LEFT JOIN users u ON u.id = b.occupant_user_id
+      WHERE b.property_id = ?
+      ORDER BY b.status='active' DESC, b.check_in_date DESC
+    `, req.params.id);
+    const payments = await pg.all(`
+      SELECT * FROM rental_payments WHERE property_id = ? ORDER BY period_month DESC
+    `, req.params.id);
+    res.json({ ...prop, rooms, bookings, payments });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/properties', requirePermission('rentals', 'create'), (req, res) => {
+router.post('/properties', requirePermission('rentals', 'create'), async (req, res) => {
   try {
     const b = req.body;
     if (!b.name) return res.status(400).json({ error: 'Name is required' });
-    const db = getDb();
-    const r = db.prepare(`
+    const r = await pg.run(`
       INSERT INTO rental_properties (
         name, address, city, state, pincode,
         landlord_name, landlord_phone, landlord_email,
@@ -146,7 +149,7 @@ router.post('/properties', requirePermission('rentals', 'create'), (req, res) =>
         bedrooms, total_capacity, amenities, agreement_file_url,
         status, notes, site_id, created_by
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
+    `,
       b.name, b.address || null, b.city || null, b.state || null, b.pincode || null,
       b.landlord_name || null, b.landlord_phone || null, b.landlord_email || null,
       b.monthly_rent || 0, b.deposit_paid || 0, b.agreement_start_date || null, b.agreement_end_date || null,
@@ -157,66 +160,66 @@ router.post('/properties', requirePermission('rentals', 'create'), (req, res) =>
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.put('/properties/:id', requirePermission('rentals', 'edit'), (req, res) => {
+router.put('/properties/:id', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const b = req.body;
-    const db = getDb();
     const fields = ['name','address','city','state','pincode','landlord_name','landlord_phone','landlord_email','monthly_rent','deposit_paid','agreement_start_date','agreement_end_date','bedrooms','total_capacity','amenities','agreement_file_url','status','notes','site_id'];
     const sets = []; const vals = [];
     for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); vals.push(b[f]); }
     if (!sets.length) return res.status(400).json({ error: 'No fields' });
     sets.push('updated_at=CURRENT_TIMESTAMP');
     vals.push(req.params.id);
-    db.prepare(`UPDATE rental_properties SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+    await pg.run(`UPDATE rental_properties SET ${sets.join(', ')} WHERE id=?`, ...vals);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/properties/:id', requirePermission('rentals', 'delete'), (req, res) => {
-  const db = getDb();
-  db.prepare('DELETE FROM rental_payments WHERE property_id=?').run(req.params.id);
-  db.prepare('DELETE FROM rental_bookings WHERE property_id=?').run(req.params.id);
-  db.prepare('DELETE FROM rental_rooms WHERE property_id=?').run(req.params.id);
-  db.prepare('DELETE FROM rental_properties WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/properties/:id', requirePermission('rentals', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM rental_payments WHERE property_id=?', req.params.id);
+    await pg.run('DELETE FROM rental_bookings WHERE property_id=?', req.params.id);
+    await pg.run('DELETE FROM rental_rooms WHERE property_id=?', req.params.id);
+    await pg.run('DELETE FROM rental_properties WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------- ROOMS ----------
-router.post('/properties/:property_id/rooms', requirePermission('rentals', 'create'), (req, res) => {
+router.post('/properties/:property_id/rooms', requirePermission('rentals', 'create'), async (req, res) => {
   try {
     const b = req.body;
     if (!b.room_name) return res.status(400).json({ error: 'Room name required' });
-    const r = getDb().prepare(`
+    const r = await pg.run(`
       INSERT INTO rental_rooms (property_id, room_name, capacity, status, notes)
       VALUES (?, ?, ?, ?, ?)
-    `).run(req.params.property_id, b.room_name, b.capacity || 1, b.status || 'available', b.notes || null);
+    `, req.params.property_id, b.room_name, b.capacity || 1, b.status || 'available', b.notes || null);
     res.status(201).json({ id: r.lastInsertRowid });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.put('/rooms/:id', requirePermission('rentals', 'edit'), (req, res) => {
+router.put('/rooms/:id', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const b = req.body;
-    const db = getDb();
     const fields = ['room_name','capacity','status','notes'];
     const sets = []; const vals = [];
     for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); vals.push(b[f]); }
     if (!sets.length) return res.status(400).json({ error: 'No fields' });
     vals.push(req.params.id);
-    db.prepare(`UPDATE rental_rooms SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+    await pg.run(`UPDATE rental_rooms SET ${sets.join(', ')} WHERE id=?`, ...vals);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/rooms/:id', requirePermission('rentals', 'delete'), (req, res) => {
-  const db = getDb();
-  db.prepare('DELETE FROM rental_bookings WHERE room_id=?').run(req.params.id);
-  db.prepare('DELETE FROM rental_rooms WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/rooms/:id', requirePermission('rentals', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM rental_bookings WHERE room_id=?', req.params.id);
+    await pg.run('DELETE FROM rental_rooms WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------- BOOKINGS ----------
-router.get('/bookings', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/bookings', requirePermission('rentals', 'view'), async (req, res) => {
   try {
     const { status, occupant_user_id, site_id } = req.query;
     let sql = `
@@ -233,37 +236,35 @@ router.get('/bookings', requirePermission('rentals', 'view'), (req, res) => {
     if (status) { sql += ' AND b.status=?'; params.push(status); }
     if (occupant_user_id) { sql += ' AND b.occupant_user_id=?'; params.push(occupant_user_id); }
     if (site_id) { sql += ' AND b.site_id=?'; params.push(site_id); }
-    sql += ' ORDER BY b.status="active" DESC, b.check_in_date DESC';
-    res.json(getDb().prepare(sql).all(...params));
+    sql += " ORDER BY b.status='active' DESC, b.check_in_date DESC";
+    res.json(await pg.all(sql, ...params));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/bookings', requirePermission('rentals', 'create'), (req, res) => {
+router.post('/bookings', requirePermission('rentals', 'create'), async (req, res) => {
   try {
     const b = req.body;
     if (!b.room_id || !b.check_in_date) return res.status(400).json({ error: 'room_id and check_in_date required' });
     if (!b.occupant_user_id && !b.occupant_name) return res.status(400).json({ error: 'Pick a user or type occupant name' });
-    const db = getDb();
-    const room = db.prepare('SELECT property_id, capacity, status FROM rental_rooms WHERE id=?').get(b.room_id);
+    const room = await pg.get('SELECT property_id, capacity, status FROM rental_rooms WHERE id=?', b.room_id);
     if (!room) return res.status(404).json({ error: 'Room not found' });
-    const tx = db.transaction(() => {
-      const r = db.prepare(`
+    const id = await pg.tx(async (t) => {
+      const r = await t.run(`
         INSERT INTO rental_bookings (
           room_id, property_id, occupant_user_id, occupant_name, occupant_phone,
           check_in_date, check_out_date, site_id, rent_share, deposit_collected,
           status, notes, created_by
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
+      `,
         b.room_id, room.property_id, b.occupant_user_id || null, b.occupant_name || null, b.occupant_phone || null,
         b.check_in_date, b.check_out_date || null, b.site_id || null,
         b.rent_share || 0, b.deposit_collected || 0,
         'active', b.notes || null, req.user.id
       );
       // Mark room occupied
-      db.prepare(`UPDATE rental_rooms SET status='occupied' WHERE id=?`).run(b.room_id);
+      await t.run(`UPDATE rental_rooms SET status='occupied' WHERE id=?`, b.room_id);
       return r.lastInsertRowid;
     });
-    const id = tx();
     // Notify the occupant if they're a user
     if (b.occupant_user_id) {
       try {
@@ -280,55 +281,53 @@ router.post('/bookings', requirePermission('rentals', 'create'), (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.put('/bookings/:id', requirePermission('rentals', 'edit'), (req, res) => {
+router.put('/bookings/:id', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const b = req.body;
-    const db = getDb();
     const fields = ['occupant_user_id','occupant_name','occupant_phone','check_in_date','check_out_date','actual_checkout_date','site_id','rent_share','deposit_collected','status','notes'];
     const sets = []; const vals = [];
     for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); vals.push(b[f]); }
     if (!sets.length) return res.status(400).json({ error: 'No fields' });
     vals.push(req.params.id);
-    db.prepare(`UPDATE rental_bookings SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+    await pg.run(`UPDATE rental_bookings SET ${sets.join(', ')} WHERE id=?`, ...vals);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/bookings/:id/check-out', requirePermission('rentals', 'edit'), (req, res) => {
+router.post('/bookings/:id/check-out', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
-    const db = getDb();
-    const booking = db.prepare('SELECT * FROM rental_bookings WHERE id=?').get(req.params.id);
+    const booking = await pg.get('SELECT * FROM rental_bookings WHERE id=?', req.params.id);
     if (!booking) return res.status(404).json({ error: 'Not found' });
-    const tx = db.transaction(() => {
-      db.prepare(`
+    await pg.tx(async (t) => {
+      await t.run(`
         UPDATE rental_bookings
         SET status='completed',
-            actual_checkout_date = COALESCE(?, date('now')),
+            actual_checkout_date = COALESCE(?, ?),
             notes = COALESCE(?, notes)
         WHERE id=?
-      `).run(req.body.actual_checkout_date || null, req.body.notes || null, req.params.id);
+      `, req.body.actual_checkout_date || null, todayStr(), req.body.notes || null, req.params.id);
       // If no other active bookings on this room, mark available
-      const others = db.prepare(`SELECT COUNT(*) as c FROM rental_bookings WHERE room_id=? AND status='active' AND id != ?`).get(booking.room_id, req.params.id).c;
-      if (others === 0) db.prepare(`UPDATE rental_rooms SET status='available' WHERE id=?`).run(booking.room_id);
+      const others = (await t.get(`SELECT COUNT(*) as c FROM rental_bookings WHERE room_id=? AND status='active' AND id != ?`, booking.room_id, req.params.id)).c;
+      if (others === 0) await t.run(`UPDATE rental_rooms SET status='available' WHERE id=?`, booking.room_id);
     });
-    tx();
     res.json({ message: 'Checked out' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/bookings/:id', requirePermission('rentals', 'delete'), (req, res) => {
-  const db = getDb();
-  const booking = db.prepare('SELECT room_id FROM rental_bookings WHERE id=?').get(req.params.id);
-  db.prepare('DELETE FROM rental_bookings WHERE id=?').run(req.params.id);
-  if (booking) {
-    const others = db.prepare(`SELECT COUNT(*) as c FROM rental_bookings WHERE room_id=? AND status='active'`).get(booking.room_id).c;
-    if (others === 0) db.prepare(`UPDATE rental_rooms SET status='available' WHERE id=?`).run(booking.room_id);
-  }
-  res.json({ message: 'Deleted' });
+router.delete('/bookings/:id', requirePermission('rentals', 'delete'), async (req, res) => {
+  try {
+    const booking = await pg.get('SELECT room_id FROM rental_bookings WHERE id=?', req.params.id);
+    await pg.run('DELETE FROM rental_bookings WHERE id=?', req.params.id);
+    if (booking) {
+      const others = (await pg.get(`SELECT COUNT(*) as c FROM rental_bookings WHERE room_id=? AND status='active'`, booking.room_id)).c;
+      if (others === 0) await pg.run(`UPDATE rental_rooms SET status='available' WHERE id=?`, booking.room_id);
+    }
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------- PAYMENTS ----------
-router.get('/payments', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/payments', requirePermission('rentals', 'view'), async (req, res) => {
   try {
     const { property_id, period_month } = req.query;
     let sql = `
@@ -341,16 +340,15 @@ router.get('/payments', requirePermission('rentals', 'view'), (req, res) => {
     if (property_id) { sql += ' AND pay.property_id=?'; params.push(property_id); }
     if (period_month) { sql += ' AND pay.period_month=?'; params.push(period_month); }
     sql += ' ORDER BY pay.period_month DESC, pay.created_at DESC';
-    res.json(getDb().prepare(sql).all(...params));
+    res.json(await pg.all(sql, ...params));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/payments', requirePermission('rentals', 'create'), (req, res) => {
+router.post('/payments', requirePermission('rentals', 'create'), async (req, res) => {
   try {
     const b = req.body;
     if (!b.property_id || !b.period_month) return res.status(400).json({ error: 'property_id and period_month required' });
-    const db = getDb();
-    db.prepare(`
+    await pg.run(`
       INSERT INTO rental_payments (property_id, period_month, amount_paid, paid_date, paid_via, transaction_ref, receipt_url, notes, created_by)
       VALUES (?,?,?,?,?,?,?,?,?)
       ON CONFLICT(property_id, period_month) DO UPDATE SET
@@ -358,9 +356,9 @@ router.post('/payments', requirePermission('rentals', 'create'), (req, res) => {
         paid_date=excluded.paid_date,
         paid_via=excluded.paid_via,
         transaction_ref=excluded.transaction_ref,
-        receipt_url=COALESCE(excluded.receipt_url, receipt_url),
+        receipt_url=COALESCE(excluded.receipt_url, rental_payments.receipt_url),
         notes=excluded.notes
-    `).run(
+    `,
       b.property_id, b.period_month, b.amount_paid || 0, b.paid_date || null,
       b.paid_via || null, b.transaction_ref || null, b.receipt_url || null,
       b.notes || null, req.user.id
@@ -369,16 +367,17 @@ router.post('/payments', requirePermission('rentals', 'create'), (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/payments/:id', requirePermission('rentals', 'delete'), (req, res) => {
-  getDb().prepare('DELETE FROM rental_payments WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/payments/:id', requirePermission('rentals', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM rental_payments WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ---------- RENT REQUESTS (mam's "Raise Rent" workflow) ----------
 
-router.get('/rent-requests', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/rent-requests', requirePermission('rentals', 'view'), async (req, res) => {
   try {
-    const db = getDb();
     const { month, site_id, status, arrange_for } = req.query;
     let sql = `
       SELECT rr.*, s.name as site_name_live, u.name as created_by_name,
@@ -396,26 +395,25 @@ router.get('/rent-requests', requirePermission('rentals', 'view'), (req, res) =>
     if (status) { sql += ' AND rr.status = ?'; params.push(status); }
     if (arrange_for) { sql += ' AND rr.arrange_for = ?'; params.push(arrange_for); }
     sql += ' ORDER BY rr.created_at DESC';
-    res.json(db.prepare(sql).all(...params));
+    res.json(await pg.all(sql, ...params));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.get('/rent-requests/stats', requirePermission('rentals', 'view'), (req, res) => {
+router.get('/rent-requests/stats', requirePermission('rentals', 'view'), async (req, res) => {
   try {
-    const db = getDb();
-    const total = db.prepare('SELECT COUNT(*) as c FROM rent_requests WHERE COALESCE(inactive,0)=0').get().c;
-    const pending = db.prepare(`SELECT COUNT(*) as c FROM rent_requests WHERE status='pending' AND COALESCE(inactive,0)=0`).get().c;
-    const approved = db.prepare(`SELECT COUNT(*) as c FROM rent_requests WHERE status='approved' AND COALESCE(inactive,0)=0`).get().c;
-    const paid = db.prepare(`SELECT COUNT(*) as c FROM rent_requests WHERE status='paid'`).get().c;
-    const rejected = db.prepare(`SELECT COUNT(*) as c FROM rent_requests WHERE status='rejected'`).get().c;
-    const inactive = db.prepare(`SELECT COUNT(*) as c FROM rent_requests WHERE COALESCE(inactive,0)=1`).get().c;
-    const totalAmount = db.prepare(`SELECT COALESCE(SUM(rent_amount),0) as s FROM rent_requests WHERE status='paid'`).get().s;
-    const pendingAmount = db.prepare(`SELECT COALESCE(SUM(rent_amount),0) as s FROM rent_requests WHERE status IN ('pending','approved') AND COALESCE(inactive,0)=0`).get().s;
+    const total = (await pg.get('SELECT COUNT(*) as c FROM rent_requests WHERE COALESCE(inactive,0)=0')).c;
+    const pending = (await pg.get(`SELECT COUNT(*) as c FROM rent_requests WHERE status='pending' AND COALESCE(inactive,0)=0`)).c;
+    const approved = (await pg.get(`SELECT COUNT(*) as c FROM rent_requests WHERE status='approved' AND COALESCE(inactive,0)=0`)).c;
+    const paid = (await pg.get(`SELECT COUNT(*) as c FROM rent_requests WHERE status='paid'`)).c;
+    const rejected = (await pg.get(`SELECT COUNT(*) as c FROM rent_requests WHERE status='rejected'`)).c;
+    const inactive = (await pg.get(`SELECT COUNT(*) as c FROM rent_requests WHERE COALESCE(inactive,0)=1`)).c;
+    const totalAmount = (await pg.get(`SELECT COALESCE(SUM(rent_amount),0) as s FROM rent_requests WHERE status='paid'`)).s;
+    const pendingAmount = (await pg.get(`SELECT COALESCE(SUM(rent_amount),0) as s FROM rent_requests WHERE status IN ('pending','approved') AND COALESCE(inactive,0)=0`)).s;
     res.json({ total, pending, approved, paid, rejected, inactive, total_paid_amount: totalAmount, pending_amount: pendingAmount });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res) => {
+router.post('/rent-requests', requirePermission('rentals', 'create'), async (req, res) => {
   try {
     const b = req.body;
     if (!b.owner_name || !b.rent_month || !b.arrange_for) {
@@ -424,10 +422,9 @@ router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res)
     if (!['SEPL', 'Contractor'].includes(b.arrange_for)) {
       return res.status(400).json({ error: 'arrange_for must be SEPL or Contractor' });
     }
-    const db = getDb();
-    const { nextSequence } = require('../db/nextSequence');
+    const { nextSequencePg } = require('../db/nextSequence');
     const yr = new Date().getFullYear();
-    const requestNo = nextSequence(db, 'rent_requests', 'request_no', `RR-${yr}-`, { startFrom: 0, pad: 4 });
+    const requestNo = await nextSequencePg(pg, 'rent_requests', 'request_no', `RR-${yr}-`, { startFrom: 0, pad: 4 });
     // Validate payment_mode and clear non-relevant fields so each row
     // only carries the data for the selected mode.
     const mode = ['Bank', 'UPI', 'Scanner'].includes(b.payment_mode) ? b.payment_mode : 'Bank';
@@ -436,7 +433,7 @@ router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res)
     const upiId = mode === 'UPI' ? (b.upi_id || null) : null;
     const scannerUrl = mode === 'Scanner' ? (b.scanner_url || null) : null;
 
-    const r = db.prepare(`
+    const r = await pg.run(`
       INSERT INTO rent_requests (
         request_no, site_id, site_name, arrange_for, contractor_name,
         employee_user_id, employee_name,
@@ -446,7 +443,7 @@ router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res)
         pincode, pincode_city, metro_type,
         rent_month, rent_amount, pay_by_day, notes, created_by
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `).run(
+    `,
       requestNo, b.site_id || null, b.site_name || null,
       b.arrange_for, b.contractor_name || null,
       b.employee_user_id || null, b.employee_name || null,
@@ -460,13 +457,13 @@ router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res)
     // Notify approvers (admins + anyone with rentals.approve)
     try {
       const { notifyMany } = require('../lib/push');
-      const approvers = db.prepare(`
+      const approvers = (await pg.all(`
         SELECT DISTINCT u.id FROM users u
         LEFT JOIN user_roles ur ON ur.user_id = u.id
         LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
         WHERE COALESCE(u.active,1)=1
           AND (u.role='admin' OR (rp.module='rentals' AND rp.can_approve=1))
-      `).all().map(x => x.id);
+      `)).map(x => x.id);
       notifyMany(approvers, {
         title: `🏠 ${requestNo} — Rent for ${b.rent_month}`,
         body: `${b.owner_name}${b.site_name ? ` · ${b.site_name}` : ''} · Rs ${(b.rent_amount || 0).toLocaleString('en-IN')}`,
@@ -478,10 +475,9 @@ router.post('/rent-requests', requirePermission('rentals', 'create'), (req, res)
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.put('/rent-requests/:id', requirePermission('rentals', 'edit'), (req, res) => {
+router.put('/rent-requests/:id', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const b = req.body;
-    const db = getDb();
     const fields = [
       'site_id','site_name','arrange_for','contractor_name',
       'employee_user_id','employee_name',
@@ -495,18 +491,17 @@ router.put('/rent-requests/:id', requirePermission('rentals', 'edit'), (req, res
     for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); vals.push(b[f]); }
     if (!sets.length) return res.status(400).json({ error: 'No fields' });
     vals.push(req.params.id);
-    db.prepare(`UPDATE rent_requests SET ${sets.join(', ')} WHERE id=?`).run(...vals);
+    await pg.run(`UPDATE rent_requests SET ${sets.join(', ')} WHERE id=?`, ...vals);
     res.json({ message: 'Updated' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/rent-requests/:id/approve', requirePermission('rentals', 'approve'), (req, res) => {
+router.post('/rent-requests/:id/approve', requirePermission('rentals', 'approve'), async (req, res) => {
   try {
-    const db = getDb();
-    db.prepare(`UPDATE rent_requests SET status='approved', approved_by=?, approved_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(req.user.id, req.params.id);
+    await pg.run(`UPDATE rent_requests SET status='approved', approved_by=?, approved_at=CURRENT_TIMESTAMP WHERE id=?`,
+      req.user.id, req.params.id);
     // Push to creator
-    const r = db.prepare('SELECT request_no, created_by, owner_name FROM rent_requests WHERE id=?').get(req.params.id);
+    const r = await pg.get('SELECT request_no, created_by, owner_name FROM rent_requests WHERE id=?', req.params.id);
     if (r) {
       try {
         const { notify } = require('../lib/push');
@@ -522,14 +517,13 @@ router.post('/rent-requests/:id/approve', requirePermission('rentals', 'approve'
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/rent-requests/:id/reject', requirePermission('rentals', 'approve'), (req, res) => {
+router.post('/rent-requests/:id/reject', requirePermission('rentals', 'approve'), async (req, res) => {
   try {
     const { reason } = req.body;
     if (!reason || reason.trim().length < 5) return res.status(400).json({ error: 'Reason required (min 5 chars)' });
-    const db = getDb();
-    db.prepare(`UPDATE rent_requests SET status='rejected', reject_reason=?, approved_by=?, approved_at=CURRENT_TIMESTAMP WHERE id=?`)
-      .run(reason.trim(), req.user.id, req.params.id);
-    const r = db.prepare('SELECT request_no, created_by FROM rent_requests WHERE id=?').get(req.params.id);
+    await pg.run(`UPDATE rent_requests SET status='rejected', reject_reason=?, approved_by=?, approved_at=CURRENT_TIMESTAMP WHERE id=?`,
+      reason.trim(), req.user.id, req.params.id);
+    const r = await pg.get('SELECT request_no, created_by FROM rent_requests WHERE id=?', req.params.id);
     if (r) {
       try {
         const { notify } = require('../lib/push');
@@ -544,17 +538,16 @@ router.post('/rent-requests/:id/reject', requirePermission('rentals', 'approve')
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/rent-requests/:id/mark-paid', requirePermission('rentals', 'edit'), (req, res) => {
+router.post('/rent-requests/:id/mark-paid', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const { paid_via, transaction_ref, receipt_url } = req.body;
-    const db = getDb();
-    db.prepare(`
+    await pg.run(`
       UPDATE rent_requests SET
         status='paid', paid_by=?, paid_at=CURRENT_TIMESTAMP,
         paid_via=?, transaction_ref=?, receipt_url=COALESCE(?, receipt_url)
       WHERE id=?
-    `).run(req.user.id, paid_via || null, transaction_ref || null, receipt_url || null, req.params.id);
-    const r = db.prepare('SELECT request_no, created_by, owner_name, rent_amount FROM rent_requests WHERE id=?').get(req.params.id);
+    `, req.user.id, paid_via || null, transaction_ref || null, receipt_url || null, req.params.id);
+    const r = await pg.get('SELECT request_no, created_by, owner_name, rent_amount FROM rent_requests WHERE id=?', req.params.id);
     if (r) {
       try {
         const { notify } = require('../lib/push');
@@ -569,26 +562,28 @@ router.post('/rent-requests/:id/mark-paid', requirePermission('rentals', 'edit')
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.delete('/rent-requests/:id', requirePermission('rentals', 'delete'), (req, res) => {
-  getDb().prepare('DELETE FROM rent_requests WHERE id=?').run(req.params.id);
-  res.json({ message: 'Deleted' });
+router.delete('/rent-requests/:id', requirePermission('rentals', 'delete'), async (req, res) => {
+  try {
+    await pg.run('DELETE FROM rent_requests WHERE id=?', req.params.id);
+    res.json({ message: 'Deleted' });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Mark inactive — rental relationship ended (vacated). No more rent
 // expected. Mam: 'when we inactive not payment log'.
-router.post('/rent-requests/:id/mark-inactive', requirePermission('rentals', 'edit'), (req, res) => {
+router.post('/rent-requests/:id/mark-inactive', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
     const { reason } = req.body;
-    getDb().prepare(`UPDATE rent_requests SET inactive=1, inactive_at=CURRENT_TIMESTAMP, inactive_reason=? WHERE id=?`)
-      .run(reason || null, req.params.id);
+    await pg.run(`UPDATE rent_requests SET inactive=1, inactive_at=CURRENT_TIMESTAMP, inactive_reason=? WHERE id=?`,
+      reason || null, req.params.id);
     res.json({ message: 'Marked inactive' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post('/rent-requests/:id/mark-active', requirePermission('rentals', 'edit'), (req, res) => {
+router.post('/rent-requests/:id/mark-active', requirePermission('rentals', 'edit'), async (req, res) => {
   try {
-    getDb().prepare(`UPDATE rent_requests SET inactive=0, inactive_at=NULL, inactive_reason=NULL WHERE id=?`)
-      .run(req.params.id);
+    await pg.run(`UPDATE rent_requests SET inactive=0, inactive_at=NULL, inactive_reason=NULL WHERE id=?`,
+      req.params.id);
     res.json({ message: 'Marked active' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -11,10 +11,13 @@
 // `stamps[k]` = when step k completed (null if not yet / not captured).
 // `current_key` = the step currently in progress (for "waiting NOW" elapsed).
 
-const safeAll = (db, sql, ...p) => { try { return db.prepare(sql).all(...p); } catch (e) { return []; } };
+// `db` = the async Postgres adapter (server/db/pg.js); every rows(db) is async
+// and the board / scoring callers `await def.rows(pg)`.
+const safeAll = async (db, sql, ...p) => { try { return await db.all(sql, ...p); } catch (e) { return []; } };
 
-// Parse a SQLite timestamp as UTC (CURRENT_TIMESTAMP is 'YYYY-MM-DD HH:MM:SS'
-// in UTC; without the Z, Date.parse would read it as local time). Shared with
+// Parse a DB timestamp as UTC (the TEXT datetime columns hold 'YYYY-MM-DD HH:MM:SS'
+// in UTC, same as SQLite's CURRENT_TIMESTAMP was; without the Z, Date.parse would
+// read it as local time). Shared with
 // the same logic Payables uses so every module's clock agrees.
 function tsMs(s) {
   if (s == null) return null;
@@ -45,8 +48,8 @@ const MODULE_DEFS = {
       { key: '3', label: 'L3 Approval (MD)' },
       { key: '5', label: 'Payment Release' },
     ],
-    rows(db) {
-      const recs = safeAll(db, `
+    async rows(db) {
+      const recs = await safeAll(db, `
         SELECT id, request_no, vendor_name, employee_name, category, purpose,
                current_step, status, created_at, created_by
           FROM payment_requests ORDER BY created_at DESC LIMIT 500`);
@@ -56,8 +59,8 @@ const MODULE_DEFS = {
         for (let i = 0; i < ids.length; i += 900) {
           const chunk = ids.slice(i, i + 900);
           const ph = chunk.map(() => '?').join(',');
-          for (const a of safeAll(db, `
-            SELECT request_id, step, MIN(approved_at) at FROM payment_approvals
+          for (const a of await safeAll(db, `
+            SELECT request_id, step, MIN(approved_at) AS at FROM payment_approvals
              WHERE action='approved' AND request_id IN (${ph})
              GROUP BY request_id, step`, ...chunk)) {
             (appr[a.request_id] = appr[a.request_id] || {})[String(a.step)] = a.at;
@@ -89,11 +92,11 @@ const MODULE_DEFS = {
       { key: 'negotiation', label: 'Negotiation' },
       { key: 'winloss', label: 'Win / Loss' },
     ],
-    rows(db) {
-      return safeAll(db, `
+    async rows(db) {
+      return (await safeAll(db, `
         SELECT id, lead_no, client_name, company_name, created_at, created_by,
                quotation_submit_date, closed_at, final_status
-          FROM crm_funnel ORDER BY created_at DESC LIMIT 500`).map(r => {
+          FROM crm_funnel ORDER BY created_at DESC LIMIT 500`)).map(r => {
         const stamps = { quotation: r.quotation_submit_date || null, negotiation: null, winloss: r.closed_at || null };
         return {
           id: r.id,
@@ -124,13 +127,13 @@ const MODULE_DEFS = {
       { key: 'quotation', label: 'Quotation' },
       { key: 'result', label: 'Result (Win/Loss)' },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
-      return safeAll(db, `
+      return (await safeAll(db, `
         SELECT id, lead_no, client_name, created_at, created_by, current_stage,
                qualified_date, meeting_date, mom_date, drawing_date, boq_date,
                quotation_sent_date, result_date
-          FROM sales_funnel ORDER BY created_at DESC LIMIT 500`).map(r => {
+          FROM sales_funnel ORDER BY created_at DESC LIMIT 500`)).map(r => {
         const stamps = {
           qualified: r.qualified_date || null, meeting: r.meeting_date || null,
           mom: r.mom_date || null, drawing: r.drawing_date || null, boq: r.boq_date || null,
@@ -158,10 +161,10 @@ const MODULE_DEFS = {
       { key: 'approval', label: 'Approval', default_sla: 168 },
       { key: 'won', label: 'Won', default_sla: 0 },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
       const order = steps.map(s => s.key);
-      const deals = safeAll(db, `
+      const deals = await safeAll(db, `
         SELECT id, deal_no, client_name, company, created_at, stage, status, owner_id
           FROM solar_deals ORDER BY created_at DESC LIMIT 500`);
       const ids = deals.map(d => d.id);
@@ -171,8 +174,8 @@ const MODULE_DEFS = {
         for (let i = 0; i < ids.length; i += 900) {
           const chunk = ids.slice(i, i + 900);
           const ph = chunk.map(() => '?').join(',');
-          for (const e of safeAll(db, `
-            SELECT deal_id, to_stage, MIN(created_at) at FROM solar_deal_events
+          for (const e of await safeAll(db, `
+            SELECT deal_id, to_stage, MIN(created_at) AS at FROM solar_deal_events
              WHERE to_stage IS NOT NULL AND deal_id IN (${ph})
              GROUP BY deal_id, to_stage`, ...chunk)) {
             (entry[e.deal_id] = entry[e.deal_id] || {})[e.to_stage] = e.at;
@@ -205,11 +208,11 @@ const MODULE_DEFS = {
       { key: 'negotiation', label: 'Under Negotiation' },
       { key: 'decided', label: 'Accepted / Rejected' },
     ],
-    rows(db) {
+    async rows(db) {
       const statusStep = { draft: 'draft', sent: 'sent', negotiation: 'negotiation', accepted: 'decided', rejected: 'decided' };
-      return safeAll(db, `
+      return (await safeAll(db, `
         SELECT id, quotation_number, status, created_at, created_by
-          FROM quotations ORDER BY created_at DESC LIMIT 500`).map(r => {
+          FROM quotations ORDER BY created_at DESC LIMIT 500`)).map(r => {
         // Only the draft timestamp exists; later transitions aren't stamped yet
         // (mark-done stamps fill them in). RACI assignment still works per step.
         const stamps = { draft: r.created_at || null, sent: null, negotiation: null, decided: null };
@@ -237,9 +240,9 @@ const MODULE_DEFS = {
       { key: 'dispatch', label: 'Dispatch / Delivery' },
       { key: 'purchase_bill', label: 'Purchase Bill' },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
-      return safeAll(db, `
+      return (await safeAll(db, `
         SELECT i.id, i.indent_number, i.site_name, i.created_at, i.created_by,
                i.l1_at, i.l2_at, i.crm_at, i.approved_at, i.status,
                (SELECT MIN(vp.po_l1_at) FROM vendor_pos vp WHERE vp.indent_id=i.id AND COALESCE(vp.cancelled,0)=0) AS po_l1_at,
@@ -250,7 +253,7 @@ const MODULE_DEFS = {
                (SELECT MIN(pb.created_at) FROM purchase_bills pb
                   JOIN vendor_pos vp ON vp.id=pb.vendor_po_id
                  WHERE vp.indent_id=i.id) AS bill_at
-          FROM indents i ORDER BY i.created_at DESC LIMIT 500`).map(r => {
+          FROM indents i ORDER BY i.created_at DESC LIMIT 500`)).map(r => {
         const stamps = {
           raised: r.created_at || null, l1: r.l1_at || null, l2: r.l2_at || null,
           crm: r.crm_at || null, approved: r.approved_at || null,
@@ -272,12 +275,12 @@ const MODULE_DEFS = {
       { key: 'raised', label: 'Cheque Raised' },
       { key: 'settled', label: 'Cleared / Settled' },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
-      return safeAll(db, `
+      return (await safeAll(db, `
         SELECT c.id, c.cheque_number, c.payee_to, c.bank_name, c.raised_at, c.raised_by, c.current_status,
                (SELECT MIN(ca.action_at) FROM cheque_actions ca WHERE ca.cheque_id=c.id) AS first_action_at
-          FROM cheques c ORDER BY c.raised_at DESC LIMIT 500`).map(r => {
+          FROM cheques c ORDER BY c.raised_at DESC LIMIT 500`)).map(r => {
         const stamps = { raised: r.raised_at || null, settled: r.first_action_at || null };
         return {
           id: r.id, title: r.cheque_number || ('CHQ #' + r.id),
@@ -308,9 +311,9 @@ const MODULE_DEFS = {
       { key: '13', label: 'Mobilization Advance' },
       { key: '14', label: 'Site Entry & Setup' },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
-      const recs = safeAll(db, `
+      const recs = await safeAll(db, `
         SELECT sh.id, sh.scope_description, sh.current_step, sh.created_at, sh.created_by, s.name AS site_name
           FROM subcon_hiring sh LEFT JOIN sites s ON s.id = sh.site_id
          ORDER BY sh.created_at DESC LIMIT 500`);
@@ -320,7 +323,7 @@ const MODULE_DEFS = {
         for (let i = 0; i < ids.length; i += 900) {
           const chunk = ids.slice(i, i + 900);
           const ph = chunk.map(() => '?').join(',');
-          for (const st of safeAll(db, `
+          for (const st of await safeAll(db, `
             SELECT hiring_id, step_no, completed_at FROM subcon_hiring_steps
              WHERE hiring_id IN (${ph})`, ...chunk)) {
             (byId[st.hiring_id] = byId[st.hiring_id] || {})[String(st.step_no)] = st.completed_at || null;
@@ -353,11 +356,11 @@ const MODULE_DEFS = {
       { key: 'submit', label: 'Submit' },
       { key: 'approve', label: 'Approve' },
     ],
-    rows(db) {
-      return safeAll(db, `
+    async rows(db) {
+      return (await safeAll(db, `
         SELECT id, report_date, submission_time, created_at, submitted_by, approved_by,
                approval_status, site_id
-          FROM dpr ORDER BY report_date DESC, id DESC LIMIT 500`).map(r => ({
+          FROM dpr ORDER BY report_date DESC, id DESC LIMIT 500`)).map(r => ({
         id: r.id,
         title: 'DPR ' + (r.report_date || ('#' + r.id)),
         subtitle: 'Site #' + (r.site_id || '—'),
@@ -382,8 +385,8 @@ const MODULE_DEFS = {
       { key: 'send', label: 'Send' },
       { key: 'paid', label: 'Paid' },
     ],
-    rows(db) {
-      const bills = safeAll(db, `
+    async rows(db) {
+      const bills = await safeAll(db, `
         SELECT id, bill_number, bill_type, customer_name, project_name,
                created_at, created_by, sent_at
           FROM sales_bills WHERE bill_type IS NOT NULL
@@ -394,7 +397,7 @@ const MODULE_DEFS = {
       for (let i = 0; i < ids.length; i += 400) {
         const chunk = ids.slice(i, i + 400);
         const ph = chunk.map(() => '?').join(',');
-        for (const l of safeAll(db, `
+        for (const l of await safeAll(db, `
           SELECT sales_bill_id, status, changed_by, changed_at
             FROM sales_bill_status_log WHERE sales_bill_id IN (${ph})
            ORDER BY changed_at ASC`, ...chunk)) {
@@ -445,9 +448,9 @@ const MODULE_DEFS = {
       { key: 'promised', label: 'Promised' },
       { key: 'collected', label: 'Collected' },
     ],
-    rows(db) {
+    async rows(db) {
       const steps = this.steps;
-      const recs = safeAll(db, `
+      const recs = await safeAll(db, `
         SELECT id, client_name, invoice_number, invoice_date, outstanding_amount,
                owner_id, created_at, updated_at
           FROM receivables ORDER BY created_at DESC LIMIT 500`);
@@ -458,7 +461,7 @@ const MODULE_DEFS = {
         const chunk = ids.slice(i, i + 400);
         const ph = chunk.map(() => '?').join(',');
         // Earliest follow-up = Contacted; earliest one carrying a promise = Promised.
-        for (const f of safeAll(db, `
+        for (const f of await safeAll(db, `
           SELECT receivable_id, follow_up_date, promised_date, followed_by
             FROM collection_follow_ups WHERE receivable_id IN (${ph})
            ORDER BY follow_up_date ASC, id ASC`, ...chunk)) {
@@ -467,7 +470,7 @@ const MODULE_DEFS = {
           if (!e.promiseAt && f.promised_date) { e.promiseAt = f.follow_up_date; e.promiseBy = f.followed_by; }
         }
         // Latest payment = when Collected completed (ASC scan → last write wins).
-        for (const c of safeAll(db, `
+        for (const c of await safeAll(db, `
           SELECT receivable_id, collection_date, collected_by
             FROM collections WHERE receivable_id IN (${ph})
            ORDER BY collection_date ASC, id ASC`, ...chunk)) {
@@ -517,27 +520,27 @@ const MODULE_DEFS = {
 //                 Planned = that week's closures plus what is still open on them.
 //   slaJudged   — of the closed steps, how many had an SLA (on-time denominator).
 //   onTime      — of slaJudged, how many finished within SLA (the "Time" KPI).
-function raciUserWeek(db, userId, sinceDate, untilDate) {
+async function raciUserWeek(db, userId, sinceDate, untilDate) {
   const HOUR = 3600000;
   let stepsClosed = 0, slaJudged = 0, onTime = 0, openOnUser = 0;
   for (const key of Object.keys(MODULE_DEFS)) {
     const def = MODULE_DEFS[key];
     let recs;
-    try { recs = def.rows(db) || []; } catch { continue; }
+    try { recs = (await def.rows(db)) || []; } catch { continue; }
     if (!recs.length) continue;
     const ids = recs.map(r => r.id);
     const raciByRec = {};
     for (let i = 0; i < ids.length; i += 400) {
       const chunk = ids.slice(i, i + 400);
       const ph = chunk.map(() => '?').join(',');
-      for (const r of safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id IN (${ph})`, key, ...chunk)) {
+      for (const r of await safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id IN (${ph})`, key, ...chunk)) {
         (raciByRec[r.record_id] = raciByRec[r.record_id] || {})[r.step_key] = r;
       }
     }
     // Module-wide default RACI (record_id 0) — applies where a record has no own
     // assignment, so scoring matches the board's whole-module RACI (mam 2026-06-27).
     const md = {};
-    for (const r of safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id=0`, key)) md[r.step_key] = r;
+    for (const r of await safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id=0`, key)) md[r.step_key] = r;
     // Scorecard attribution: a step counts for a person ONLY where mam explicitly
     // named them in RACI — the per-record Responsible, else the whole-module
     // default (record_id 0). Deliberately NO fallback to the record's owner/
@@ -588,7 +591,7 @@ function raciUserWeek(db, userId, sinceDate, untilDate) {
 // (= done this week + still open on them), actual (= closed this week), pending,
 // the on-time tally, and up to 8 example pending record titles. Sorted in module
 // declaration order, then step order within each module.
-function raciUserWeekBreakdown(db, userId, sinceDate, untilDate) {
+async function raciUserWeekBreakdown(db, userId, sinceDate, untilDate) {
   const HOUR = 3600000;
   const acc = new Map();                              // `${module}|${stepKey}` -> tally
   const tallyFor = (mod, modLabel, stepKey, stepLabel, weight, commitment) => {
@@ -608,19 +611,19 @@ function raciUserWeekBreakdown(db, userId, sinceDate, untilDate) {
   for (const key of Object.keys(MODULE_DEFS)) {
     const def = MODULE_DEFS[key];
     let recs;
-    try { recs = def.rows(db) || []; } catch { continue; }
+    try { recs = (await def.rows(db)) || []; } catch { continue; }
     if (!recs.length) continue;
     const ids = recs.map(r => r.id);
     const raciByRec = {};
     for (let i = 0; i < ids.length; i += 400) {
       const chunk = ids.slice(i, i + 400);
       const ph = chunk.map(() => '?').join(',');
-      for (const r of safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id IN (${ph})`, key, ...chunk)) {
+      for (const r of await safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id IN (${ph})`, key, ...chunk)) {
         (raciByRec[r.record_id] = raciByRec[r.record_id] || {})[r.step_key] = r;
       }
     }
     const md = {};
-    for (const r of safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id=0`, key)) md[r.step_key] = r;
+    for (const r of await safeAll(db, `SELECT * FROM raci_assignment WHERE module=? AND record_id=0`, key)) md[r.step_key] = r;
     // Scorecard attribution: a step counts for a person ONLY where mam explicitly
     // named them in RACI — the per-record Responsible, else the whole-module
     // default (record_id 0). Deliberately NO fallback to the record's owner/

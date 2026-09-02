@@ -117,21 +117,24 @@ if (!process.env.ERP_DISABLE_SOLAR_SEED) {
 
 // One-time cleanup: strip CSV-import quote artifacts ("""M/s X""") and
 // extra whitespace from business_book text columns. Idempotent — only
-// updates rows where the cleaned value differs.
-try {
-  const { getDb } = require('./db/schema');
-  const db = getDb();
-  const cols = ['client_name', 'company_name', 'project_name', 'district', 'state', 'po_number', 'category', 'employee_assigned'];
-  const expr = (c) => `TRIM(REPLACE(REPLACE(REPLACE(REPLACE(${c}, '"', ''), CHAR(96), ''), CHAR(39), ''), CHAR(9), ' '))`;
-  let total = 0;
-  for (const c of cols) {
-    const r = db.prepare(`UPDATE business_book SET ${c} = ${expr(c)} WHERE ${c} IS NOT NULL AND ${c} != ${expr(c)}`).run();
-    total += r.changes || 0;
+// updates rows where the cleaned value differs. (Supabase migration:
+// now async fire-and-forget against Postgres; CHR() is the PG spelling
+// of CHAR().)
+(async () => {
+  try {
+    const pgdb = require('./db/pg');
+    const cols = ['client_name', 'company_name', 'project_name', 'district', 'state', 'po_number', 'category', 'employee_assigned'];
+    const expr = (c) => `TRIM(REPLACE(REPLACE(REPLACE(REPLACE(${c}, '"', ''), CHR(96), ''), CHR(39), ''), CHR(9), ' '))`;
+    let total = 0;
+    for (const c of cols) {
+      const r = await pgdb.run(`UPDATE business_book SET ${c} = ${expr(c)} WHERE ${c} IS NOT NULL AND ${c} != ${expr(c)}`);
+      total += r.changes || 0;
+    }
+    if (total > 0) console.log(`[cleanup] business_book: scrubbed ${total} cells`);
+  } catch (e) {
+    // Non-fatal — DB may not have business_book yet
   }
-  if (total > 0) console.log(`[cleanup] business_book: scrubbed ${total} cells`);
-} catch (e) {
-  // Non-fatal — DB may not have business_book yet
-}
+})();
 
 // Nightly DB backup scheduler — runs at 02:00 local time every day and
 // keeps the last 30 backups. Backups go to ~/erp-backups on the VPS (or
@@ -306,11 +309,11 @@ try {
 // without waiting for the 09:00 cron tick.  Uses the same auth
 // pattern as the CMD email manual trigger below.
 const { authMiddleware: _procReminderAuthMw } = require('./middleware/auth');
-app.post('/api/admin/procsch-reminder/run-now', _procReminderAuthMw, (req, res) => {
+app.post('/api/admin/procsch-reminder/run-now', _procReminderAuthMw, async (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   try {
     const { runOnce } = require('./scripts/procurementReminderCron');
-    const r = runOnce();
+    const r = await runOnce();
     res.json({ message: 'Reminder scan complete', ...r });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -386,7 +389,8 @@ app.use('/api/push', require('./routes/push'));
 // Initialise VAPID keys on boot (auto-generates on first run, then
 // persists in app_settings so PM2 restarts keep the same keys).
 try {
-  require('./lib/push').ensureVapid();
+  Promise.resolve(require('./lib/push').ensureVapid())
+    .catch(e => console.warn('[push] VAPID init failed:', e.message));
 } catch (e) {
   console.warn('[push] VAPID init failed (web-push package may need npm install):', e.message);
 }

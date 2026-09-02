@@ -18,7 +18,7 @@
 //
 // Skip via ERP_DISABLE_PROCSCH_REMINDER=1.
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 // Date helpers — IMPORTANT: build YYYY-MM-DD from LOCAL Date parts
 // (not toISOString) because in IST (UTC+5:30), toISOString().slice(0,10)
@@ -52,9 +52,9 @@ function isoDow(iso) {
 // stepping past Sundays + holidays until we land on a working day.
 // Mirrors the backward-pass business-day logic the schedule itself
 // uses, so the reminder lines up exactly with the indent end_date.
-function tomorrowBusinessDay(db, fromIso) {
+async function tomorrowBusinessDay(fromIso) {
   const holSet = new Set(
-    db.prepare(`SELECT holiday_date FROM procurement_holidays`).all().map(r => r.holiday_date)
+    (await pg.all(`SELECT holiday_date FROM procurement_holidays`)).map(r => r.holiday_date)
   );
   let cur = addDaysIso(fromIso, 1);
   // Skip Sundays + admin-flagged holidays
@@ -65,18 +65,20 @@ function tomorrowBusinessDay(db, fromIso) {
   return cur; // safety fallback (should never hit; 30-day holiday stretch unrealistic)
 }
 
-function ensureReminderTable(db) {
-  db.exec(`
+async function ensureReminderTable() {
+  await pg.run(`
     CREATE TABLE IF NOT EXISTS procurement_schedule_reminders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      schedule_row_id INTEGER NOT NULL,
-      reminder_date DATE NOT NULL,
-      announcement_id INTEGER,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      id BIGSERIAL PRIMARY KEY,
+      schedule_row_id BIGINT NOT NULL,
+      reminder_date TEXT NOT NULL,
+      announcement_id BIGINT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(schedule_row_id, reminder_date)
-    );
+    )
+  `);
+  await pg.run(`
     CREATE INDEX IF NOT EXISTS idx_procsch_reminders_date
-      ON procurement_schedule_reminders(reminder_date);
+      ON procurement_schedule_reminders(reminder_date)
   `);
 }
 
@@ -115,18 +117,17 @@ function buildAnnouncement(row) {
   return { title, body };
 }
 
-function runOnce() {
+async function runOnce() {
   if (process.env.ERP_DISABLE_PROCSCH_REMINDER === '1') return { scanned: 0, posted: 0, skipped: 0 };
-  const db = getDb();
-  ensureReminderTable(db);
+  await ensureReminderTable();
 
   const today = todayIso();
-  const targetDate = tomorrowBusinessDay(db, today);
+  const targetDate = await tomorrowBusinessDay(today);
 
   // Live schedule rows whose indent end_date == targetDate.
   // Hydrate item description, unit, qty, project name — exactly the
   // join shape /api/procurement-schedule/:id already uses.
-  const rows = db.prepare(`
+  const rows = await pg.all(`
     SELECT s.id, s.project_id, s.item_id, s.trade, s.phase, s.end_date,
            s.ai_reasoning,
            pi.description AS item_description, pi.unit, pi.quantity AS boq_qty,
@@ -136,36 +137,37 @@ function runOnce() {
       LEFT JOIN business_book bb ON bb.id = s.project_id
      WHERE s.phase = 'indent'
        AND s.end_date = ?
-  `).all(targetDate);
+  `, targetDate);
 
   if (rows.length === 0) {
     return { scanned: 0, posted: 0, skipped: 0, targetDate };
   }
 
-  const checkSent = db.prepare(`
+  const checkSentSql = `
     SELECT 1 FROM procurement_schedule_reminders
       WHERE schedule_row_id = ? AND reminder_date = ?
-  `);
-  const insertReminder = db.prepare(`
-    INSERT OR IGNORE INTO procurement_schedule_reminders
+  `;
+  const insertReminderSql = `
+    INSERT INTO procurement_schedule_reminders
       (schedule_row_id, reminder_date, announcement_id)
     VALUES (?, ?, ?)
-  `);
+    ON CONFLICT DO NOTHING
+  `;
   // Expire the announcement 48 h out so old reminders don't clog the
   // bell.  pinned=0 — these are tactical nudges, not company news.
-  const insertAnn = db.prepare(`
+  const insertAnnSql = `
     INSERT INTO announcements (title, body, pinned, expires_at, created_by)
     VALUES (?, ?, 0, ?, NULL)
-  `);
+  `;
   const expiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
 
   let posted = 0, skipped = 0;
   for (const r of rows) {
-    if (checkSent.get(r.id, today)) { skipped++; continue; }
+    if (await pg.get(checkSentSql, r.id, today)) { skipped++; continue; }
     try {
       const { title, body } = buildAnnouncement(r);
-      const ins = insertAnn.run(title, body, expiresAt);
-      insertReminder.run(r.id, today, ins.lastInsertRowid);
+      const ins = await pg.run(insertAnnSql, title, body, expiresAt);
+      await pg.run(insertReminderSql, r.id, today, ins.lastInsertRowid);
       posted++;
 
       // Best-effort web-push so users with notifications enabled get
@@ -197,10 +199,10 @@ function scheduleAt(hour, minute, fn, label) {
   if (next <= now) next.setDate(next.getDate() + 1);
   const msUntil = next - now;
   console.log(`[procsch-reminder] ${label} scheduled for ${next.toLocaleString()} (in ${Math.round(msUntil / 60000)} min)`);
-  setTimeout(() => {
-    try { fn(); } catch (e) { console.error('[procsch-reminder]', e.message); }
-    setInterval(() => {
-      try { fn(); } catch (e) { console.error('[procsch-reminder]', e.message); }
+  setTimeout(async () => {
+    try { await fn(); } catch (e) { console.error('[procsch-reminder]', e.message); }
+    setInterval(async () => {
+      try { await fn(); } catch (e) { console.error('[procsch-reminder]', e.message); }
     }, 24 * 60 * 60 * 1000);
   }, msUntil);
 }
@@ -213,8 +215,8 @@ function scheduleProcurementReminderCron() {
   // Boot catch-up — 60 s after start, so a fresh deploy fires any
   // reminders the previous (possibly down) instance missed. Dedup
   // table makes this safe to re-run.
-  setTimeout(() => {
-    try { runOnce(); } catch (e) { console.error('[procsch-reminder] boot run failed:', e.message); }
+  setTimeout(async () => {
+    try { await runOnce(); } catch (e) { console.error('[procsch-reminder] boot run failed:', e.message); }
   }, 60 * 1000);
   // Daily 09:00 local time — mirrors the CMD email cadence.
   scheduleAt(9, 0, runOnce, 'daily 09:00 reminder');

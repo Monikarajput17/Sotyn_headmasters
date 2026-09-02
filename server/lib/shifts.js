@@ -6,11 +6,11 @@
 // reclassifying attendance that already happened under the old shift.
 
 // All history rows for one employee, oldest first.
-function getShiftHistory(db, employeeId) {
+async function getShiftHistory(db, employeeId) {
   if (!employeeId) return [];
-  return db.prepare(
-    `SELECT * FROM employee_shifts WHERE employee_id=? ORDER BY effective_from ASC, id ASC`
-  ).all(employeeId);
+  return db.all(
+    `SELECT * FROM employee_shifts WHERE employee_id=? ORDER BY effective_from ASC, id ASC`, employeeId
+  );
 }
 
 // Given history sorted ascending by effective_from, return the row that
@@ -27,11 +27,12 @@ function resolveShift(historyAsc, dateStr) {
 // punch-in "is this late right now"). Prefer getShiftHistory + resolveShift
 // when resolving many dates for the same employee (payroll's day loop, the
 // monthly grid) to avoid one query per day.
-function resolveShiftForDate(db, employeeId, dateStr) {
+async function resolveShiftForDate(db, employeeId, dateStr) {
   if (!employeeId) return null;
-  return db.prepare(
-    `SELECT * FROM employee_shifts WHERE employee_id=? AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1`
-  ).get(employeeId, dateStr) || null;
+  return (await db.get(
+    `SELECT * FROM employee_shifts WHERE employee_id=? AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1`,
+    employeeId, dateStr
+  )) || null;
 }
 
 function timeToMinutes(t) {
@@ -57,9 +58,9 @@ function weekOffDow(shiftRow) {
 
 // employee.id for a given user_id, or null. Small helper so callers don't
 // each repeat the same lookup.
-function employeeIdForUser(db, userId) {
+async function employeeIdForUser(db, userId) {
   if (!userId) return null;
-  const row = db.prepare('SELECT id FROM employees WHERE user_id=?').get(userId);
+  const row = await db.get('SELECT id FROM employees WHERE user_id=?', userId);
   return row ? row.id : null;
 }
 

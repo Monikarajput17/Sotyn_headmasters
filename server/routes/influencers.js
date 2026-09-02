@@ -25,7 +25,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { logAuditEvent } = require('../middleware/audit');
 
@@ -36,84 +36,15 @@ const uploadDir = path.join(__dirname, '..', '..', 'data', 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
 
-// Idempotent migration — runs at module load
-try {
-  getDb().exec(`
-    CREATE TABLE IF NOT EXISTS influencers (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      form_id TEXT UNIQUE,
-      date_of_entry DATE,
-      entered_by TEXT,
-      assigned_relationship_manager TEXT,
-      -- 1. Basic Identity
-      salutation TEXT,
-      full_name TEXT NOT NULL,
-      date_of_birth DATE,
-      anniversary_date DATE,
-      gender TEXT,
-      hometown TEXT,
-      -- 2. Professional Category
-      primary_category TEXT,
-      primary_category_other TEXT,
-      years_in_industry INTEGER,
-      decision_making_role TEXT,
-      -- 3. Company / Firm Details
-      company_name TEXT,
-      designation TEXT,
-      company_size TEXT,
-      year_established INTEGER,
-      office_address TEXT,
-      city TEXT,
-      pincode TEXT,
-      gst_number TEXT,
-      website TEXT,
-      -- 4. Contact Information
-      primary_mobile TEXT NOT NULL,
-      secondary_mobile TEXT,
-      whatsapp_number TEXT,
-      office_landline TEXT,
-      personal_email TEXT,
-      office_email TEXT,
-      preferred_contact_method TEXT,
-      best_time_to_call TEXT,
-      -- 5. Digital / Social Presence
-      linkedin_url TEXT,
-      facebook_url TEXT,
-      instagram_handle TEXT,
-      twitter_handle TEXT,
-      youtube_channel TEXT,
-      google_business_profile TEXT,
-      other_listings TEXT,
-      -- 6. Relationship & Business Intelligence
-      source_of_contact TEXT,
-      referred_by TEXT,
-      first_meeting_date DATE,
-      relationship_stage TEXT,
-      typical_project_type TEXT,
-      typical_project_value_range TEXT,
-      past_projects_count INTEGER DEFAULT 0,
-      past_projects_total_value REAL DEFAULT 0,
-      ongoing_projects_with_us INTEGER DEFAULT 0,
-      client_payment_behavior TEXT,
-      commission_terms TEXT,
-      competitors TEXT,
-      -- Audit
-      created_by INTEGER REFERENCES users(id),
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-  getDb().exec(`CREATE INDEX IF NOT EXISTS idx_influencers_form_id ON influencers(form_id)`);
-  getDb().exec(`CREATE INDEX IF NOT EXISTS idx_influencers_full_name ON influencers(full_name)`);
-  getDb().exec(`CREATE INDEX IF NOT EXISTS idx_influencers_mobile ON influencers(primary_mobile)`);
-} catch (e) {
-  console.warn('[influencers] schema init failed:', e.message);
-}
+// The influencers table (all 6 sections of fields + indexes on form_id,
+// full_name, primary_mobile) now lives in the migrated Postgres schema —
+// the old idempotent CREATE-IF-NOT-EXISTS block ran here at module load
+// in the SQLite days.
 
 // Form ID auto-generator — INF-0001, INF-0002, ...
-function nextFormId(db) {
+async function nextFormId(db) {
   try {
-    const last = db.prepare(`SELECT form_id FROM influencers WHERE form_id LIKE 'INF-%' ORDER BY id DESC LIMIT 1`).get();
+    const last = await db.get(`SELECT form_id FROM influencers WHERE form_id LIKE 'INF-%' ORDER BY id DESC LIMIT 1`);
     const lastNum = last ? parseInt(String(last.form_id).replace('INF-', ''), 10) : 0;
     return `INF-${String(lastNum + 1).padStart(4, '0')}`;
   } catch (_) {
@@ -129,45 +60,51 @@ function nextFormId(db) {
 // lightweight endpoint returns just id / name / company / primary
 // category for active rows.  MUST be registered above /:id so the
 // id-matcher doesn't eat the path.
-router.get('/lookup', (req, res) => {
-  const db = getDb();
-  const rows = db.prepare(
-    `SELECT id, full_name, company_name, primary_category
-       FROM influencers
-      ORDER BY full_name COLLATE NOCASE`
-  ).all();
-  res.json(rows);
+router.get('/lookup', async (req, res) => {
+  try {
+    const rows = await pg.all(
+      `SELECT id, full_name, company_name, primary_category
+         FROM influencers
+        ORDER BY LOWER(full_name)`
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── GET /api/influencers ────────────────────────────────────────
-router.get('/', requirePermission('influencers', 'view'), (req, res) => {
-  const db = getDb();
-  const { search, primary_category, relationship_stage, city } = req.query;
-  let sql = 'SELECT * FROM influencers WHERE 1=1';
-  const params = [];
-  if (search) {
-    sql += ` AND (
-      LOWER(full_name) LIKE ? OR
-      LOWER(COALESCE(company_name,'')) LIKE ? OR
-      primary_mobile LIKE ? OR
-      LOWER(COALESCE(form_id,'')) LIKE ? OR
-      LOWER(COALESCE(personal_email,'')) LIKE ?
-    )`;
-    const term = `%${search.toLowerCase()}%`;
-    params.push(term, term, term, term, term);
-  }
-  if (primary_category)   { sql += ' AND primary_category = ?';   params.push(primary_category); }
-  if (relationship_stage) { sql += ' AND relationship_stage = ?'; params.push(relationship_stage); }
-  if (city)               { sql += ' AND city = ?';               params.push(city); }
-  sql += ' ORDER BY id DESC';
-  res.json(db.prepare(sql).all(...params));
+router.get('/', requirePermission('influencers', 'view'), async (req, res) => {
+  try {
+    const { search, primary_category, relationship_stage, city } = req.query;
+    let sql = 'SELECT * FROM influencers WHERE 1=1';
+    const params = [];
+    if (search) {
+      sql += ` AND (
+        LOWER(full_name) LIKE ? OR
+        LOWER(COALESCE(company_name,'')) LIKE ? OR
+        primary_mobile ILIKE ? OR
+        LOWER(COALESCE(form_id,'')) LIKE ? OR
+        LOWER(COALESCE(personal_email,'')) LIKE ?
+      )`;
+      const term = `%${search.toLowerCase()}%`;
+      params.push(term, term, term, term, term);
+    }
+    if (primary_category)   { sql += ' AND primary_category = ?';   params.push(primary_category); }
+    if (relationship_stage) { sql += ' AND relationship_stage = ?'; params.push(relationship_stage); }
+    if (city)               { sql += ' AND city = ?';               params.push(city); }
+    sql += ' ORDER BY id DESC';
+    res.json(await pg.all(sql, ...params));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── GET /api/influencers/:id ────────────────────────────────────
-router.get('/:id', requirePermission('influencers', 'view'), (req, res) => {
-  const r = getDb().prepare('SELECT * FROM influencers WHERE id = ?').get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'Influencer not found' });
-  res.json(r);
+// Numeric-only param so '/export' (declared below) isn't swallowed — Postgres
+// rejects a non-numeric id cast where SQLite just returned nothing.
+router.get('/:id(\\d+)', requirePermission('influencers', 'view'), async (req, res) => {
+  try {
+    const r = await pg.get('SELECT * FROM influencers WHERE id = ?', req.params.id);
+    if (!r) return res.status(404).json({ error: 'Influencer not found' });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Helper — all writable columns in canonical order.
@@ -237,18 +174,17 @@ const HEADERS = {
 };
 
 // ─── POST /api/influencers ───────────────────────────────────────
-router.post('/', requirePermission('influencers', 'create'), (req, res) => {
-  const db = getDb();
+router.post('/', requirePermission('influencers', 'create'), async (req, res) => {
   const b = req.body || {};
   if (!b.full_name || !String(b.full_name).trim()) return res.status(400).json({ error: 'Full Name is required' });
   if (!b.primary_mobile || !String(b.primary_mobile).trim()) return res.status(400).json({ error: 'Primary Mobile is required' });
 
-  const formId = b.form_id || nextFormId(db);
-  const values = FIELDS.map(f => b[f] ?? null);
-  const cols = ['form_id', ...FIELDS, 'created_by'].join(',');
-  const placeholders = Array(FIELDS.length + 2).fill('?').join(',');
   try {
-    const r = db.prepare(`INSERT INTO influencers (${cols}) VALUES (${placeholders})`).run(formId, ...values, req.user.id);
+    const formId = b.form_id || await nextFormId(pg);
+    const values = FIELDS.map(f => b[f] ?? null);
+    const cols = ['form_id', ...FIELDS, 'created_by'].join(',');
+    const placeholders = Array(FIELDS.length + 2).fill('?').join(',');
+    const r = await pg.run(`INSERT INTO influencers (${cols}) VALUES (${placeholders})`, formId, ...values, req.user.id);
     logAuditEvent({
       user: req.user, action: 'CREATE', entity_type: 'influencer',
       entity_id: r.lastInsertRowid, entity_label: b.full_name,
@@ -262,28 +198,30 @@ router.post('/', requirePermission('influencers', 'create'), (req, res) => {
 });
 
 // ─── PUT /api/influencers/:id ────────────────────────────────────
-router.put('/:id', requirePermission('influencers', 'edit'), (req, res) => {
-  const db = getDb();
-  const b = req.body || {};
-  const cur = db.prepare('SELECT id FROM influencers WHERE id = ?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Influencer not found' });
-  const sets = []; const params = [];
-  for (const f of FIELDS) {
-    if (b[f] !== undefined) { sets.push(`${f} = ?`); params.push(b[f]); }
-  }
-  if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
-  sets.push('updated_at = CURRENT_TIMESTAMP');
-  params.push(req.params.id);
-  db.prepare(`UPDATE influencers SET ${sets.join(', ')} WHERE id = ?`).run(...params);
-  res.json({ message: 'Updated' });
+router.put('/:id', requirePermission('influencers', 'edit'), async (req, res) => {
+  try {
+    const b = req.body || {};
+    const cur = await pg.get('SELECT id FROM influencers WHERE id = ?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Influencer not found' });
+    const sets = []; const params = [];
+    for (const f of FIELDS) {
+      if (b[f] !== undefined) { sets.push(`${f} = ?`); params.push(b[f]); }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'No fields to update' });
+    sets.push('updated_at = CURRENT_TIMESTAMP');
+    params.push(req.params.id);
+    await pg.run(`UPDATE influencers SET ${sets.join(', ')} WHERE id = ?`, ...params);
+    res.json({ message: 'Updated' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── DELETE /api/influencers/:id ─────────────────────────────────
-router.delete('/:id', requirePermission('influencers', 'delete'), (req, res) => {
-  const db = getDb();
-  const r = db.prepare('DELETE FROM influencers WHERE id = ?').run(req.params.id);
-  if (r.changes === 0) return res.status(404).json({ error: 'Influencer not found' });
-  res.json({ message: 'Deleted' });
+router.delete('/:id', requirePermission('influencers', 'delete'), async (req, res) => {
+  try {
+    const r = await pg.run('DELETE FROM influencers WHERE id = ?', req.params.id);
+    if (r.changes === 0) return res.status(404).json({ error: 'Influencer not found' });
+    res.json({ message: 'Deleted' });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── GET /api/influencers/import/template ────────────────────────
@@ -313,26 +251,26 @@ router.get('/import/template', requirePermission('influencers', 'view'), (req, r
 });
 
 // ─── GET /api/influencers/export ─────────────────────────────────
-router.get('/export', requirePermission('influencers', 'view'), (req, res) => {
-  const db = getDb();
-  const rows = db.prepare('SELECT * FROM influencers ORDER BY id DESC').all();
-  const headerKeys = ['form_id', ...FIELDS];
-  const headers = headerKeys.map(k => HEADERS[k] || k);
-  const data = [headers, ...rows.map(r => headerKeys.map(k => r[k] ?? ''))];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  ws['!cols'] = headers.map(h => ({ wch: Math.max(18, Math.min(40, h.length + 4)) }));
-  XLSX.utils.book_append_sheet(wb, ws, 'Influencers');
-  const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="influencers-export-${new Date().toISOString().slice(0,10)}.xlsx"`);
-  res.send(buf);
+router.get('/export', requirePermission('influencers', 'view'), async (req, res) => {
+  try {
+    const rows = await pg.all('SELECT * FROM influencers ORDER BY id DESC');
+    const headerKeys = ['form_id', ...FIELDS];
+    const headers = headerKeys.map(k => HEADERS[k] || k);
+    const data = [headers, ...rows.map(r => headerKeys.map(k => r[k] ?? ''))];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = headers.map(h => ({ wch: Math.max(18, Math.min(40, h.length + 4)) }));
+    XLSX.utils.book_append_sheet(wb, ws, 'Influencers');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="influencers-export-${new Date().toISOString().slice(0,10)}.xlsx"`);
+    res.send(buf);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─── POST /api/influencers/import (bulk Excel upload) ────────────
-router.post('/import', requirePermission('influencers', 'create'), upload.single('file'), (req, res) => {
+router.post('/import', requirePermission('influencers', 'create'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const db = getDb();
   let rows = [];
   try {
     const wb = XLSX.readFile(req.file.path);
@@ -394,11 +332,11 @@ router.post('/import', requirePermission('influencers', 'create'), upload.single
       continue;
     }
     try {
-      const formId = (typeof r.form_id === 'string' && r.form_id.trim() && !/auto/i.test(r.form_id)) ? r.form_id.trim() : nextFormId(db);
+      const formId = (typeof r.form_id === 'string' && r.form_id.trim() && !/auto/i.test(r.form_id)) ? r.form_id.trim() : await nextFormId(pg);
       const values = FIELDS.map(f => r[f] ?? null);
       const cols = ['form_id', ...FIELDS, 'created_by'].join(',');
       const placeholders = Array(FIELDS.length + 2).fill('?').join(',');
-      const ins = db.prepare(`INSERT INTO influencers (${cols}) VALUES (${placeholders})`).run(formId, ...values, req.user.id);
+      const ins = await pg.run(`INSERT INTO influencers (${cols}) VALUES (${placeholders})`, formId, ...values, req.user.id);
       created.push({ row: i + 2, id: ins.lastInsertRowid, form_id: formId, full_name: r.full_name });
     } catch (e) {
       failed.push({ row: i + 2, reason: e.message });

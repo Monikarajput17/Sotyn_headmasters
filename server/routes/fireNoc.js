@@ -18,7 +18,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const XLSX = require('xlsx');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const { logAuditEvent } = require('../middleware/audit');
 const { syncCycle, expectedStageAndStatus, daysToExpiry } = require('../lib/fireNocSync');
@@ -32,6 +32,10 @@ router.use(authMiddleware);
 const uploadDir = path.join(__dirname, '..', '..', 'data', 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 const upload = multer({ dest: uploadDir, limits: { fileSize: 10 * 1024 * 1024 } });
+
+// UTC date helpers — exact parity with SQLite's date('now') / date('now','+N days').
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const daysFromNow = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10);
 
 // ── Stage helpers (pure functions; will move to lib/ in PR3) ────
 // Maps days-to-expiry → expected stage.  Used by both the manual
@@ -52,180 +56,181 @@ function stageForDays(days) {
 
 // State + building → cycle_years.  Most-specific match wins:
 // (state, type) → (state, NULL) → __DEFAULT__ row.
-function cycleYearsFor(db, state, buildingType) {
-  let row = db.prepare(
-    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter=?'
-  ).get(state, buildingType);
+async function cycleYearsFor(db, state, buildingType) {
+  let row = await db.get(
+    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter=?',
+    state, buildingType);
   if (row) return row.cycle_years;
-  row = db.prepare(
-    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter IS NULL'
-  ).get(state);
+  row = await db.get(
+    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter IS NULL',
+    state);
   if (row) return row.cycle_years;
-  row = db.prepare(
-    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter IS NULL'
-  ).get('__DEFAULT__');
+  row = await db.get(
+    'SELECT cycle_years FROM fire_noc_state_cycle_rule WHERE state=? AND building_type_filter IS NULL',
+    '__DEFAULT__');
   return row?.cycle_years || 5;
 }
 
 // ── GET /api/fire-noc/dashboard ─────────────────────────────────
 // One call returns everything the Fire NOC landing page needs:
 // stage-bucketed counts, KPI tiles, upcoming expiries.
-router.get('/dashboard', requirePermission('fire_noc', 'view'), (req, res) => {
-  const db = getDb();
+router.get('/dashboard', requirePermission('fire_noc', 'view'), async (req, res) => {
+  try {
+    // Per-stage counts (only active cycles)
+    const byStage = await pg.all(`
+      SELECT current_stage stage, COUNT(*) cnt
+      FROM fire_noc_cycle WHERE status='active'
+      GROUP BY current_stage
+    `);
 
-  // Per-stage counts (only active cycles)
-  const byStage = db.prepare(`
-    SELECT current_stage stage, COUNT(*) cnt
-    FROM fire_noc_cycle WHERE status='active'
-    GROUP BY current_stage
-  `).all();
+    // KPI tiles
+    const activeCount = (await pg.get(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='active'`)).c;
+    const lostCount = (await pg.get(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='lost'`)).c;
+    const renewedCount = (await pg.get(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='renewed'`)).c;
 
-  // KPI tiles
-  const activeCount = db.prepare(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='active'`).get().c;
-  const lostCount = db.prepare(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='lost'`).get().c;
-  const renewedCount = db.prepare(`SELECT COUNT(*) c FROM fire_noc_cycle WHERE status='renewed'`).get().c;
+    // Pipeline value = sum of latest quote amount on cycles in
+    // stages T-120 to T-60 (per spec dashboard definition).
+    const pipelineValue = (await pg.get(`
+      SELECT COALESCE(SUM(q.amount), 0) total FROM fire_noc_cycle c
+      JOIN fire_noc_quote q ON q.cycle_id = c.id
+      WHERE c.status='active'
+        AND c.current_stage IN ('T-120','T-90','CONVERT_CHECK','LOST_POOL','T-60')
+        AND q.version = (
+          SELECT MAX(version) FROM fire_noc_quote WHERE cycle_id = c.id
+        )
+    `)).total;
 
-  // Pipeline value = sum of latest quote amount on cycles in
-  // stages T-120 to T-60 (per spec dashboard definition).
-  const pipelineValue = db.prepare(`
-    SELECT COALESCE(SUM(q.amount), 0) total FROM fire_noc_cycle c
-    JOIN fire_noc_quote q ON q.cycle_id = c.id
-    WHERE c.status='active'
-      AND c.current_stage IN ('T-120','T-90','CONVERT_CHECK','LOST_POOL','T-60')
-      AND q.version = (
-        SELECT MAX(version) FROM fire_noc_quote WHERE cycle_id = c.id
-      )
-  `).get().total;
+    // Inspections with open compliance fixes
+    const failedInspectionsAwaiting = (await pg.get(`
+      SELECT COUNT(*) c FROM fire_noc_inspection
+      WHERE result='fail'
+        AND id IN (
+          SELECT inspection_id FROM fire_noc_compliance_ticket
+          WHERE status != 'verified'
+        )
+    `)).c;
 
-  // Inspections with open compliance fixes
-  const failedInspectionsAwaiting = db.prepare(`
-    SELECT COUNT(*) c FROM fire_noc_inspection
-    WHERE result='fail'
-      AND id IN (
-        SELECT inspection_id FROM fire_noc_compliance_ticket
-        WHERE status != 'verified'
-      )
-  `).get().c;
+    // Next 7 days expiries
+    const nextWeekExpiries = await pg.all(`
+      SELECT c.id, c.expiry_date, c.current_stage,
+             p.building_name, p.state, p.building_type,
+             cust.company_name customer_name
+      FROM fire_noc_cycle c
+      JOIN fire_noc_property p ON c.property_id = p.id
+      LEFT JOIN customers cust ON p.customer_id = cust.id
+      WHERE c.status='active'
+        AND LEFT(c.expiry_date,10) BETWEEN ? AND ?
+      ORDER BY c.expiry_date ASC
+      LIMIT 20
+    `, todayStr(), daysFromNow(7));
 
-  // Next 7 days expiries
-  const nextWeekExpiries = db.prepare(`
-    SELECT c.id, c.expiry_date, c.current_stage,
-           p.building_name, p.state, p.building_type,
-           cust.company_name customer_name
-    FROM fire_noc_cycle c
-    JOIN fire_noc_property p ON c.property_id = p.id
-    LEFT JOIN customers cust ON p.customer_id = cust.id
-    WHERE c.status='active'
-      AND date(c.expiry_date) BETWEEN date('now') AND date('now', '+7 days')
-    ORDER BY c.expiry_date ASC
-    LIMIT 20
-  `).all();
+    // State-cycle rules — for the front-end to know what cycle_years
+    // a new property would inherit.
+    const stateRules = await pg.all(
+      'SELECT state, building_type_filter, cycle_years FROM fire_noc_state_cycle_rule ORDER BY state, building_type_filter'
+    );
 
-  // State-cycle rules — for the front-end to know what cycle_years
-  // a new property would inherit.
-  const stateRules = db.prepare(
-    'SELECT state, building_type_filter, cycle_years FROM fire_noc_state_cycle_rule ORDER BY state, building_type_filter'
-  ).all();
-
-  res.json({
-    spec_version: 'v1',
-    generated_at: new Date().toISOString(),
-    kpi: {
-      active_cycles: activeCount,
-      lost_cycles: lostCount,
-      renewed_cycles: renewedCount,
-      pipeline_value: pipelineValue,
-      failed_inspections_awaiting_fix: failedInspectionsAwaiting,
-    },
-    by_stage: byStage,
-    next_7_days_expiries: nextWeekExpiries,
-    state_rules: stateRules,
-  });
+    res.json({
+      spec_version: 'v1',
+      generated_at: new Date().toISOString(),
+      kpi: {
+        active_cycles: activeCount,
+        lost_cycles: lostCount,
+        renewed_cycles: renewedCount,
+        pipeline_value: pipelineValue,
+        failed_inspections_awaiting_fix: failedInspectionsAwaiting,
+      },
+      by_stage: byStage,
+      next_7_days_expiries: nextWeekExpiries,
+      state_rules: stateRules,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/fire-noc/cycles ────────────────────────────────────
-router.get('/cycles', requirePermission('fire_noc', 'view'), (req, res) => {
-  const db = getDb();
-  const { state, stage, status, owner, q } = req.query;
-  const where = ['1=1'];
-  const params = [];
-  if (state)  { where.push('p.state = ?');               params.push(state); }
-  if (stage)  { where.push('c.current_stage = ?');       params.push(stage); }
-  if (status) { where.push('c.status = ?');              params.push(status); }
-  if (owner)  { where.push('c.owner_user_id = ?');       params.push(+owner); }
-  if (q) {
-    where.push('(p.building_name LIKE ? OR p.address LIKE ? OR cust.company_name LIKE ?)');
-    const like = `%${q}%`;
-    params.push(like, like, like);
-  }
-  const rows = db.prepare(`
-    SELECT c.id, c.cycle_no, c.expiry_date, c.current_stage, c.status,
-           c.stage_entered_at, c.owner_user_id,
-           CAST(julianday(c.expiry_date) - julianday('now') AS INTEGER) days_to_expiry,
-           p.id property_id, p.state, p.building_type, p.building_name,
-           p.address, p.decision_maker_name,
-           cust.company_name customer_name,
-           u.name owner_name
-    FROM fire_noc_cycle c
-    JOIN fire_noc_property p ON c.property_id = p.id
-    LEFT JOIN customers cust ON p.customer_id = cust.id
-    LEFT JOIN users u ON c.owner_user_id = u.id
-    WHERE ${where.join(' AND ')}
-    ORDER BY c.expiry_date ASC
-  `).all(...params);
-  res.json(rows);
+router.get('/cycles', requirePermission('fire_noc', 'view'), async (req, res) => {
+  try {
+    const { state, stage, status, owner, q } = req.query;
+    const where = ['1=1'];
+    const params = [];
+    if (state)  { where.push('p.state = ?');               params.push(state); }
+    if (stage)  { where.push('c.current_stage = ?');       params.push(stage); }
+    if (status) { where.push('c.status = ?');              params.push(status); }
+    if (owner)  { where.push('c.owner_user_id = ?');       params.push(+owner); }
+    if (q) {
+      where.push('(p.building_name ILIKE ? OR p.address ILIKE ? OR cust.company_name ILIKE ?)');
+      const like = `%${q}%`;
+      params.push(like, like, like);
+    }
+    const rows = await pg.all(`
+      SELECT c.id, c.cycle_no, c.expiry_date, c.current_stage, c.status,
+             c.stage_entered_at, c.owner_user_id,
+             (LEFT(c.expiry_date,10)::date - (now() at time zone 'utc')::date) days_to_expiry,
+             p.id property_id, p.state, p.building_type, p.building_name,
+             p.address, p.decision_maker_name,
+             cust.company_name customer_name,
+             u.name owner_name
+      FROM fire_noc_cycle c
+      JOIN fire_noc_property p ON c.property_id = p.id
+      LEFT JOIN customers cust ON p.customer_id = cust.id
+      LEFT JOIN users u ON c.owner_user_id = u.id
+      WHERE ${where.join(' AND ')}
+      ORDER BY c.expiry_date ASC
+    `, ...params);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/fire-noc/cycles/:id ────────────────────────────────
-router.get('/cycles/:id', requirePermission('fire_noc', 'view'), (req, res) => {
-  const db = getDb();
-  const id = +req.params.id;
-  const cycle = db.prepare(`
-    SELECT c.*,
-           p.state, p.building_type, p.building_name, p.address,
-           p.pincode, p.decision_maker_name, p.decision_maker_phone,
-           p.decision_maker_email, p.ticket_size_band, p.source,
-           cust.company_name customer_name,
-           u.name owner_name,
-           CAST(julianday(c.expiry_date) - julianday('now') AS INTEGER) days_to_expiry
-    FROM fire_noc_cycle c
-    JOIN fire_noc_property p ON c.property_id = p.id
-    LEFT JOIN customers cust ON p.customer_id = cust.id
-    LEFT JOIN users u ON c.owner_user_id = u.id
-    WHERE c.id = ?
-  `).get(id);
-  if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
+router.get('/cycles/:id', requirePermission('fire_noc', 'view'), async (req, res) => {
+  try {
+    const id = +req.params.id;
+    const cycle = await pg.get(`
+      SELECT c.*,
+             p.state, p.building_type, p.building_name, p.address,
+             p.pincode, p.decision_maker_name, p.decision_maker_phone,
+             p.decision_maker_email, p.ticket_size_band, p.source,
+             cust.company_name customer_name,
+             u.name owner_name,
+             (LEFT(c.expiry_date,10)::date - (now() at time zone 'utc')::date) days_to_expiry
+      FROM fire_noc_cycle c
+      JOIN fire_noc_property p ON c.property_id = p.id
+      LEFT JOIN customers cust ON p.customer_id = cust.id
+      LEFT JOIN users u ON c.owner_user_id = u.id
+      WHERE c.id = ?
+    `, id);
+    if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
 
-  const history = db.prepare(`
-    SELECT id, from_stage, to_stage, entered_at, exited_at, triggered_by, notes
-    FROM fire_noc_stage_history WHERE cycle_id=? ORDER BY entered_at ASC
-  `).all(id);
-  const outreach = db.prepare(`
-    SELECT * FROM fire_noc_outreach WHERE cycle_id=? ORDER BY created_at DESC LIMIT 50
-  `).all(id);
-  const quotes = db.prepare(`
-    SELECT * FROM fire_noc_quote WHERE cycle_id=? ORDER BY version ASC
-  `).all(id);
-  const documents = db.prepare(`
-    SELECT * FROM fire_noc_document WHERE cycle_id=? ORDER BY uploaded_at DESC
-  `).all(id);
-  const inspections = db.prepare(`
-    SELECT * FROM fire_noc_inspection WHERE cycle_id=? ORDER BY scheduled_at DESC
-  `).all(id);
-  const tickets = db.prepare(`
-    SELECT * FROM fire_noc_compliance_ticket WHERE cycle_id=? ORDER BY opened_at DESC
-  `).all(id);
-  const upsells = db.prepare(`
-    SELECT * FROM fire_noc_upsell WHERE cycle_id=?
-  `).all(id);
+    const history = await pg.all(`
+      SELECT id, from_stage, to_stage, entered_at, exited_at, triggered_by, notes
+      FROM fire_noc_stage_history WHERE cycle_id=? ORDER BY entered_at ASC
+    `, id);
+    const outreach = await pg.all(`
+      SELECT * FROM fire_noc_outreach WHERE cycle_id=? ORDER BY created_at DESC LIMIT 50
+    `, id);
+    const quotes = await pg.all(`
+      SELECT * FROM fire_noc_quote WHERE cycle_id=? ORDER BY version ASC
+    `, id);
+    const documents = await pg.all(`
+      SELECT * FROM fire_noc_document WHERE cycle_id=? ORDER BY uploaded_at DESC
+    `, id);
+    const inspections = await pg.all(`
+      SELECT * FROM fire_noc_inspection WHERE cycle_id=? ORDER BY scheduled_at DESC
+    `, id);
+    const tickets = await pg.all(`
+      SELECT * FROM fire_noc_compliance_ticket WHERE cycle_id=? ORDER BY opened_at DESC
+    `, id);
+    const upsells = await pg.all(`
+      SELECT * FROM fire_noc_upsell WHERE cycle_id=?
+    `, id);
 
-  res.json({ ...cycle, history, outreach, quotes, documents, inspections, tickets, upsells });
+    res.json({ ...cycle, history, outreach, quotes, documents, inspections, tickets, upsells });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── POST /api/fire-noc/cycles ───────────────────────────────────
 // Manual create (no Master DB match yet — that's PR6).
-router.post('/cycles', requirePermission('fire_noc', 'create'), (req, res) => {
-  const db = getDb();
+router.post('/cycles', requirePermission('fire_noc', 'create'), async (req, res) => {
   const b = req.body || {};
   if (!b.state || !b.building_type || !b.expiry_date) {
     return res.status(400).json({ error: 'state, building_type, and expiry_date are required' });
@@ -235,50 +240,49 @@ router.post('/cycles', requirePermission('fire_noc', 'create'), (req, res) => {
     return res.status(400).json({ error: `building_type must be one of: ${allowedBuildings.join(', ')}` });
   }
 
-  const txn = db.transaction(() => {
-    // 1. Insert property
-    const propRes = db.prepare(`
-      INSERT INTO fire_noc_property (
-        customer_id, state, building_type, building_name, address, pincode,
-        decision_maker_name, decision_maker_phone, decision_maker_email,
-        ticket_size_band, source, created_by, updated_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      b.customer_id || null, b.state, b.building_type,
-      b.building_name || null, b.address || null, b.pincode || null,
-      b.decision_maker_name || null, b.decision_maker_phone || null,
-      b.decision_maker_email || null, b.ticket_size_band || null,
-      b.source || 'manual', req.user.id, req.user.id,
-    );
-    const propertyId = propRes.lastInsertRowid;
-
-    // 2. Compute current stage from days-to-expiry
-    const daysToExpiry = Math.ceil(
-      (new Date(b.expiry_date) - new Date()) / 86400000
-    );
-    const startStage = stageForDays(daysToExpiry);
-
-    // 3. Insert cycle
-    const cycRes = db.prepare(`
-      INSERT INTO fire_noc_cycle (
-        property_id, cycle_no, expiry_date, current_stage,
-        status, owner_user_id
-      ) VALUES (?, 1, ?, ?, 'active', ?)
-    `).run(propertyId, b.expiry_date, startStage, b.owner_user_id || req.user.id);
-    const cycleId = cycRes.lastInsertRowid;
-
-    // 4. Stage history first row
-    db.prepare(`
-      INSERT INTO fire_noc_stage_history
-        (cycle_id, from_stage, to_stage, triggered_by, notes)
-      VALUES (?, NULL, ?, ?, 'cycle created')
-    `).run(cycleId, startStage, String(req.user.id));
-
-    return { propertyId, cycleId, startStage };
-  });
-
   try {
-    const { propertyId, cycleId, startStage } = txn();
+    const { propertyId, cycleId, startStage } = await pg.tx(async (t) => {
+      // 1. Insert property
+      const propRes = await t.run(`
+        INSERT INTO fire_noc_property (
+          customer_id, state, building_type, building_name, address, pincode,
+          decision_maker_name, decision_maker_phone, decision_maker_email,
+          ticket_size_band, source, created_by, updated_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+        b.customer_id || null, b.state, b.building_type,
+        b.building_name || null, b.address || null, b.pincode || null,
+        b.decision_maker_name || null, b.decision_maker_phone || null,
+        b.decision_maker_email || null, b.ticket_size_band || null,
+        b.source || 'manual', req.user.id, req.user.id,
+      );
+      const propertyId = propRes.lastInsertRowid;
+
+      // 2. Compute current stage from days-to-expiry
+      const daysToExpiry = Math.ceil(
+        (new Date(b.expiry_date) - new Date()) / 86400000
+      );
+      const startStage = stageForDays(daysToExpiry);
+
+      // 3. Insert cycle
+      const cycRes = await t.run(`
+        INSERT INTO fire_noc_cycle (
+          property_id, cycle_no, expiry_date, current_stage,
+          status, owner_user_id
+        ) VALUES (?, 1, ?, ?, 'active', ?)
+      `, propertyId, b.expiry_date, startStage, b.owner_user_id || req.user.id);
+      const cycleId = cycRes.lastInsertRowid;
+
+      // 4. Stage history first row
+      await t.run(`
+        INSERT INTO fire_noc_stage_history
+          (cycle_id, from_stage, to_stage, triggered_by, notes)
+        VALUES (?, NULL, ?, ?, 'cycle created')
+      `, cycleId, startStage, String(req.user.id));
+
+      return { propertyId, cycleId, startStage };
+    });
+
     logAuditEvent({
       user: req.user,
       action: 'CREATE', entity_type: 'fire_noc_cycle', entity_id: cycleId,
@@ -353,9 +357,8 @@ function normalizeDate(v) {
   return null;
 }
 
-router.post('/cycles/import', requirePermission('fire_noc', 'create'), upload.single('file'), (req, res) => {
+router.post('/cycles/import', requirePermission('fire_noc', 'create'), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const db = getDb();
   let wb, rows;
   try {
     wb = XLSX.readFile(req.file.path);
@@ -401,14 +404,14 @@ router.post('/cycles/import', requirePermission('fire_noc', 'create'), upload.si
     }
 
     try {
-      const txn = db.transaction(() => {
-        const propRes = db.prepare(`
+      const out = await pg.tx(async (t) => {
+        const propRes = await t.run(`
           INSERT INTO fire_noc_property (
             customer_id, state, building_type, building_name, address, pincode,
             decision_maker_name, decision_maker_phone, decision_maker_email,
             ticket_size_band, source, created_by, updated_by
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
+        `,
           null, state, building_type,
           r['building_name'] || null, r['address'] || null, r['pincode'] || null,
           r['decision_maker_name'] || null, r['decision_maker_phone'] || null,
@@ -424,21 +427,20 @@ router.post('/cycles/import', requirePermission('fire_noc', 'create'), upload.si
         // but defensive).
         const days = daysToExpiry(expiry_date);
         const exp = expectedStageAndStatus(days, 'active') || { stage: stageForDays(days), status: 'active' };
-        const cycRes = db.prepare(`
+        const cycRes = await t.run(`
           INSERT INTO fire_noc_cycle (
             property_id, cycle_no, expiry_date, current_stage,
             status, owner_user_id
           ) VALUES (?, 1, ?, ?, ?, ?)
-        `).run(propertyId, expiry_date, exp.stage, exp.status, req.user.id);
+        `, propertyId, expiry_date, exp.stage, exp.status, req.user.id);
         const cycleId = cycRes.lastInsertRowid;
-        db.prepare(`
+        await t.run(`
           INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes)
           VALUES (?, NULL, ?, ?, ?)
-        `).run(cycleId, exp.stage, String(req.user.id),
+        `, cycleId, exp.stage, String(req.user.id),
                `cycle created via bulk import · days_to_expiry=${days}${exp.status === 'archived' ? ' · auto-archived (past expiry)' : ''}`);
         return { propertyId, cycleId, startStage: exp.stage };
       });
-      const out = txn();
       created.push({
         row: i + 2,
         cycle_id: out.cycleId,
@@ -470,38 +472,40 @@ router.post('/cycles/import', requirePermission('fire_noc', 'create'), upload.si
 });
 
 // ── POST /api/fire-noc/cycles/:id/advance ───────────────────────
-router.post('/cycles/:id/advance', requirePermission('fire_noc', 'create'), (req, res) => {
-  const db = getDb();
-  const id = +req.params.id;
-  const { to_stage, notes } = req.body || {};
-  if (!to_stage) return res.status(400).json({ error: 'to_stage is required' });
+router.post('/cycles/:id/advance', requirePermission('fire_noc', 'create'), async (req, res) => {
+  try {
+    const id = +req.params.id;
+    const { to_stage, notes } = req.body || {};
+    if (!to_stage) return res.status(400).json({ error: 'to_stage is required' });
 
-  const cycle = db.prepare('SELECT current_stage FROM fire_noc_cycle WHERE id=?').get(id);
-  if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
-  if (cycle.current_stage === to_stage) {
-    return res.status(400).json({ error: `Cycle is already at stage ${to_stage}` });
-  }
-
-  const txn = db.transaction(() => {
-    db.prepare(`UPDATE fire_noc_cycle SET current_stage=?, stage_entered_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(to_stage, id);
-    db.prepare(`UPDATE fire_noc_stage_history SET exited_at=CURRENT_TIMESTAMP WHERE cycle_id=? AND to_stage=? AND exited_at IS NULL`).run(id, cycle.current_stage);
-    try {
-      db.prepare(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`)
-        .run(id, cycle.current_stage, to_stage, String(req.user.id), notes || null);
-    } catch (e) {
-      // UNIQUE(cycle_id, to_stage, entered_at) — same-second dup.
-      // Idempotent: swallow but log.
-      if (!String(e.message).includes('UNIQUE')) throw e;
+    const cycle = await pg.get('SELECT current_stage FROM fire_noc_cycle WHERE id=?', id);
+    if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
+    if (cycle.current_stage === to_stage) {
+      return res.status(400).json({ error: `Cycle is already at stage ${to_stage}` });
     }
-  });
-  txn();
 
-  logAuditEvent({
-    user: req.user, action: 'UPDATE', entity_type: 'fire_noc_cycle',
-    entity_id: id, method: 'POST', path: '/api/fire-noc/cycles/:id/advance',
-    body: { from: cycle.current_stage, to: to_stage, notes },
-  });
-  res.json({ id, current_stage: to_stage });
+    await pg.tx(async (t) => {
+      await t.run(`UPDATE fire_noc_cycle SET current_stage=?, stage_entered_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, to_stage, id);
+      await t.run(`UPDATE fire_noc_stage_history SET exited_at=CURRENT_TIMESTAMP WHERE cycle_id=? AND to_stage=? AND exited_at IS NULL`, id, cycle.current_stage);
+      try {
+        await t.savepoint(async () => {
+          await t.run(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`,
+            id, cycle.current_stage, to_stage, String(req.user.id), notes || null);
+        });
+      } catch (e) {
+        // UNIQUE(cycle_id, to_stage, entered_at) — same-second dup.
+        // Idempotent: swallow but log.
+        if (!String(e.message).includes('UNIQUE')) throw e;
+      }
+    });
+
+    logAuditEvent({
+      user: req.user, action: 'UPDATE', entity_type: 'fire_noc_cycle',
+      entity_id: id, method: 'POST', path: '/api/fire-noc/cycles/:id/advance',
+      body: { from: cycle.current_stage, to: to_stage, notes },
+    });
+    res.json({ id, current_stage: to_stage });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── PATCH /api/fire-noc/cycles/:id ──────────────────────────────
@@ -513,106 +517,110 @@ router.post('/cycles/:id/advance', requirePermission('fire_noc', 'create'), (req
 // Property-level fields update fire_noc_property; cycle-level fields
 // update fire_noc_cycle.  Every change is mirrored into stage_history
 // as a note so the timeline shows what changed and when.
-router.patch('/cycles/:id', requirePermission('fire_noc', 'edit'), (req, res) => {
-  const db = getDb();
-  const id = +req.params.id;
-  const b = req.body || {};
-  const cycle = db.prepare('SELECT c.*, p.id property_id FROM fire_noc_cycle c JOIN fire_noc_property p ON c.property_id=p.id WHERE c.id=?').get(id);
-  if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
-
-  // Matches the CHECK constraint on fire_noc_cycle.status.  UI may
-  // display 'archived' as "Lapsed" — storage stays 'archived'.
-  const allowedStatuses = ['active', 'lost', 'renewed', 'archived'];
-  const changes = [];
-  const txn = db.transaction(() => {
-    if (b.status !== undefined) {
-      if (!allowedStatuses.includes(b.status)) {
-        throw new Error(`status must be one of: ${allowedStatuses.join(', ')}`);
-      }
-      if (b.status !== cycle.status) {
-        db.prepare(`UPDATE fire_noc_cycle SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(b.status, id);
-        changes.push(`status: ${cycle.status} → ${b.status}`);
-      }
-    }
-    if (b.owner_user_id !== undefined) {
-      const newOwnerId = b.owner_user_id ? +b.owner_user_id : null;
-      if (newOwnerId !== cycle.owner_user_id) {
-        db.prepare(`UPDATE fire_noc_cycle SET owner_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(newOwnerId, id);
-        const newName = newOwnerId ? (db.prepare('SELECT name FROM users WHERE id=?').get(newOwnerId)?.name || `user#${newOwnerId}`) : '—';
-        changes.push(`owner → ${newName}`);
-      }
-    }
-    // Property-level edits
-    const propFields = ['decision_maker_name', 'decision_maker_phone', 'decision_maker_email', 'ticket_size_band'];
-    const propUpdates = [];
-    const propParams = [];
-    propFields.forEach(f => {
-      if (b[f] !== undefined && b[f] !== cycle[f]) {
-        propUpdates.push(`${f}=?`);
-        propParams.push(b[f] || null);
-        changes.push(`${f}: ${cycle[f] || '—'} → ${b[f] || '—'}`);
-      }
-    });
-    if (propUpdates.length) {
-      propParams.push(cycle.property_id);
-      db.prepare(`UPDATE fire_noc_property SET ${propUpdates.join(', ')}, updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE id=?`)
-        .run(...propParams.slice(0, -1), req.user.id, propParams[propParams.length - 1]);
-    }
-    // Timeline note so the change is visible in the drawer
-    if (changes.length) {
-      try {
-        db.prepare(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`)
-          .run(id, cycle.current_stage, cycle.current_stage, String(req.user.id), `EDIT · ${changes.join(' · ')}`);
-      } catch (e) {
-        if (!String(e.message).includes('UNIQUE')) throw e;
-      }
-    }
-  });
-
+router.patch('/cycles/:id', requirePermission('fire_noc', 'edit'), async (req, res) => {
   try {
-    txn();
-  } catch (e) {
-    return res.status(400).json({ error: e.message });
-  }
+    const id = +req.params.id;
+    const b = req.body || {};
+    const cycle = await pg.get('SELECT c.*, p.id property_id FROM fire_noc_cycle c JOIN fire_noc_property p ON c.property_id=p.id WHERE c.id=?', id);
+    if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
 
-  logAuditEvent({
-    user: req.user, action: 'UPDATE', entity_type: 'fire_noc_cycle',
-    entity_id: id, method: 'PATCH', path: '/api/fire-noc/cycles/:id',
-    body: { changes },
-  });
-  res.json({ id, changes });
+    // Matches the CHECK constraint on fire_noc_cycle.status.  UI may
+    // display 'archived' as "Lapsed" — storage stays 'archived'.
+    const allowedStatuses = ['active', 'lost', 'renewed', 'archived'];
+    const changes = [];
+    try {
+      await pg.tx(async (t) => {
+        if (b.status !== undefined) {
+          if (!allowedStatuses.includes(b.status)) {
+            throw new Error(`status must be one of: ${allowedStatuses.join(', ')}`);
+          }
+          if (b.status !== cycle.status) {
+            await t.run(`UPDATE fire_noc_cycle SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, b.status, id);
+            changes.push(`status: ${cycle.status} → ${b.status}`);
+          }
+        }
+        if (b.owner_user_id !== undefined) {
+          const newOwnerId = b.owner_user_id ? +b.owner_user_id : null;
+          if (newOwnerId !== cycle.owner_user_id) {
+            await t.run(`UPDATE fire_noc_cycle SET owner_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, newOwnerId, id);
+            const newName = newOwnerId ? ((await t.get('SELECT name FROM users WHERE id=?', newOwnerId))?.name || `user#${newOwnerId}`) : '—';
+            changes.push(`owner → ${newName}`);
+          }
+        }
+        // Property-level edits
+        const propFields = ['decision_maker_name', 'decision_maker_phone', 'decision_maker_email', 'ticket_size_band'];
+        const propUpdates = [];
+        const propParams = [];
+        propFields.forEach(f => {
+          if (b[f] !== undefined && b[f] !== cycle[f]) {
+            propUpdates.push(`${f}=?`);
+            propParams.push(b[f] || null);
+            changes.push(`${f}: ${cycle[f] || '—'} → ${b[f] || '—'}`);
+          }
+        });
+        if (propUpdates.length) {
+          propParams.push(cycle.property_id);
+          await t.run(`UPDATE fire_noc_property SET ${propUpdates.join(', ')}, updated_at=CURRENT_TIMESTAMP, updated_by=? WHERE id=?`,
+            ...propParams.slice(0, -1), req.user.id, propParams[propParams.length - 1]);
+        }
+        // Timeline note so the change is visible in the drawer
+        if (changes.length) {
+          try {
+            await t.savepoint(async () => {
+              await t.run(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`,
+                id, cycle.current_stage, cycle.current_stage, String(req.user.id), `EDIT · ${changes.join(' · ')}`);
+            });
+          } catch (e) {
+            if (!String(e.message).includes('UNIQUE')) throw e;
+          }
+        }
+      });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    logAuditEvent({
+      user: req.user, action: 'UPDATE', entity_type: 'fire_noc_cycle',
+      entity_id: id, method: 'PATCH', path: '/api/fire-noc/cycles/:id',
+      body: { changes },
+    });
+    res.json({ id, changes });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── POST /api/fire-noc/cycles/:id/note ──────────────────────────
 // Free-text note that lands in stage_history without changing the
 // stage — for "called customer, will revert next week" type entries.
-router.post('/cycles/:id/note', requirePermission('fire_noc', 'edit'), (req, res) => {
-  const db = getDb();
-  const id = +req.params.id;
-  const note = (req.body?.note || '').trim();
-  if (!note) return res.status(400).json({ error: 'note is required' });
-  const cycle = db.prepare('SELECT current_stage FROM fire_noc_cycle WHERE id=?').get(id);
-  if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
+router.post('/cycles/:id/note', requirePermission('fire_noc', 'edit'), async (req, res) => {
   try {
-    db.prepare(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`)
-      .run(id, cycle.current_stage, cycle.current_stage, String(req.user.id), `NOTE · ${note}`);
-  } catch (e) {
-    if (!String(e.message).includes('UNIQUE')) throw e;
-  }
-  logAuditEvent({
-    user: req.user, action: 'CREATE', entity_type: 'fire_noc_cycle_note',
-    entity_id: id, method: 'POST', path: '/api/fire-noc/cycles/:id/note',
-    body: { note: note.slice(0, 200) },
-  });
-  res.json({ id });
+    const id = +req.params.id;
+    const note = (req.body?.note || '').trim();
+    if (!note) return res.status(400).json({ error: 'note is required' });
+    const cycle = await pg.get('SELECT current_stage FROM fire_noc_cycle WHERE id=?', id);
+    if (!cycle) return res.status(404).json({ error: 'Cycle not found' });
+    try {
+      await pg.run(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`,
+        id, cycle.current_stage, cycle.current_stage, String(req.user.id), `NOTE · ${note}`);
+    } catch (e) {
+      if (!String(e.message).includes('UNIQUE')) throw e;
+    }
+    logAuditEvent({
+      user: req.user, action: 'CREATE', entity_type: 'fire_noc_cycle_note',
+      entity_id: id, method: 'POST', path: '/api/fire-noc/cycles/:id/note',
+      body: { note: note.slice(0, 200) },
+    });
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── GET /api/fire-noc/state-rules ───────────────────────────────
-router.get('/state-rules', requirePermission('fire_noc', 'view'), (req, res) => {
-  const rows = getDb().prepare(
-    'SELECT state, building_type_filter, cycle_years FROM fire_noc_state_cycle_rule ORDER BY state, building_type_filter'
-  ).all();
-  res.json(rows);
+router.get('/state-rules', requirePermission('fire_noc', 'view'), async (req, res) => {
+  try {
+    const rows = await pg.all(
+      'SELECT state, building_type_filter, cycle_years FROM fire_noc_state_cycle_rule ORDER BY state, building_type_filter'
+    );
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

@@ -14,14 +14,13 @@
 // other ERP schedulers (backup-db, dailyAuditSnapshot, dprAutoPrompt,
 // cashFidelityCron, dailyCmdEmail).
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { syncAllActiveCycles } = require('../lib/fireNocSync');
 
-function runHourly() {
+async function runHourly() {
   if (process.env.ERP_DISABLE_FIRE_NOC_CRON === '1') return;
   try {
-    const db = getDb();
-    const r = syncAllActiveCycles(db, { trigger: 'hourly_cron' });
+    const r = await syncAllActiveCycles(pg, { trigger: 'hourly_cron' });
     if (r.changed > 0) {
       console.log(`[fire-noc-cron] ${r.changed}/${r.scanned} cycles auto-corrected`);
     }
@@ -37,9 +36,11 @@ function scheduleFireNocCron() {
   }
   // First run 60 s after boot so we don't slow startup, then every hour
   console.log('[fire-noc-cron] scheduled — first run in 60s, then hourly');
-  setTimeout(() => {
-    runHourly();
-    setInterval(runHourly, 60 * 60 * 1000);
+  setTimeout(async () => {
+    try { await runHourly(); } catch (e) { console.error('[fire-noc-cron]', e.message); }
+    setInterval(async () => {
+      try { await runHourly(); } catch (e) { console.error('[fire-noc-cron]', e.message); }
+    }, 60 * 60 * 1000);
   }, 60 * 1000);
 }
 
@@ -47,24 +48,24 @@ function scheduleFireNocCron() {
 // were imported BEFORE the autosync existed; they're stuck at
 // stage=CYCLE_CLOSE / status=active.  Run the sync once on boot,
 // guarded by an app_settings flag so it never repeats.
-function backfillOnceOnBoot() {
+async function backfillOnceOnBoot() {
   if (process.env.ERP_DISABLE_FIRE_NOC_CRON === '1') return;
   try {
-    const db = getDb();
     // Make sure the flag table exists (it does in production, but
     // belt-and-braces for fresh installs)
-    try { db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
-    const flag = db.prepare(`SELECT value FROM app_settings WHERE key=?`).get('fire_noc_autosync_backfilled_v1');
+    try { await pg.run(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT)`); } catch (_) {}
+    const flag = await pg.get(`SELECT value FROM app_settings WHERE key=?`, 'fire_noc_autosync_backfilled_v1');
     if (flag) return;  // already done
 
-    const r = syncAllActiveCycles(db, { trigger: 'boot_backfill' });
+    const r = await syncAllActiveCycles(pg, { trigger: 'boot_backfill' });
 
     // Always mark the flag — even if some rows failed, we don't want
     // a single bad row to make the backfill retry on every boot
     // forever.  Mam can re-run it manually via the cron tick.  The
     // per-row failures are logged below for transparency.
-    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)`)
-      .run('fire_noc_autosync_backfilled_v1', new Date().toISOString());
+    await pg.run(`INSERT INTO app_settings (key, value) VALUES (?, ?)
+                  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      'fire_noc_autosync_backfilled_v1', new Date().toISOString());
 
     if (r.failed > 0) {
       console.warn(`[fire-noc-cron] boot backfill partial: ${r.changed}/${r.scanned} cycles corrected, ${r.failed} failed`);

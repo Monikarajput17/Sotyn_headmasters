@@ -39,22 +39,22 @@ function classifyRole(roleNames) {
 }
 
 // Full per-project plan (unique projects grouped by normalized name).
-function computeManpowerPlan(db) {
-  const bbs = db.prepare(
+async function computeManpowerPlan(db) {
+  const bbs = await db.all(
     `SELECT id, lead_no, project_name, company_name, client_name, po_amount, status
        FROM business_book`
-  ).all();
-  const sites = db.prepare(`SELECT id, business_book_id FROM sites`).all();
+  );
+  const sites = await db.all(`SELECT id, business_book_id FROM sites`);
   // Manpower per DPR: prefer the sum of dpr_contractors.manpower, else the
   // legacy dpr.contractor_manpower. One row per DPR.
-  const dprRows = db.prepare(
+  const dprRows = await db.all(
     `SELECT d.id, d.site_id, d.report_date,
             CASE WHEN COALESCE(SUM(dc.manpower), 0) > 0 THEN SUM(dc.manpower)
                  ELSE COALESCE(d.contractor_manpower, 0) END AS mp
        FROM dpr d
        LEFT JOIN dpr_contractors dc ON dc.dpr_id = d.id
       GROUP BY d.id`
-  ).all();
+  );
   const norm = s => String(s || '').trim();
   const keyOf = bb => (norm(bb.project_name) || norm(bb.company_name) || norm(bb.client_name)
     || (bb.lead_no ? `Lead ${bb.lead_no}` : `BB#${bb.id}`)).toLowerCase();
@@ -85,9 +85,9 @@ function computeManpowerPlan(db) {
   // Actual Site Eng / Jr / Foreman per project — the site engineers on each
   // project's POs, classified by assigned ROLE, active users only.
   try {
-    const pos = db.prepare(
+    const pos = await db.all(
       `SELECT business_book_id, site_engineer_id, site_engineer_ids FROM purchase_orders`
-    ).all();
+    );
     for (const po of pos) {
       const g = groups.get(groupByBB.get(po.business_book_id));
       if (!g) continue;
@@ -101,14 +101,15 @@ function computeManpowerPlan(db) {
     if (allEngIds.length) {
       const ph = allEngIds.map(() => '?').join(',');
       const userMap = new Map(
-        db.prepare(
-          `SELECT u.id, u.name, GROUP_CONCAT(r.name) AS role_names
+        (await db.all(
+          `SELECT u.id, u.name, STRING_AGG(r.name, ',') AS role_names
              FROM users u
              LEFT JOIN user_roles ur ON ur.user_id = u.id
              LEFT JOIN roles r ON r.id = ur.role_id
             WHERE u.id IN (${ph}) AND u.active = 1
-            GROUP BY u.id`
-        ).all(...allEngIds).map(u => [u.id, u])
+            GROUP BY u.id`,
+          ...allEngIds
+        )).map(u => [u.id, u])
       );
       for (const g of groups.values()) {
         const seN = [], jrN = [], fmN = [];
@@ -127,7 +128,7 @@ function computeManpowerPlan(db) {
 
   const settings = new Map();
   try {
-    for (const s of db.prepare(`SELECT project_key, required_override, category, site_eng_override, jr_site_eng_override, foreman_override FROM manpower_project_settings`).all()) {
+    for (const s of await db.all(`SELECT project_key, required_override, category, site_eng_override, jr_site_eng_override, foreman_override FROM manpower_project_settings`)) {
       settings.set(s.project_key, s);
     }
   } catch (e) { /* table may not exist on a very stale DB */ }
@@ -189,9 +190,9 @@ function computeManpowerPlan(db) {
 
 // Company-wide totals for the scorecard: Σ required vs Σ actual across all
 // non-handover projects — the same numbers the Manpower Plan page totals to.
-function manpowerTotals(db) {
+async function manpowerTotals(db) {
   let required = 0, actual = 0;
-  for (const p of computeManpowerPlan(db)) {
+  for (const p of await computeManpowerPlan(db)) {
     if (p.is_handover) continue;
     required += +p.required || 0;
     actual += +p.actual || 0;

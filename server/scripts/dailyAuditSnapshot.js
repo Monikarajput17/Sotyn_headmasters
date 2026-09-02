@@ -18,7 +18,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { getDb } = require('../db/schema');
 
 // Re-use the same compute functions as the live HTTP routes.  We avoid
 // importing the Express router directly (it has middleware and req/res

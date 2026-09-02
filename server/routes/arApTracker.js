@@ -11,182 +11,154 @@
 const express = require('express');
 const XLSX = require('xlsx');
 const multer = require('multer');
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { authMiddleware, requirePermission } = require('../middleware/auth');
 const router = express.Router();
 router.use(authMiddleware);
 const uploadXlsx = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-// Idempotent schema — created at module load so the tables exist before any
-// handler runs, without touching the central schema.js SQL block.
-getDb().exec(`
-  CREATE TABLE IF NOT EXISTS arap_entries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    kind TEXT NOT NULL CHECK(kind IN ('AR','AP')),
-    party TEXT NOT NULL,
-    due_date DATE NOT NULL,
-    planned REAL DEFAULT 0,
-    actual REAL,
-    status TEXT DEFAULT 'planned' CHECK(status IN ('planned','partial','done','cancelled')),
-    note TEXT,
-    created_by INTEGER,
-    created_by_name TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_arap_kind  ON arap_entries(kind);
-  CREATE INDEX IF NOT EXISTS idx_arap_date  ON arap_entries(due_date);
-  CREATE INDEX IF NOT EXISTS idx_arap_party ON arap_entries(party);
-
-  CREATE TABLE IF NOT EXISTS arap_changelog (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    entry_id INTEGER,
-    kind TEXT,
-    party TEXT,
-    field TEXT,
-    old_value TEXT,
-    new_value TEXT,
-    remark TEXT NOT NULL,
-    changed_by INTEGER,
-    changed_by_name TEXT,
-    changed_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-  CREATE INDEX IF NOT EXISTS idx_arap_cl_entry ON arap_changelog(entry_id);
-  CREATE INDEX IF NOT EXISTS idx_arap_cl_date  ON arap_changelog(changed_at DESC);
-`);
+// The arap_entries / arap_changelog tables (plus their indexes) now live in the
+// migrated Postgres schema — the old module-load CREATE TABLE block is gone.
 
 // The figure that actually moves cash: the realised actual once it exists,
 // else the planned forecast.
 const effective = (r) => (r.actual != null && r.actual !== '' ? +r.actual : +r.planned || 0);
 
 const logChange = (db, entry, field, oldV, newV, remark, user) =>
-  db.prepare(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name)
-              VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(entry.id, entry.kind, entry.party, field,
-         oldV == null ? '' : String(oldV), newV == null ? '' : String(newV),
-         remark, user.id, user.name || '');
+  db.run(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name)
+              VALUES (?,?,?,?,?,?,?,?,?)`,
+    entry.id, entry.kind, entry.party, field,
+    oldV == null ? '' : String(oldV), newV == null ? '' : String(newV),
+    remark, user.id, user.name || '');
 
 // GET list — filter by kind (AR/AP), date range, party, free-text search.
-router.get('/', requirePermission('ar_ap_tracker', 'view'), (req, res) => {
-  const db = getDb();
-  const { kind, from, to, party, search } = req.query;
-  const where = [], args = [];
-  if (kind) { where.push('kind = ?'); args.push(kind); }
-  if (from) { where.push('due_date >= ?'); args.push(from); }
-  if (to) { where.push('due_date <= ?'); args.push(to); }
-  if (party) { where.push('party = ?'); args.push(party); }
-  if (search) { where.push('(party LIKE ? OR note LIKE ?)'); args.push(`%${search}%`, `%${search}%`); }
-  const sql = `SELECT * FROM arap_entries ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY due_date, party`;
-  res.json(db.prepare(sql).all(...args));
+router.get('/', requirePermission('ar_ap_tracker', 'view'), async (req, res) => {
+  try {
+    const { kind, from, to, party, search } = req.query;
+    const where = [], args = [];
+    if (kind) { where.push('kind = ?'); args.push(kind); }
+    if (from) { where.push('due_date >= ?'); args.push(from); }
+    if (to) { where.push('due_date <= ?'); args.push(to); }
+    if (party) { where.push('party = ?'); args.push(party); }
+    if (search) { where.push('(party ILIKE ? OR note ILIKE ?)'); args.push(`%${search}%`, `%${search}%`); }
+    const sql = `SELECT * FROM arap_entries ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY due_date, party`;
+    res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET summary — per-date AR total, AP total, net, running balance (Lakhs).
-router.get('/summary', requirePermission('ar_ap_tracker', 'view'), (req, res) => {
-  const db = getDb();
-  const rows = db.prepare('SELECT * FROM arap_entries').all();
-  const byDate = {};
-  for (const r of rows) {
-    const d = (byDate[r.due_date] || (byDate[r.due_date] = { date: r.due_date, ar: 0, ap: 0 }));
-    if (r.kind === 'AR') d.ar += effective(r); else d.ap += effective(r);
-  }
-  let bal = 0;
-  const out = Object.values(byDate).sort((a, b) => String(a.date).localeCompare(String(b.date)))
-    .map(d => { const net = d.ar - d.ap; bal += net; return { ...d, net: +net.toFixed(2), balance: +bal.toFixed(2) }; });
-  const totAR = out.reduce((s, d) => s + d.ar, 0), totAP = out.reduce((s, d) => s + d.ap, 0);
-  res.json({ rows: out, totals: { ar: +totAR.toFixed(2), ap: +totAP.toFixed(2), net: +(totAR - totAP).toFixed(2) } });
+router.get('/summary', requirePermission('ar_ap_tracker', 'view'), async (req, res) => {
+  try {
+    const rows = await pg.all('SELECT * FROM arap_entries');
+    const byDate = {};
+    for (const r of rows) {
+      const d = (byDate[r.due_date] || (byDate[r.due_date] = { date: r.due_date, ar: 0, ap: 0 }));
+      if (r.kind === 'AR') d.ar += effective(r); else d.ap += effective(r);
+    }
+    let bal = 0;
+    const out = Object.values(byDate).sort((a, b) => String(a.date).localeCompare(String(b.date)))
+      .map(d => { const net = d.ar - d.ap; bal += net; return { ...d, net: +net.toFixed(2), balance: +bal.toFixed(2) }; });
+    const totAR = out.reduce((s, d) => s + d.ar, 0), totAP = out.reduce((s, d) => s + d.ap, 0);
+    res.json({ rows: out, totals: { ar: +totAR.toFixed(2), ap: +totAP.toFixed(2), net: +(totAR - totAP).toFixed(2) } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET change log — newest first, optional kind + free-text search.
-router.get('/changelog', requirePermission('ar_ap_tracker', 'view'), (req, res) => {
-  const db = getDb();
-  const { kind, search } = req.query;
-  const where = [], args = [];
-  if (kind) { where.push('kind = ?'); args.push(kind); }
-  if (search) { where.push('(party LIKE ? OR remark LIKE ? OR field LIKE ? OR changed_by_name LIKE ?)'); args.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`); }
-  const sql = `SELECT * FROM arap_changelog ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY changed_at DESC, id DESC LIMIT 1000`;
-  res.json(db.prepare(sql).all(...args));
+router.get('/changelog', requirePermission('ar_ap_tracker', 'view'), async (req, res) => {
+  try {
+    const { kind, search } = req.query;
+    const where = [], args = [];
+    if (kind) { where.push('kind = ?'); args.push(kind); }
+    if (search) { where.push('(party ILIKE ? OR remark ILIKE ? OR field ILIKE ? OR changed_by_name ILIKE ?)'); args.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`); }
+    const sql = `SELECT * FROM arap_changelog ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY changed_at DESC, id DESC LIMIT 1000`;
+    res.json(await pg.all(sql, ...args));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // GET party suggestions — unique AR names from the Business Book (client +
 // company) and unique AP names from the Vendors master, for the Add/Edit
 // dropdowns (mam 2026-06-18).
-router.get('/parties', requirePermission('ar_ap_tracker', 'view'), (req, res) => {
-  const db = getDb();
-  const uniq = (arr) => [...new Set(arr.map(s => String(s || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const ar = uniq(db.prepare('SELECT client_name, company_name FROM business_book').all().flatMap(r => [r.client_name, r.company_name]));
-  const ap = uniq(db.prepare('SELECT name FROM vendors').all().map(r => r.name));
-  res.json({ ar, ap });
+router.get('/parties', requirePermission('ar_ap_tracker', 'view'), async (req, res) => {
+  try {
+    const uniq = (arr) => [...new Set(arr.map(s => String(s || '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    const ar = uniq((await pg.all('SELECT client_name, company_name FROM business_book')).flatMap(r => [r.client_name, r.company_name]));
+    const ap = uniq((await pg.all('SELECT name FROM vendors')).map(r => r.name));
+    res.json({ ar, ap });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // POST create — no remark required for a brand-new entry. We still record a
 // "created" change-log row so the audit trail is complete.
-router.post('/', requirePermission('ar_ap_tracker', 'create'), (req, res) => {
-  const db = getDb();
-  const { kind, party, due_date, planned, actual, status, note } = req.body;
-  if (!['AR', 'AP'].includes(kind)) return res.status(400).json({ error: 'kind must be AR or AP' });
-  if (!party || !String(party).trim()) return res.status(400).json({ error: 'Party is required' });
-  if (!due_date) return res.status(400).json({ error: 'Date is required' });
-  const info = db.prepare(`INSERT INTO arap_entries (kind, party, due_date, planned, actual, status, note, created_by, created_by_name)
-                           VALUES (?,?,?,?,?,?,?,?,?)`)
-    .run(kind, String(party).trim(), due_date, +planned || 0,
-         actual === '' || actual == null ? null : +actual,
-         status || 'planned', note || null, req.user.id, req.user.name || '');
-  const row = db.prepare('SELECT * FROM arap_entries WHERE id=?').get(info.lastInsertRowid);
-  logChange(db, row, 'created', '', `${kind} · ${party} · ${due_date} · ₹${+planned || 0}L`, note || 'New entry', req.user);
-  res.json(row);
+router.post('/', requirePermission('ar_ap_tracker', 'create'), async (req, res) => {
+  try {
+    const { kind, party, due_date, planned, actual, status, note } = req.body;
+    if (!['AR', 'AP'].includes(kind)) return res.status(400).json({ error: 'kind must be AR or AP' });
+    if (!party || !String(party).trim()) return res.status(400).json({ error: 'Party is required' });
+    if (!due_date) return res.status(400).json({ error: 'Date is required' });
+    const info = await pg.run(`INSERT INTO arap_entries (kind, party, due_date, planned, actual, status, note, created_by, created_by_name)
+                             VALUES (?,?,?,?,?,?,?,?,?)`,
+      kind, String(party).trim(), due_date, +planned || 0,
+      actual === '' || actual == null ? null : +actual,
+      status || 'planned', note || null, req.user.id, req.user.name || '');
+    const row = await pg.get('SELECT * FROM arap_entries WHERE id=?', info.lastInsertRowid);
+    await logChange(pg, row, 'created', '', `${kind} · ${party} · ${due_date} · ₹${+planned || 0}L`, note || 'New entry', req.user);
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // PUT edit — a change to planned / actual / due_date REQUIRES a remark; each
 // changed field is logged individually with that remark.
-router.put('/:id', requirePermission('ar_ap_tracker', 'edit'), (req, res) => {
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM arap_entries WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  const { party, due_date, planned, actual, status, note, remark } = req.body;
+router.put('/:id', requirePermission('ar_ap_tracker', 'edit'), async (req, res) => {
+  try {
+    const cur = await pg.get('SELECT * FROM arap_entries WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    const { party, due_date, planned, actual, status, note, remark } = req.body;
 
-  // Build the set of real changes vs the current row.
-  const next = {
-    party: party != null ? String(party).trim() : cur.party,
-    due_date: due_date != null ? due_date : cur.due_date,
-    planned: planned != null && planned !== '' ? +planned : (planned === '' ? 0 : cur.planned),
-    actual: actual === '' || actual == null ? (actual === '' ? null : cur.actual) : +actual,
-    status: status != null ? status : cur.status,
-    note: note != null ? note : cur.note,
-  };
-  const numEq = (a, b) => (a == null ? null : +a) === (b == null ? null : +b);
-  const changes = [];
-  if (next.party !== cur.party) changes.push(['party', cur.party, next.party]);
-  if (next.due_date !== cur.due_date) changes.push(['due_date', cur.due_date, next.due_date]);
-  if (!numEq(next.planned, cur.planned)) changes.push(['planned', cur.planned, next.planned]);
-  if (!numEq(next.actual, cur.actual)) changes.push(['actual', cur.actual, next.actual]);
-  if (next.status !== cur.status) changes.push(['status', cur.status, next.status]);
-  if ((next.note || '') !== (cur.note || '')) changes.push(['note', cur.note, next.note]);
+    // Build the set of real changes vs the current row.
+    const next = {
+      party: party != null ? String(party).trim() : cur.party,
+      due_date: due_date != null ? due_date : cur.due_date,
+      planned: planned != null && planned !== '' ? +planned : (planned === '' ? 0 : cur.planned),
+      actual: actual === '' || actual == null ? (actual === '' ? null : cur.actual) : +actual,
+      status: status != null ? status : cur.status,
+      note: note != null ? note : cur.note,
+    };
+    const numEq = (a, b) => (a == null ? null : +a) === (b == null ? null : +b);
+    const changes = [];
+    if (next.party !== cur.party) changes.push(['party', cur.party, next.party]);
+    if (next.due_date !== cur.due_date) changes.push(['due_date', cur.due_date, next.due_date]);
+    if (!numEq(next.planned, cur.planned)) changes.push(['planned', cur.planned, next.planned]);
+    if (!numEq(next.actual, cur.actual)) changes.push(['actual', cur.actual, next.actual]);
+    if (next.status !== cur.status) changes.push(['status', cur.status, next.status]);
+    if ((next.note || '') !== (cur.note || '')) changes.push(['note', cur.note, next.note]);
 
-  if (!changes.length) return res.json(cur); // nothing to do
+    if (!changes.length) return res.json(cur); // nothing to do
 
-  // Mandatory-remark gate: any amount or date change needs a reason.
-  const sensitive = changes.some(c => ['planned', 'actual', 'due_date'].includes(c[0]));
-  if (sensitive && (!remark || String(remark).trim().length < 3)) {
-    return res.status(400).json({ error: 'A remark (min 3 chars) is required to change an amount or date.' });
-  }
+    // Mandatory-remark gate: any amount or date change needs a reason.
+    const sensitive = changes.some(c => ['planned', 'actual', 'due_date'].includes(c[0]));
+    if (sensitive && (!remark || String(remark).trim().length < 3)) {
+      return res.status(400).json({ error: 'A remark (min 3 chars) is required to change an amount or date.' });
+    }
 
-  db.prepare(`UPDATE arap_entries SET party=?, due_date=?, planned=?, actual=?, status=?, note=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-    .run(next.party, next.due_date, next.planned, next.actual, next.status, next.note, cur.id);
-  const why = (remark && String(remark).trim()) || 'Edited';
-  for (const [field, oldV, newV] of changes) logChange(db, cur, field, oldV, newV, why, req.user);
-  res.json(db.prepare('SELECT * FROM arap_entries WHERE id=?').get(cur.id));
+    await pg.run(`UPDATE arap_entries SET party=?, due_date=?, planned=?, actual=?, status=?, note=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+      next.party, next.due_date, next.planned, next.actual, next.status, next.note, cur.id);
+    const why = (remark && String(remark).trim()) || 'Edited';
+    for (const [field, oldV, newV] of changes) await logChange(pg, cur, field, oldV, newV, why, req.user);
+    res.json(await pg.get('SELECT * FROM arap_entries WHERE id=?', cur.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE — significant, so it also captures a remark into the change log.
-router.delete('/:id', requirePermission('ar_ap_tracker', 'delete'), (req, res) => {
-  const db = getDb();
-  const cur = db.prepare('SELECT * FROM arap_entries WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'Not found' });
-  const remark = req.body?.remark || req.query?.remark;
-  if (!remark || String(remark).trim().length < 3) return res.status(400).json({ error: 'A remark (min 3 chars) is required to delete an entry.' });
-  logChange(db, cur, 'deleted', `${cur.kind} · ${cur.party} · ${cur.due_date} · ₹${effective(cur)}L`, '', String(remark).trim(), req.user);
-  db.prepare('DELETE FROM arap_entries WHERE id=?').run(cur.id);
-  res.json({ ok: true });
+router.delete('/:id', requirePermission('ar_ap_tracker', 'delete'), async (req, res) => {
+  try {
+    const cur = await pg.get('SELECT * FROM arap_entries WHERE id=?', req.params.id);
+    if (!cur) return res.status(404).json({ error: 'Not found' });
+    const remark = req.body?.remark || req.query?.remark;
+    if (!remark || String(remark).trim().length < 3) return res.status(400).json({ error: 'A remark (min 3 chars) is required to delete an entry.' });
+    await logChange(pg, cur, 'deleted', `${cur.kind} · ${cur.party} · ${cur.due_date} · ₹${effective(cur)}L`, '', String(remark).trim(), req.user);
+    await pg.run('DELETE FROM arap_entries WHERE id=?', cur.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Excel import (mam 2026-06-18) ──────────────────────────────────────
@@ -246,30 +218,26 @@ function buildMatcher(names) {
 // clients + Vendors) is used for BOTH AR and AP, so the same party (e.g.
 // "sael") resolves to the same canonical name on both sides — AP parties are
 // often clients, not vendors (mam 2026-06-18).
-function importEntries(db, entries, user, sourceLabel, replace) {
-  const clients = db.prepare('SELECT client_name, company_name FROM business_book').all().flatMap(r => [r.client_name, r.company_name]);
-  const vendors = db.prepare('SELECT name FROM vendors').all().map(r => r.name);
+async function importEntries(db, entries, user, sourceLabel, replace) {
+  const clients = (await db.all('SELECT client_name, company_name FROM business_book')).flatMap(r => [r.client_name, r.company_name]);
+  const vendors = (await db.all('SELECT name FROM vendors')).map(r => r.name);
   const match = buildMatcher([...clients, ...vendors]);
-  const upd = db.prepare('UPDATE arap_entries SET planned=?, updated_at=CURRENT_TIMESTAMP WHERE id=?');
-  const ins = db.prepare(`INSERT INTO arap_entries (kind, party, due_date, planned, status, note, created_by, created_by_name) VALUES (?,?,?,?,?,?,?,?)`);
-  const findExisting = db.prepare('SELECT id FROM arap_entries WHERE kind=? AND party=? AND due_date=?');
   let imported = 0, updated = 0, matched = 0;
   const unmatched = new Set();
-  const tx = db.transaction(() => {
-    if (replace) db.prepare('DELETE FROM arap_entries').run();
+  await db.tx(async (t) => {
+    if (replace) await t.run('DELETE FROM arap_entries');
     for (const e of entries) {
       const canonical = match(e.party);
       const party = canonical || e.party;
       if (canonical) matched++; else unmatched.add(`${e.kind}: ${e.party}`);
       const note = canonical && canonical.toLowerCase() !== e.party.toLowerCase() ? `sheet: ${e.party}` : null;
-      const ex = findExisting.get(e.kind, party, e.due_date);
-      if (ex) { upd.run(e.planned, ex.id); updated++; }
-      else { ins.run(e.kind, party, e.due_date, e.planned, 'planned', note, user.id, user.name || ''); imported++; }
+      const ex = await t.get('SELECT id FROM arap_entries WHERE kind=? AND party=? AND due_date=?', e.kind, party, e.due_date);
+      if (ex) { await t.run('UPDATE arap_entries SET planned=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', e.planned, ex.id); updated++; }
+      else { await t.run(`INSERT INTO arap_entries (kind, party, due_date, planned, status, note, created_by, created_by_name) VALUES (?,?,?,?,?,?,?,?)`, e.kind, party, e.due_date, e.planned, 'planned', note, user.id, user.name || ''); imported++; }
     }
-    db.prepare(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name) VALUES (NULL,?,?,?,?,?,?,?,?)`)
-      .run('AR/AP', '—', 'imported', '', `${imported} new · ${updated} updated`, `Bulk add — ${sourceLabel}`, user.id, user.name || '');
+    await t.run(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name) VALUES (NULL,?,?,?,?,?,?,?,?)`,
+      'AR/AP', '—', 'imported', '', `${imported} new · ${updated} updated`, `Bulk add — ${sourceLabel}`, user.id, user.name || '');
   });
-  tx();
   return {
     imported, updated, matched, total: entries.length,
     unmatched: [...unmatched].sort(),
@@ -287,54 +255,56 @@ function normLineDate(s) {
   return null;
 }
 
-router.post('/import', requirePermission('ar_ap_tracker', 'create'), uploadXlsx.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const db = getDb();
-  let wb;
-  try { wb = XLSX.read(req.file.buffer); }
-  catch (e) { return res.status(400).json({ error: 'Could not read the Excel file' }); }
+router.post('/import', requirePermission('ar_ap_tracker', 'create'), uploadXlsx.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    let wb;
+    try { wb = XLSX.read(req.file.buffer); }
+    catch (e) { return res.status(400).json({ error: 'Could not read the Excel file' }); }
 
-  // Classify sheets: SUMMARY skipped; names beginning AR / AP.
-  let entries = [];
-  for (const sn of wb.SheetNames) {
-    const up = sn.trim().toUpperCase();
-    if (up.startsWith('SUMMARY')) continue;
-    const kind = up.startsWith('AR') ? 'AR' : up.startsWith('AP') ? 'AP' : null;
-    if (!kind) continue;
-    entries = entries.concat(parseSheet(wb.Sheets[sn], kind));
-  }
-  if (!entries.length) return res.status(400).json({ error: 'No AR/AP rows found. Expecting sheets named "AR…" and "AP…" with a party column and date columns.' });
-  const replace = !!(req.body && (req.body.replace === '1' || req.body.replace === 'true'));
-  res.json(importEntries(db, entries, req.user, req.file.originalname || 'Excel', replace));
+    // Classify sheets: SUMMARY skipped; names beginning AR / AP.
+    let entries = [];
+    for (const sn of wb.SheetNames) {
+      const up = sn.trim().toUpperCase();
+      if (up.startsWith('SUMMARY')) continue;
+      const kind = up.startsWith('AR') ? 'AR' : up.startsWith('AP') ? 'AP' : null;
+      if (!kind) continue;
+      entries = entries.concat(parseSheet(wb.Sheets[sn], kind));
+    }
+    if (!entries.length) return res.status(400).json({ error: 'No AR/AP rows found. Expecting sheets named "AR…" and "AP…" with a party column and date columns.' });
+    const replace = !!(req.body && (req.body.replace === '1' || req.body.replace === 'true'));
+    res.json(await importEntries(pg, entries, req.user, req.file.originalname || 'Excel', replace));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // Bulk paste — one entry per line: "party, date, amount" (or prefix a line
 // with "AR"/"AP" to override). Date is DD-MM (year defaults to the forecast
 // year) or YYYY-MM-DD. Same name-matching + upsert as the Excel import.
-router.post('/bulk', requirePermission('ar_ap_tracker', 'create'), (req, res) => {
-  const db = getDb();
-  const defKind = req.body && /^(AR|AP)$/i.test(req.body.kind || '') ? req.body.kind.toUpperCase() : null;
-  const text = req.body && req.body.text;
-  if (!text || !String(text).trim()) return res.status(400).json({ error: 'Paste at least one line: party, date, amount' });
-  const entries = [], skipped = [];
-  for (const line of String(text).split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t) continue;
-    let parts = t.split(/\t/);                       // tab-separated (Excel paste)
-    if (parts.length < 2) parts = t.split(/\s*[,;]\s*/);  // else comma / semicolon
-    parts = parts.map(s => s.trim()).filter(Boolean);
-    let kind = defKind, party, dateStr, amtStr;
-    if (/^(AR|AP)$/i.test(parts[0] || '')) { kind = parts[0].toUpperCase(); [, party, dateStr, amtStr] = parts; }
-    else { [party, dateStr, amtStr] = parts; }
-    const due = normLineDate(dateStr);
-    const amt = parseFloat(String(amtStr == null ? '' : amtStr).replace(/,/g, ''));
-    if (party && due && Number.isFinite(amt) && amt > 0 && (kind === 'AR' || kind === 'AP')) entries.push({ kind, party, due_date: due, planned: amt });
-    else skipped.push(t);
-  }
-  if (!entries.length) return res.status(400).json({ error: 'No valid rows. Each line needs: party, date (DD-MM), amount — pick the AR or AP tab first.' });
-  const report = importEntries(db, entries, req.user, 'pasted rows', false);
-  report.skipped = skipped.length;
-  res.json(report);
+router.post('/bulk', requirePermission('ar_ap_tracker', 'create'), async (req, res) => {
+  try {
+    const defKind = req.body && /^(AR|AP)$/i.test(req.body.kind || '') ? req.body.kind.toUpperCase() : null;
+    const text = req.body && req.body.text;
+    if (!text || !String(text).trim()) return res.status(400).json({ error: 'Paste at least one line: party, date, amount' });
+    const entries = [], skipped = [];
+    for (const line of String(text).split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t) continue;
+      let parts = t.split(/\t/);                       // tab-separated (Excel paste)
+      if (parts.length < 2) parts = t.split(/\s*[,;]\s*/);  // else comma / semicolon
+      parts = parts.map(s => s.trim()).filter(Boolean);
+      let kind = defKind, party, dateStr, amtStr;
+      if (/^(AR|AP)$/i.test(parts[0] || '')) { kind = parts[0].toUpperCase(); [, party, dateStr, amtStr] = parts; }
+      else { [party, dateStr, amtStr] = parts; }
+      const due = normLineDate(dateStr);
+      const amt = parseFloat(String(amtStr == null ? '' : amtStr).replace(/,/g, ''));
+      if (party && due && Number.isFinite(amt) && amt > 0 && (kind === 'AR' || kind === 'AP')) entries.push({ kind, party, due_date: due, planned: amt });
+      else skipped.push(t);
+    }
+    if (!entries.length) return res.status(400).json({ error: 'No valid rows. Each line needs: party, date (DD-MM), amount — pick the AR or AP tab first.' });
+    const report = await importEntries(pg, entries, req.user, 'pasted rows', false);
+    report.skipped = skipped.length;
+    res.json(report);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Collection-day auto-roll (mam 2026-06-18) ──────────────────────────
@@ -361,29 +331,30 @@ function istToday() { return new Date(Date.now() + 5.5 * 3600 * 1000).toISOStrin
 
 // Roll every still-'planned', not-yet-settled AR/AP entry whose date has
 // passed onto the next upcoming collection day for its kind. Each move logged.
-function rollOverdue(db, user) {
+async function rollOverdue(db, user) {
   const today = istToday();
-  const pend = db.prepare(`SELECT * FROM arap_entries WHERE status='planned' AND (actual IS NULL OR actual='') AND due_date < ?`).all(today);
+  const pend = await db.all(`SELECT * FROM arap_entries WHERE status='planned' AND (actual IS NULL) AND due_date < ?`, today);
   let rolled = 0;
-  const tx = db.transaction(() => {
+  await db.tx(async (t) => {
     for (const e of pend) {
       let nd = nextCollectionDay(e.due_date, e.kind), guard = 0;
       while (nd < today && guard++ < 120) nd = nextCollectionDay(nd, e.kind);
       if (!nd || nd === e.due_date) continue;
-      db.prepare('UPDATE arap_entries SET due_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?').run(nd, e.id);
-      db.prepare(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name)
-                  VALUES (?,?,?,?,?,?,?,?,?)`)
-        .run(e.id, e.kind, e.party, 'due_date (auto-roll)', e.due_date, nd, `Not settled by due date — rolled to next collection day (${COLLECT_LABEL[e.kind] || ''} rule)`, user?.id || null, user?.name || 'System');
+      await t.run('UPDATE arap_entries SET due_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?', nd, e.id);
+      await t.run(`INSERT INTO arap_changelog (entry_id, kind, party, field, old_value, new_value, remark, changed_by, changed_by_name)
+                  VALUES (?,?,?,?,?,?,?,?,?)`,
+        e.id, e.kind, e.party, 'due_date (auto-roll)', e.due_date, nd, `Not settled by due date — rolled to next collection day (${COLLECT_LABEL[e.kind] || ''} rule)`, user?.id || null, user?.name || 'System');
       rolled++;
     }
   });
-  tx();
   return rolled;
 }
 
 // Manual trigger — roll overdue AR + AP entries now.
-router.post('/roll-forward', requirePermission('ar_ap_tracker', 'edit'), (req, res) => {
-  res.json({ rolled: rollOverdue(getDb(), req.user) });
+router.post('/roll-forward', requirePermission('ar_ap_tracker', 'edit'), async (req, res) => {
+  try {
+    res.json({ rolled: await rollOverdue(pg, req.user) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 module.exports = router;

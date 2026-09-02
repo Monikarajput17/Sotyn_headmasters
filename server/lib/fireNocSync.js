@@ -70,11 +70,14 @@ function expectedStageAndStatus(days, currentStatus) {
 // Apply the auto-correction to a single cycle.  Returns
 //   { id, changed: boolean, from, to, reason }
 // so callers can build a summary log.
-function syncCycle(db, cycleId, opts = {}) {
-  const cycle = db.prepare(`
+async function syncCycle(db, cycleId, opts = {}) {
+  // `db` is the pg adapter (has .tx) — callers pass it in; fall back to the
+  // module adapter if handed something without tx (e.g. a tx-bound client).
+  const pgdb = (db && typeof db.tx === 'function') ? db : require('../db/pg');
+  const cycle = await pgdb.get(`
     SELECT id, current_stage, status, expiry_date, owner_user_id
     FROM fire_noc_cycle WHERE id = ?
-  `).get(cycleId);
+  `, cycleId);
   if (!cycle) return { id: cycleId, changed: false, reason: 'not_found' };
 
   const days = daysToExpiry(cycle.expiry_date);
@@ -93,26 +96,26 @@ function syncCycle(db, cycleId, opts = {}) {
   if (stageNeedsChange)  noteBits.push(`stage ${cycle.current_stage} → ${expected.stage}`);
   const noteText = `AUTO · ${trigger} · ${noteBits.join(' · ')} · days_to_expiry=${days}`;
 
-  const txn = db.transaction(() => {
+  await pgdb.tx(async (t) => {
     if (stageNeedsChange) {
-      db.prepare(`UPDATE fire_noc_cycle SET current_stage=?, stage_entered_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-        .run(expected.stage, cycleId);
-      db.prepare(`UPDATE fire_noc_stage_history SET exited_at=CURRENT_TIMESTAMP WHERE cycle_id=? AND to_stage=? AND exited_at IS NULL`)
-        .run(cycleId, cycle.current_stage);
+      await t.run(`UPDATE fire_noc_cycle SET current_stage=?, stage_entered_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+        expected.stage, cycleId);
+      await t.run(`UPDATE fire_noc_stage_history SET exited_at=CURRENT_TIMESTAMP WHERE cycle_id=? AND to_stage=? AND exited_at IS NULL`,
+        cycleId, cycle.current_stage);
     }
     if (statusNeedsChange) {
-      db.prepare(`UPDATE fire_noc_cycle SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`)
-        .run(expected.status, cycleId);
+      await t.run(`UPDATE fire_noc_cycle SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, expected.status, cycleId);
     }
     try {
-      db.prepare(`INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`)
-        .run(cycleId, cycle.current_stage, expected.stage, 'system', noteText);
+      // Savepoint: a UNIQUE failure must not poison the surrounding tx (PG).
+      await t.savepoint(() => t.run(
+        `INSERT INTO fire_noc_stage_history (cycle_id, from_stage, to_stage, triggered_by, notes) VALUES (?, ?, ?, ?, ?)`,
+        cycleId, cycle.current_stage, expected.stage, 'system', noteText));
     } catch (e) {
       // UNIQUE(cycle_id, to_stage, entered_at) — same-second dup; safe to swallow
       if (!String(e.message).includes('UNIQUE')) throw e;
     }
   });
-  txn();
 
   return {
     id: cycleId,
@@ -128,17 +131,17 @@ function syncCycle(db, cycleId, opts = {}) {
 // try/catch so one bad row (e.g. an out-of-range expiry_date)
 // can't bring down the whole backfill — failures are recorded
 // and reported, valid rows still get corrected.
-function syncAllActiveCycles(db, opts = {}) {
-  const ids = db.prepare(`
+async function syncAllActiveCycles(db, opts = {}) {
+  const ids = (await db.all(`
     SELECT id FROM fire_noc_cycle
     WHERE status NOT IN ('renewed', 'lost')
-  `).all().map(r => r.id);
+  `)).map(r => r.id);
   let changed = 0;
   const changes = [];
   const errors = [];
   for (const id of ids) {
     try {
-      const r = syncCycle(db, id, opts);
+      const r = await syncCycle(db, id, opts);
       if (r.changed) {
         changed++;
         changes.push(r);

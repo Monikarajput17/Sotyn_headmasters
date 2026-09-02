@@ -15,7 +15,7 @@
 //   subject_tpl  text with {{vars}}
 //   body_tpl     text with {{vars}}  (rendered to simple HTML)
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 const { sendEmail } = require('./email');
 
 // {{var}} → context value (missing → '').  Case/space tolerant.
@@ -49,7 +49,7 @@ function evalConditions(conditions, ctx) {
   return list.every(c => c && c.field ? evalOne(c, ctx) : true);
 }
 
-function resolveRecipients(recipients, ctx) {
+async function resolveRecipients(recipients, ctx) {
   let r = recipients;
   if (typeof r === 'string') { try { r = JSON.parse(r); } catch { r = {}; } }
   r = r || {};
@@ -68,16 +68,15 @@ function resolveRecipients(recipients, ctx) {
   // 3. By role — every active user holding one of the named roles.
   if (Array.isArray(r.roles) && r.roles.length) {
     try {
-      const db = getDb();
       const ph = r.roles.map(() => '?').join(',');
-      const rows = db.prepare(
+      const rows = await pg.all(
         `SELECT DISTINCT u.email
            FROM users u
            JOIN user_roles ur ON ur.user_id = u.id
            JOIN roles ro ON ro.id = ur.role_id
           WHERE u.active = 1 AND u.email IS NOT NULL AND u.email != ''
-            AND ro.name IN (${ph})`
-      ).all(...r.roles);
+            AND ro.name IN (${ph})`,
+        ...r.roles);
       for (const row of rows) if (row.email) out.add(String(row.email).trim());
     } catch (e) { /* roles best-effort */ }
   }
@@ -94,12 +93,11 @@ function bodyToHtml(text) {
 // Core: run all enabled rules for an event against a context. Returns a
 // summary array (used by /test and logging). Never throws.
 async function runRulesForEvent(eventKey, ctx, { onlyRuleId = null } = {}) {
-  const db = getDb();
   let rules;
   try {
     rules = onlyRuleId
-      ? db.prepare('SELECT * FROM email_rules WHERE id = ?').all(onlyRuleId)
-      : db.prepare('SELECT * FROM email_rules WHERE event_key = ? AND enabled = 1').all(eventKey);
+      ? await pg.all('SELECT * FROM email_rules WHERE id = ?', onlyRuleId)
+      : await pg.all('SELECT * FROM email_rules WHERE event_key = ? AND enabled = 1', eventKey);
   } catch (e) { return []; }
 
   const results = [];
@@ -109,7 +107,7 @@ async function runRulesForEvent(eventKey, ctx, { onlyRuleId = null } = {}) {
         results.push({ rule: rule.name, skipped: 'conditions not met' });
         continue;
       }
-      const to = resolveRecipients(rule.recipients, ctx);
+      const to = await resolveRecipients(rule.recipients, ctx);
       if (!to.length) {
         results.push({ rule: rule.name, skipped: 'no recipients resolved' });
         continue;
@@ -120,7 +118,7 @@ async function runRulesForEvent(eventKey, ctx, { onlyRuleId = null } = {}) {
       const from = renderTemplate(rule.from_addr, ctx).trim() || undefined;
       const res = await sendEmail({ to: to.join(','), subject, html, from });
       try {
-        db.prepare('UPDATE email_rules SET last_fired_at = CURRENT_TIMESTAMP, fire_count = COALESCE(fire_count,0) + 1 WHERE id = ?').run(rule.id);
+        await pg.run('UPDATE email_rules SET last_fired_at = CURRENT_TIMESTAMP, fire_count = COALESCE(fire_count,0) + 1 WHERE id = ?', rule.id);
       } catch {}
       results.push({ rule: rule.name, to, sent: !!res?.sent, skipped: res?.skipped ? res.reason : undefined });
     } catch (e) {
