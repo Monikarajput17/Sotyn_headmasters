@@ -12,7 +12,13 @@ const { createClient } = require('@supabase/supabase-js');
 const URL_ = process.env.SUPABASE_URL;
 const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!URL_ || !KEY) { console.error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing in .env'); process.exit(1); }
-const admin = createClient(URL_, KEY, { auth: { autoRefreshToken: false, persistSession: false } });
+// Node 20 has no global WebSocket; supabase-js insists on one for its realtime
+// client even though this script never uses realtime — hand it `ws`.
+let wsTransport; try { wsTransport = require('ws'); } catch { wsTransport = undefined; }
+const admin = createClient(URL_, KEY, {
+  auth: { autoRefreshToken: false, persistSession: false },
+  realtime: wsTransport ? { transport: wsTransport } : undefined,
+});
 
 const authEmailFor = (r) => (r.email && r.email.includes('@')) ? r.email.trim().toLowerCase()
   : `${(r.username || `user${r.id}`).toLowerCase().replace(/[^a-z0-9._-]/g, '')}@users.headmasters.local`;
