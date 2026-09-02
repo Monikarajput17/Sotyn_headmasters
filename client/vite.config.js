@@ -68,6 +68,10 @@ export default defineConfig({
       '/api': {
         target: process.env.API_PROXY_TARGET || 'http://127.0.0.1:54321/functions/v1/api',
         changeOrigin: true,
+        // Dev-only: this machine's network does TLS inspection (WARP), and
+        // Node's proxy can't verify the substituted certificate. The production
+        // build never proxies — the browser calls the function URL directly.
+        secure: false,
         rewrite: (p) => p.replace(/^\/api/, ''),
       },
     }
