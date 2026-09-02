@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "postgres": "npm:postgres@3.4.5",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.45.4",
+    "jose": "npm:jose@5.9.6",
+    "bcryptjs": "npm:bcryptjs@2.4.3",
+    "xlsx": "npm:xlsx@0.18.5"
+  }
+}

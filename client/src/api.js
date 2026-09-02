@@ -1,7 +1,11 @@
 import axios from 'axios';
-import { getToken, setToken, clearToken } from './lib/tokenStore';
+import { getToken, setToken, clearToken, getRefreshToken, setRefreshToken } from './lib/tokenStore';
 
-const api = axios.create({ baseURL: '/api' });
+// API base: in dev the Vite proxy forwards '/api' to the Edge Function; in
+// production the build points straight at Supabase
+// (VITE_API_BASE = https://<ref>.supabase.co/functions/v1/api).
+export const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+const api = axios.create({ baseURL: API_BASE });
 
 // Seed the auth header from storage at module load — BEFORE the first render —
 // so any request fired on the very first tick after a fresh page load (e.g. the
@@ -16,76 +20,85 @@ api.interceptors.request.use(config => {
   // goes out unauthenticated and the user is bounced to login.
   const token = getToken();
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // The session check carries the refresh token so the server can slide the
+  // session (Supabase Auth access tokens are short-lived; the server rotates
+  // the pair when it's close to expiry and hands both back in headers).
+  if ((config.url || '').includes('/auth/me')) {
+    const rt = getRefreshToken();
+    if (rt) config.headers['X-Refresh-Token'] = rt;
+  }
   // Remember which token this request went out with, so a 401 can tell
   // whether it's still the active session or a stale in-flight request.
   config.metadata = { ...(config.metadata || {}), tokenAtSend: token || null };
   return config;
 });
 
+function adoptSession(token, refresh) {
+  if (token) { setToken(token); api.defaults.headers.common.Authorization = `Bearer ${token}`; }
+  if (refresh) setRefreshToken(refresh);
+}
+
+// One in-flight refresh at a time; concurrent 401s share it.
+let refreshing = null;
+async function tryRefresh() {
+  const rt = getRefreshToken();
+  if (!rt) return null;
+  if (!refreshing) {
+    refreshing = axios.post(`${API_BASE}/auth/refresh`, { refresh_token: rt })
+      .then(r => { adoptSession(r.data.token, r.data.refresh_token); return r.data.token; })
+      .catch(() => null)
+      .finally(() => { refreshing = null; });
+  }
+  return refreshing;
+}
+
 api.interceptors.response.use(
   res => {
-    // Sliding session: the server hands back a fresh token once the current
-    // one is past a day old. Swap it in so an active user never gets logged
-    // out (mam 2026-06-12). Subsequent requests read it from the token store.
+    // Sliding session: the server hands back a fresh token pair once the
+    // current one is close to expiry. Swap them in so an active user never
+    // gets logged out (mam 2026-06-12).
     const fresh = res.headers?.['x-refresh-token'];
-    if (fresh) {
-      setToken(fresh);
-      api.defaults.headers.common.Authorization = `Bearer ${fresh}`;
-    }
+    const freshRt = res.headers?.['x-new-refresh-token'];
+    if (fresh) adoptSession(fresh, freshRt);
     return res;
   },
-  err => {
+  async err => {
     if (err.response?.status === 401) {
       // Bulletproof logout policy (mam, repeatedly: "automatically logout —
       // very bad"). The ONLY thing that may end a session is the definitive
-      // session check, GET /auth/me, rejecting the CURRENT token. Two guards:
-      //
-      //   1. Only /auth/me 401s log out. A 401 from ANY other endpoint — a
-      //      stale in-flight request from a previous session, a flaky call, or
-      //      an endpoint that wrongly returns 401 instead of 403 — is ignored
-      //      and never drops a working session. AuthContext re-pulls /auth/me
-      //      on mount, on tab focus, and every 2 min, so a genuinely dead
-      //      token is still caught and logged out promptly.
-      //   2. Even for /auth/me, only act if the token that failed is still the
-      //      active one — a slow stale /auth/me resolving AFTER the user
-      //      re-logged in must not clear the brand-new token (the "log in,
-      //      then instantly logged out" race — Nitin Jain, 2026-06-24).
+      // session check, GET /auth/me, rejecting the CURRENT token — and even
+      // then only after a refresh attempt with the stored refresh token failed.
       const url = err.config?.url || '';
       const used = err.config?.metadata?.tokenAtSend || null;
       const current = getToken();
       const isSessionCheck = url.includes('/auth/me');
       // Self-heal a spurious 401 from a token race: if this data request went
-      // out with NO token, or with a DIFFERENT token than the one now active
-      // (a first-render race on a fresh load, or a request in flight across a
-      // login/refresh), retry it ONCE with the current token instead of leaving
-      // the page's data broken. mam 2026-07-01: on a valid session (/auth/me was
-      // 200) a couple of calls — track-location and the CRM-kitting matrix —
-      // still 401'd because they beat the token onto the wire. Never retry the
-      // /auth/me check itself, and guard with a flag so it can never loop.
+      // out with NO token, or with a DIFFERENT token than the one now active,
+      // retry it ONCE with the current token.
       if (!isSessionCheck && current && used !== current && err.config && !err.config._retried401) {
         err.config._retried401 = true;
         err.config.headers = { ...(err.config.headers || {}), Authorization: `Bearer ${current}` };
         return api(err.config);
       }
+      // Expired access token (the normal Supabase case): refresh once and
+      // replay the ORIGINAL request transparently.
+      if (current && used === current && err.config && !err.config._refreshed401) {
+        const newTok = await tryRefresh();
+        if (newTok) {
+          err.config._refreshed401 = true;
+          err.config.headers = { ...(err.config.headers || {}), Authorization: `Bearer ${newTok}` };
+          return api(err.config);
+        }
+      }
       if (isSessionCheck && current && used === current) {
         clearToken();
         delete api.defaults.headers.common.Authorization;
-        // Only hard-redirect if we're NOT already on the login page — a 401
-        // from a background poll on /login would otherwise loop the page.
         if (!window.location.pathname.startsWith('/login')) {
           window.location.href = '/login';
         }
       } else if (!isSessionCheck && used && used === current) {
-        // A data endpoint rejected the current token. Per mam's standing rule
-        // ("automatic logout — very bad"), a single data-endpoint 401 must
-        // NEVER end the session — it can be a stale in-flight request, a flaky
-        // call, or an endpoint wrongly 401'ing. We do NOT force an immediate
-        // /auth/me logout here (that change, 5d5a6c8, kicked active users out
-        // on the first failing request and was reverted 2026-06-26). The
-        // deliberate session check — AuthContext's /auth/me on mount, on tab
-        // focus, and every 2 min — still catches a genuinely dead token and
-        // logs out cleanly. We only strip the raw "Invalid token" text so the
-        // page shows its own friendly fallback instead of the internal string.
+        // A data endpoint rejected the current token — never end the session
+        // here (see the standing rule above); just strip the raw token text.
         if (err.response.data && /token/i.test(err.response.data.error || '')) {
           err.response.data = { ...err.response.data, error: null };
         }

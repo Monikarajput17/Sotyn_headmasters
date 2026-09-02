@@ -12,8 +12,14 @@
 // the CURRENT page session keeps working even when localStorage is blocked.
 // We also detect the blocked case so the UI can tell the user to open the
 // site in a real browser instead of silently bouncing them.
+//
+// Supabase migration: sessions now come from Supabase Auth, which issues an
+// access token (short-lived) + a refresh token. Both are kept here with the
+// same resilience; the api layer slides the session using the refresh token
+// so users still never get logged out while active.
 
 let memToken = null;          // in-memory fallback — survives the page session
+let memRefresh = null;
 let storageBlocked = false;   // set true once we detect localStorage can't persist
 
 export function isStorageBlocked() {
@@ -44,7 +50,21 @@ export function setToken(token) {
   }
 }
 
+export function getRefreshToken() {
+  try { const t = localStorage.getItem('refresh_token'); if (t) return t; } catch { storageBlocked = true; }
+  return memRefresh;
+}
+
+export function setRefreshToken(token) {
+  memRefresh = token || null;
+  try {
+    if (token) localStorage.setItem('refresh_token', token);
+    else localStorage.removeItem('refresh_token');
+  } catch { storageBlocked = true; }
+}
+
 export function clearToken() {
   memToken = null;
-  try { localStorage.removeItem('token'); } catch { /* ignore */ }
+  memRefresh = null;
+  try { localStorage.removeItem('token'); localStorage.removeItem('refresh_token'); } catch { /* ignore */ }
 }

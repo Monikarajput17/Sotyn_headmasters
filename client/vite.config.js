@@ -61,8 +61,15 @@ export default defineConfig({
       // ::1:5000", which vite surfaces as a 500 on every proxied login in dev.
       // Sotyn Salon fork runs the API on 5055 to avoid clashing with the
       // business-erp project on 5000.
-      '/api': 'http://127.0.0.1:5055',
-      '/socket.io': { target: 'http://127.0.0.1:5055', ws: true }
+      // Supabase-native backend: '/api' → the Edge Function. Locally that is
+      // `supabase functions serve` (port 54321); set API_PROXY_TARGET to point
+      // elsewhere (e.g. the deployed function, or the legacy Express server on
+      // http://127.0.0.1:5055/api during the transition).
+      '/api': {
+        target: process.env.API_PROXY_TARGET || 'http://127.0.0.1:54321/functions/v1/api',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, ''),
+      },
     }
   }
 })

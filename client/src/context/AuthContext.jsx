@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useEffect } from 'react';
 import api from '../api';
-import { getToken, setToken as persistToken, clearToken } from '../lib/tokenStore';
+import { getToken, setToken as persistToken, clearToken, setRefreshToken } from '../lib/tokenStore';
 
 const AuthContext = createContext();
 
@@ -79,6 +79,7 @@ export function AuthProvider({ children }) {
     // Accept username or email — backend matches either.
     const { data } = await api.post('/auth/login', { username: identifier, email: identifier, password });
     persistToken(data.token);   // localStorage + in-memory fallback
+    if (data.refresh_token) setRefreshToken(data.refresh_token);   // Supabase Auth: lets the session slide
     api.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
     setToken(data.token);
     setUser(data.user);

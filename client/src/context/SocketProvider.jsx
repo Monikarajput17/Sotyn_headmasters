@@ -1,18 +1,17 @@
-// One shared Socket.IO connection for the app shell (perf pass — shell-socket).
-// Before this, every logged-in user opened TWO always-on sockets on every page:
-// one in Layout (chat unread badge / toasts) and a separate one in CallProvider
-// (WebRTC call signalling). Both now ride this single connection, halving the
-// shell's WebSocket connections and the server-side connection/room load.
+// One shared realtime connection for the app shell (chat unread badge / toasts
+// + WebRTC call signalling). Supabase-native version: Socket.IO is gone; the
+// shell subscribes to its private Realtime topic `user:<id>` and the Edge
+// Function broadcasts into it. The public API (subscribe / emit / isConnected)
+// is unchanged so Layout and CallProvider keep working as before.
 //
-// The connect is DEFERRED to a post-paint idle callback so the handshake +
-// per-feature setup never compete with the initial route render — but it still
-// connects automatically for every logged-in user (no user gesture), so
-// incoming calls and chat notifications keep arriving on ANY page. The chat
-// PAGE's own socket (SiteChat.jsx) is intentionally left separate.
+// Event mapping (server → client), see supabase/functions/api/routes/CHAT-REALTIME.md:
+//   'chat:changed' {groupId}                → handlers for 'changed' (+ 'group_deleted' legacy name)
+//   'call:signal'  {fromUserId,fromName,type,data} → handlers for <type> with {...data, from, fromName}
+// emit(event, payload) for 'call:*' events → POST /site-chat/calls/signal.
 import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
-import { io } from 'socket.io-client';
+import api from '../api';
 import { useAuth } from './AuthContext';
-import { getToken } from '../lib/tokenStore';
+import { subscribeTopic, syncRealtimeAuth } from '../lib/realtime';
 
 const SocketContext = createContext(null);
 
@@ -23,54 +22,57 @@ export const useAppSocket = () => useContext(SocketContext) || NOOP;
 
 export function SocketProvider({ children }) {
   const { user } = useAuth();
-  const socketRef = useRef(null);
-  // event -> Set(handler). The registry OUTLIVES the socket so a consumer can
-  // subscribe before the deferred connect fires, and stays attached across a
-  // socket (re)creation — order-independent, reconnect-safe.
-  const handlersRef = useRef(new Map());
+  const handlersRef = useRef(new Map());   // event -> Set(handler); outlives the channel
+  const connectedRef = useRef(false);
+
+  const dispatch = (event, payload) => {
+    const set = handlersRef.current.get(event);
+    if (!set) return;
+    for (const h of set) { try { h(payload); } catch (e) { console.warn('[realtime] handler failed', event, e); } }
+  };
 
   useEffect(() => {
     if (!user?.id) return;
-    let cancelled = false, idleId = null, timeoutId = null;
-
+    let off = () => {};
+    let idleId = null, timeoutId = null, cancelled = false;
     const start = () => {
       if (cancelled) return;
-      // Function-form auth so storage-blocked / in-app browsers still send the
-      // current token (mam 2026-07-04) — same as the two sockets this replaces.
-      const socket = io({ path: '/socket.io', auth: (cb) => cb({ token: getToken() }), transports: ['websocket', 'polling'] });
-      socketRef.current = socket;
-      for (const [event, set] of handlersRef.current) for (const h of set) socket.on(event, h);
+      syncRealtimeAuth();
+      off = subscribeTopic(`user:${user.id}`, {
+        'chat:changed': (p) => { dispatch('changed', p); dispatch('group_deleted', p); },
+        'call:signal': (p) => {
+          if (!p || !p.type) return;
+          dispatch(p.type, { ...(p.data || {}), from: p.fromUserId, fromName: p.fromName });
+        },
+      });
+      connectedRef.current = true;
     };
-
     // Defer off the first-paint critical path; still sub-second and automatic.
     if (window.requestIdleCallback) idleId = window.requestIdleCallback(start, { timeout: 2000 });
     else timeoutId = setTimeout(start, 0);
-
     return () => {
       cancelled = true;
       if (idleId != null && window.cancelIdleCallback) { try { window.cancelIdleCallback(idleId); } catch { /* ignore */ } }
       if (timeoutId != null) clearTimeout(timeoutId);
-      const socket = socketRef.current;
-      if (socket) {
-        for (const [event, set] of handlersRef.current) for (const h of set) socket.off(event, h);
-        try { socket.disconnect(); } catch { /* ignore */ }
-      }
-      socketRef.current = null;
+      connectedRef.current = false;
+      off();
     };
   }, [user?.id]);
 
   const value = useMemo(() => ({
-    // Register a handler; attaches now if the socket already exists, otherwise
-    // when the deferred connect fires. Returns an unsubscribe.
     subscribe: (event, handler) => {
       let set = handlersRef.current.get(event);
       if (!set) { set = new Set(); handlersRef.current.set(event, set); }
       set.add(handler);
-      socketRef.current?.on(event, handler);
-      return () => { set.delete(handler); socketRef.current?.off(event, handler); };
+      return () => { set.delete(handler); };
     },
-    emit: (...args) => socketRef.current?.emit(...args),
-    isConnected: () => !!socketRef.current?.connected,
+    emit: (event, payload) => {
+      if (!String(event).startsWith('call:')) return;   // only call signalling is client→server
+      const to = payload?.to;
+      if (!to) return;
+      api.post('/site-chat/calls/signal', { toUserId: to, type: event, data: payload }).catch(() => {});
+    },
+    isConnected: () => connectedRef.current,
   }), []);
 
   return <SocketContext.Provider value={value}>{children}</SocketContext.Provider>;
