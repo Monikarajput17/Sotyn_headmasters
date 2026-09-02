@@ -2,7 +2,6 @@
 // named groups, add the people you want, chat (text + photo/file). Members-
 // gated, read receipts (✓✓ + who-read), unread badges, day separators.
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, memo } from 'react';
-import { io } from 'socket.io-client';
 import api from '../api';
 import Modal from '../components/Modal';
 import toast from 'react-hot-toast';
@@ -11,8 +10,9 @@ import { fmtTime, fmtDate, fmtDateTime } from '../utils/datetime';
 import { FiSearch, FiSend, FiPaperclip, FiTrash2, FiFile, FiUsers, FiX, FiPlus, FiMic, FiUserPlus, FiInfo, FiPhone, FiVideo, FiArrowLeft, FiChevronDown, FiCornerUpLeft, FiImage } from 'react-icons/fi';
 import { BiMessageRoundedCheck } from 'react-icons/bi';
 import { useCall } from '../context/CallContext';
+import { useAppSocket } from '../context/SocketProvider';
 import { compressImage } from '../lib/imageCompress';
-import { getToken } from '../lib/tokenStore';
+import { getRealtime, subscribeTopic } from '../lib/realtime';
 
 const DAY_OPTS = { day: '2-digit', month: 'short', year: 'numeric' };
 const HEADER = '#1e3a8a';                          // header royal blue
@@ -212,6 +212,7 @@ const GROUP_MAX = 100;  // ceiling for a RESET refetch (mirrors the server's GRO
 export default function SiteChat() {
   const { canCreate, canDelete, isAdmin, user } = useAuth();
   const { startCall } = useCall();
+  const { subscribe: subscribeShell } = useAppSocket();   // the shared private `user:<me>` Realtime topic (SocketProvider)
   const [groups, setGroups] = useState([]);
   const [q, setQ] = useState('');
   const [mineOnly, setMineOnly] = useState(false);  // admin-only "Only chats I'm in" filter
@@ -254,7 +255,8 @@ export default function SiteChat() {
   const scrollRef = useRef(null);       // the messages scroll container
   const atBottomRef = useRef(true);     // is the user currently pinned to the bottom?
   const lastGroupRef = useRef(null);    // detect a thread switch (always jump to bottom then)
-  const socketRef = useRef(null);
+  const liveRef = useRef(false);        // Realtime configured (env present)? gates the fallback polls — was socket.connected
+  const selIdRef = useRef(null);        // open thread id, read inside the debounced 'changed' handler without a stale closure
   const mediaRef = useRef(null);
   const chunksRef = useRef([]);
   const recTimerRef = useRef(null);
@@ -275,7 +277,7 @@ export default function SiteChat() {
   // Keyset-paginated group list (perf pass — admin-slowness fix). Default: fetch
   // a RESET page sized to Math.max(GROUP_PAGE, currently-rendered count) so an
   // admin scrolled several pages deep isn't truncated back to page 1 on every
-  // poll/socket refresh — same sizing trick loadThread uses for `reconcile`.
+  // poll/realtime refresh — same sizing trick loadThread uses for `reconcile`.
   // { more: true }: fetch the next page (via groupsCursorRef) and APPEND, deduping
   // by id. Search (`q` state) rides along on every request via qRef so a reset OR
   // a "more" page both stay scoped to the active search term.
@@ -332,14 +334,14 @@ export default function SiteChat() {
         if (r.data.group) setSel(s => (s && s.id === id ? { ...s, name: r.data.group.name, is_dm: r.data.group.is_dm } : s));
         // Opening/polling a thread marks it read — clear its unread badge locally
         // instead of re-fetching the whole groups list every 6s (perf pass). The
-        // list's own 12s timer + socket 'changed' still refresh names/last-message.
+        // list's own 12s timer + Realtime 'changed' still refresh names/last-message.
         setGroups(gs => gs.map(g => (g.id === id ? { ...g, unread: 0 } : g)));
       }
     }).catch(() => {});
   }, []);
 
   // Cap the live in-memory window so a long session can't grow msgs (and the DOM)
-  // without bound. Both append paths (socket 'message' + own send) go through this:
+  // without bound. Both append paths (Realtime 'message' + own send) go through this:
   // dedupe by id, and — ONLY when pinned to the bottom — keep the last MAX_LIVE rows.
   // Older rows stay on the server and re-load via the scroll-up loader; we never trim
   // while the user has scrolled up to read history (guarded by atBottomRef).
@@ -356,47 +358,41 @@ export default function SiteChat() {
 
   useEffect(() => { loadGroups(); reloadUsers(); }, [loadGroups, reloadUsers]);
   // Safety-net: refresh the chat list every 12 s even with NO thread open, so
-  // new messages / unread badges still surface when the socket can't connect
-  // (in-app browsers, flaky nginx WebSocket). The open thread has its own 6 s
-  // poll already (mam 2026-07-04).
-  useEffect(() => { const t = setInterval(() => { if (!socketRef.current?.connected) loadGroups(); }, 12000); return () => clearInterval(t); }, [loadGroups]);
-  // Real-time: one Socket.IO connection; the server pushes a 'changed' event
-  // to each group's room on any message/read/member change. Polling stays as
-  // a fallback if the socket can't connect.
+  // new messages / unread badges still surface when Realtime isn't available
+  // (env not configured → "no realtime" degrade; in-app browsers, flaky
+  // WebSocket). The open thread has its own 6 s poll already (mam 2026-07-04).
+  useEffect(() => { const t = setInterval(() => { if (!liveRef.current) loadGroups(); }, 12000); return () => clearInterval(t); }, [loadGroups]);
+  // Keep the open-thread id readable from the debounced 'changed' handler below.
+  useEffect(() => { selIdRef.current = sel?.id ?? null; }, [sel?.id]);
+  // Real-time (Supabase Realtime — replaces this page's own Socket.IO connection;
+  // contract: supabase/functions/api/routes/CHAT-REALTIME.md). The personal topic
+  // `user:<me>` is OWNED by SocketProvider — one private channel per user that the
+  // shell's unread badge and incoming calls ride too. supabase-js hands back the
+  // SAME channel object for a duplicate topic, so subscribing to it again here and
+  // unsubscribing on page-leave would tear down the shell's channel (badge + calls
+  // dead until reload). So this page listens through the provider's subscribe():
+  // 'changed' = the backend's `chat:changed` {groupId} (read receipts, deletes,
+  // membership, last-message, new message). The Edge Function no longer coalesces
+  // these (stateless per request), so a BURST still collapses into ONE trailing
+  // reload here instead of one-reload-per-event — that reload storm was what made
+  // busy groups sluggish (perf pass — S3-client). New messages don't wait on this
+  // path; they arrive on the per-group topic in the thread effect below. Polling
+  // stays as a fallback when Realtime isn't configured.
   useEffect(() => {
-    // auth as a FUNCTION so every (re)connect uses the CURRENT token via
-    // getToken() — which falls back to the in-memory copy when localStorage is
-    // blocked (in-app browsers opened from WhatsApp, private mode). Reading
-    // localStorage directly returned null there, so the socket never
-    // authenticated and real-time chat was dead for those users — their
-    // messages only appeared after a manual refresh (mam 2026-07-04).
-    const socket = io({ path: '/socket.io', auth: (cb) => cb({ token: getToken() }), transports: ['websocket', 'polling'] });
-    socketRef.current = socket;
-    // On (re)connect, re-join the open group's room and catch up on anything
-    // missed while disconnected — fixes "always need to refresh" after a drop.
-    socket.on('connect', () => { loadGroups(); setSel(s => { if (s) { socket.emit('join', s.id); loadThread(s.id); } return s; }); });
-    // New message pushed from the server: append it directly (dedupe by id) so a
-    // send/receive shows INSTANTLY without re-fetching the whole thread. The
-    // auto-scroll effect keeps the view pinned to the bottom only if the reader
-    // is already there (perf pass — S3-client).
-    socket.on('message', (row) => { if (row && row.group_id != null) setSel(s => { if (s && s.id === row.group_id) appendMsg(row); return s; }); });
-    // 'changed' (read receipts, deletes, membership, last-message) still needs a
-    // reconcile fetch, but a BURST of them now collapses into a single trailing
-    // reload instead of one-reload-per-event — that reload storm was what made
-    // busy groups sluggish (perf pass — S3-client). New messages no longer wait
-    // on this path; they arrive via 'message' above.
-    socket.on('changed', ({ groupId }) => {
-      if (groupId != null) changedGroupsRef.current.add(groupId);
+    liveRef.current = !!getRealtime();   // no VITE_SUPABASE_* env → "no realtime" → the polls take over
+    const off = subscribeShell('changed', (p) => {
+      const groupId = p?.groupId;
+      if (groupId != null) changedGroupsRef.current.add(Number(groupId));
       clearTimeout(changedTimerRef.current);
       changedTimerRef.current = setTimeout(() => {
         const gids = changedGroupsRef.current; changedGroupsRef.current = new Set();
         loadGroups();
-        setSel(s => { if (s && gids.has(s.id)) loadThread(s.id, { reconcile: true }); return s; });
+        const cur = selIdRef.current;
+        if (cur != null && gids.has(Number(cur))) loadThread(cur, { reconcile: true });
       }, 300);
     });
-    socket.on('group_deleted', ({ groupId }) => { loadGroups(); setSel(s => (s && s.id === groupId ? null : s)); });
-    return () => { socket.disconnect(); socketRef.current = null; clearTimeout(changedTimerRef.current); };
-  }, [loadThread, loadGroups, appendMsg]);
+    return () => { off(); liveRef.current = false; clearTimeout(changedTimerRef.current); };
+  }, [subscribeShell, loadThread, loadGroups]);
   // Reset SYNCHRONOUSLY before the browser paints (useLayoutEffect), so switching
   // threads never flashes the previous thread's messages for a frame before the
   // loader appears. Clearing here — instead of in the async effect below, which runs
@@ -407,15 +403,33 @@ export default function SiteChat() {
     justSentRef.current = { body: '', at: 0 };         // disarm the send-guard for the new thread
     setMsgs([]); setThreadLoading(true);               // clear the previous thread + show the loader immediately
   }, [sel?.id]);
+  const selId = sel?.id ?? null;
   useEffect(() => {
-    if (!sel) return;
-    socketRef.current?.emit('join', sel.id);
-    loadThread(sel.id).finally(() => setThreadLoading(false));
-    const t = setInterval(() => { if (!socketRef.current?.connected) loadThread(sel.id, { reconcile: true }); }, 6000);    // fallback poll — only when the socket is down
-    const onFocus = () => loadThread(sel.id, { reconcile: true });
+    if (selId == null) return;
+    const id = selId;
+    // Live thread (was socket 'join'): subscribe to this group's private topic
+    // `chat:group:<id>` for as long as it is open; unsubscribed on switch/unmount.
+    //  'message'         — the enriched row (same shape the GET lists), appended
+    //                      straight in so a send/receive shows INSTANTLY without
+    //                      re-fetching the thread. appendMsg dedupes by id: the
+    //                      sender receives its own broadcast AND its POST response
+    //                      already appended the row (perf pass — S3-client).
+    //  'message_deleted' — {id}: drop the row at once; the `chat:changed` that
+    //                      follows still reconciles receipts / quoted parents.
+    //  'group_deleted'   — {groupId}: close the thread and refresh the list.
+    const off = subscribeTopic(`chat:group:${id}`, {
+      message: (row) => { if (row && row.id != null && (row.group_id == null || Number(row.group_id) === Number(id))) appendMsg(row); },
+      message_deleted: (p) => { const mid = p?.id; if (mid != null) setMsgs(ms => ms.filter(m => String(m.id) !== String(mid))); },
+      group_deleted: (p) => { const gid = p?.groupId ?? id; loadGroups(); setSel(s => (s && Number(s.id) === Number(gid) ? null : s)); },
+    });
+    loadThread(id).finally(() => setThreadLoading(false));
+    const t = setInterval(() => { if (!liveRef.current) loadThread(id, { reconcile: true }); }, 6000);    // fallback poll — only when Realtime isn't configured
+    // Returning to the tab reconciles — also our catch-up after a dropped
+    // channel (the old socket did this on 'connect').
+    const onFocus = () => loadThread(id, { reconcile: true });
     window.addEventListener('focus', onFocus);
-    return () => { clearInterval(t); window.removeEventListener('focus', onFocus); };
-  }, [sel?.id, loadThread]);
+    return () => { off(); clearInterval(t); window.removeEventListener('focus', onFocus); };
+  }, [selId, loadThread, loadGroups, appendMsg]);
   // Auto-scroll, WhatsApp-style: jump to the bottom only when opening a thread
   // or when a new message arrives AND the user is already near the bottom. If
   // they've scrolled up to read history, the 6 s poll must NOT yank them back
@@ -508,7 +522,7 @@ export default function SiteChat() {
     try {
       const r = await api.post(`/site-chat/${sel.id}`, payload);
       // Append the server-returned row instead of re-fetching the whole thread
-      // (perf pass). Socket 'changed' / fallback poll reconciles if needed.
+      // (perf pass). Realtime 'changed' / fallback poll reconciles if needed.
       if (r.data && r.data.id) appendMsg(r.data);
     }
     catch (err) {
