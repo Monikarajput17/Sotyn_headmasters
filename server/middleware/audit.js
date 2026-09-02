@@ -11,7 +11,7 @@
 //    (e.g. before/after snapshots, friendly entity labels).
 //  - Auto-derives entity_type from the URL path (the segment after /api/).
 
-const { getDb } = require('../db/schema');
+const pg = require('../db/pg');
 
 const SECRET_KEYS = new Set(['password', 'current_password', 'new_password', 'token', 'authorization', 'secret']);
 
@@ -104,16 +104,15 @@ function auditMiddleware(req, res, next) {
 
     res.on('finish', () => {
       try {
-        const db = getDb();
-        if (!db) { dbg('no db'); return; }
         const user = req.user || {};
         const safe = (v) => (v === undefined ? null : v);
-        const result = db.prepare(
+        // Fire-and-forget: the write is async (Postgres) but nothing awaits
+        // it — request latency is unchanged, failures only log to console.
+        pg.run(
           `INSERT INTO audit_log
             (user_id, user_name, user_role, action, entity_type, entity_id,
              method, path, query, body_summary, status_code, ip, user_agent)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        ).run(
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           safe(user.id) || null,
           safe(user.name) || null,
           safe(user.role) || null,
@@ -127,10 +126,12 @@ function auditMiddleware(req, res, next) {
           safe(res.statusCode) || null,
           (req.headers?.['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim() || null,
           (req.headers?.['user-agent'] || '').toString().slice(0, 200) || null,
+        ).then(
+          (result) => dbg('insert OK rowid=', result.lastInsertRowid, req.method, pathOnly, 'user=', user.id),
+          // Never let audit failures affect the real request flow
+          (e) => console.error('[audit] insert failed:', e.message, 'path=', pathOnly)
         );
-        dbg('insert OK rowid=', result.lastInsertRowid, req.method, pathOnly, 'user=', user.id);
       } catch (e) {
-        // Never let audit failures affect the real request flow
         console.error('[audit] insert failed:', e.message, 'path=', pathOnly);
       }
     });
@@ -149,13 +150,13 @@ function logAuditEvent(opts) {
     before, after, method, path, query, body, status_code, ip, user_agent,
   } = opts || {};
   try {
-    getDb().prepare(
+    // Fire-and-forget async write — callers stay synchronous and unblocked.
+    pg.run(
       `INSERT INTO audit_log
         (user_id, user_name, user_role, action, entity_type, entity_id, entity_label,
          method, path, query, body_summary, status_code, ip, user_agent,
          before_json, after_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       user?.id || null,
       user?.name || null,
       user?.role || null,
@@ -172,7 +173,7 @@ function logAuditEvent(opts) {
       user_agent ? user_agent.slice(0, 200) : null,
       before ? (typeof before === 'string' ? before : JSON.stringify(before)).slice(0, 10000) : null,
       after ? (typeof after === 'string' ? after : JSON.stringify(after)).slice(0, 10000) : null,
-    );
+    ).catch((e) => console.error('[audit] manual log failed:', e.message));
   } catch (e) {
     console.error('[audit] manual log failed:', e.message);
   }
