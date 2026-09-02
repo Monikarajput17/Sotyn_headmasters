@@ -45,7 +45,7 @@ export async function ensureVapid(): Promise<boolean> {
     })();
     initPromise.catch(() => { initPromise = null; });   // allow retry after a failure
   }
-  return initPromise;
+  return await initPromise;
 }
 
 export async function getPublicKey(): Promise<string | null> {

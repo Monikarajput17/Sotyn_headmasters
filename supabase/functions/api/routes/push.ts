@@ -1,0 +1,108 @@
+// deno-lint-ignore-file no-explicit-any
+// Push notification subscription endpoints. Frontend service worker
+// calls /vapid for the public key, then /subscribe to register the
+// browser endpoint. Backend then uses _shared/lib/push.ts to fan
+// notifications to whichever user(s) need them.
+// Port of server/routes/push.js (Phase-3 Postgres version).
+//
+// NOTE: express-lite's router.use() applies to EVERY route regardless of
+// declaration order, so authMiddleware is attached per-route here to keep
+// /vapid public exactly as the original did.
+import { Router } from "../../_shared/express-lite.ts";
+import pg from "../../_shared/pg.ts";
+import { adminOnly, authMiddleware } from "../../_shared/auth.ts";
+import { getPublicKey, pushToAll, pushToUser } from "../../_shared/lib/push.ts";
+const router = Router();
+
+// Public key — anyone can fetch (the public half is meant to be public).
+router.get("/vapid", async (_req, res) => {
+  try {
+    const key = await getPublicKey();
+    if (!key) return res.status(503).json({ error: "VAPID keys not initialised yet" });
+    res.json({ publicKey: key });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Save / refresh a subscription. Called by the client right after the
+// browser grants notification permission AND on every login (in case
+// the endpoint rotated).
+router.post("/subscribe", authMiddleware, async (req, res) => {
+  try {
+    const { endpoint, keys, device_label } = req.body || {};
+    if (!endpoint || !keys?.p256dh || !keys?.auth) {
+      return res.status(400).json({ error: "endpoint + keys.p256dh + keys.auth required" });
+    }
+    const ua = req.headers["user-agent"] || "";
+    await pg.run(`
+      INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent, device_label, active, last_seen_at)
+      VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(endpoint) DO UPDATE SET
+        user_id=excluded.user_id,
+        p256dh=excluded.p256dh,
+        auth=excluded.auth,
+        user_agent=excluded.user_agent,
+        device_label=COALESCE(excluded.device_label, push_subscriptions.device_label),
+        active=1,
+        last_seen_at=CURRENT_TIMESTAMP
+    `, req.user.id, endpoint, keys.p256dh, keys.auth, ua, device_label || null);
+    res.json({ message: "Subscribed" });
+  } catch (err) {
+    console.error("subscribe error", err);
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+router.post("/unsubscribe", authMiddleware, async (req, res) => {
+  try {
+    const { endpoint } = req.body || {};
+    if (!endpoint) return res.status(400).json({ error: "endpoint required" });
+    await pg.run(`UPDATE push_subscriptions SET active=0 WHERE endpoint=? AND user_id=?`,
+      endpoint, req.user.id);
+    res.json({ message: "Unsubscribed" });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// List my devices
+router.get("/devices", authMiddleware, async (req, res) => {
+  try {
+    const rows = await pg.all(`
+      SELECT id, device_label, user_agent, active, last_seen_at, created_at
+      FROM push_subscriptions WHERE user_id = ? ORDER BY last_seen_at DESC
+    `, req.user.id);
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+});
+
+// Test push to current user (anyone can fire to their own devices)
+router.post("/test", authMiddleware, async (req, res) => {
+  try {
+    const r = await pushToUser(req.user.id, {
+      title: "SEPL ERP — Test Notification",
+      body: req.body?.message || "If you can read this, push notifications are working on this device 🎉",
+      url: "/",
+      tag: "test",
+    });
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Admin broadcast — push a custom message to everyone (e.g. urgent
+// company-wide alert from MD).
+router.post("/broadcast", authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const { title, body, url } = req.body || {};
+    if (!title || !body) return res.status(400).json({ error: "title and body required" });
+    const r = await pushToAll({ title, body, url: url || "/", tag: "broadcast" });
+    res.json(r);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+export default router;

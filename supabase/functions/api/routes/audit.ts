@@ -1,0 +1,100 @@
+// deno-lint-ignore-file no-explicit-any
+// Admin-only audit log API. Query + filter the audit_log table populated by
+// the auditMiddleware + manual logAuditEvent() calls.
+// Port of server/routes/audit.js (Phase-3 Postgres version).
+import { Router } from "../../_shared/express-lite.ts";
+import pg from "../../_shared/pg.ts";
+import { adminOnly, authMiddleware } from "../../_shared/auth.ts";
+
+const router = Router();
+router.use(authMiddleware);
+router.use(adminOnly);
+
+// The two O(table-size) operations on this page are the unfiltered total
+// COUNT(*) and the /meta DISTINCT scans — both ran on every page load and, on
+// a large audit_log (every mutating request is logged, so it grows fast),
+// turned the page into a hang. The distinct filter values and the grand total
+// change slowly, so cache both for a minute (per isolate). The row LIST query
+// itself is already index-backed (idx_audit_log_at) + LIMIT 50, so it stays live.
+const CACHE_MS = 60 * 1000;
+let _metaCache: { at: number; data: any } = { at: 0, data: null };
+let _countCache: { at: number; total: number | null } = { at: 0, total: null };
+
+// GET /api/admin/audit
+// Filters: user_id, entity_type, action, date_from, date_to, q (free text),
+// page (1-based), limit (default 50, max 500)
+router.get("/", async (req, res) => {
+  try {
+    const { user_id, entity_type, action, date_from, date_to, q } = req.query;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = (page - 1) * limit;
+
+    const where: string[] = [];
+    const params: any[] = [];
+    if (user_id) { where.push("user_id = ?"); params.push(+user_id); }
+    if (entity_type) { where.push("entity_type = ?"); params.push(entity_type); }
+    if (action) { where.push("action = ?"); params.push(action); }
+    if (date_from) { where.push("at >= ?"); params.push(date_from + " 00:00:00"); }
+    if (date_to) { where.push("at <= ?"); params.push(date_to + " 23:59:59"); }
+    if (q) {
+      where.push("(path LIKE ? OR body_summary LIKE ? OR entity_label LIKE ? OR user_name LIKE ?)");
+      const qp = `%${q}%`;
+      params.push(qp, qp, qp, qp);
+    }
+
+    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+    // Cache only the UNFILTERED grand total (the expensive full-table count run
+    // on every default page load). Filtered counts are narrower/indexed and vary
+    // per query, so compute those live.
+    let total: number;
+    const noFilters = where.length === 0;
+    if (noFilters && _countCache.total != null && (Date.now() - _countCache.at) < CACHE_MS) {
+      total = _countCache.total;
+    } else {
+      total = (await pg.get(`SELECT COUNT(*)::int as c FROM audit_log ${whereSql}`, ...params)).c;
+      if (noFilters) _countCache = { at: Date.now(), total };
+    }
+    const rows = await pg.all(
+      `SELECT * FROM audit_log ${whereSql} ORDER BY at DESC LIMIT ? OFFSET ?`,
+      ...params, limit, offset,
+    );
+
+    res.json({ total, page, limit, rows });
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
+// Metadata for filter dropdowns — distinct values the UI can offer
+router.get("/meta", async (_req, res) => {
+  try {
+    if (_metaCache.data && (Date.now() - _metaCache.at) < CACHE_MS) {
+      return res.json(_metaCache.data);
+    }
+    const users = await pg.all(
+      `SELECT DISTINCT user_id, user_name FROM audit_log
+       WHERE user_id IS NOT NULL ORDER BY user_name`,
+    );
+    const entityTypes = (await pg.all(
+      `SELECT DISTINCT entity_type FROM audit_log
+       WHERE entity_type IS NOT NULL ORDER BY entity_type`,
+    )).map((r: any) => r.entity_type);
+    const actions = (await pg.all(
+      `SELECT DISTINCT action FROM audit_log
+       WHERE action IS NOT NULL ORDER BY action`,
+    )).map((r: any) => r.action);
+    const data = { users, entityTypes, actions };
+    _metaCache = { at: Date.now(), data };
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
+// Single entry with the full before/after JSON (for a detail popover).
+router.get("/:id", async (req, res) => {
+  try {
+    const row = await pg.get("SELECT * FROM audit_log WHERE id=?", req.params.id);
+    if (!row) return res.status(404).json({ error: "Not found" });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
+export default router;
