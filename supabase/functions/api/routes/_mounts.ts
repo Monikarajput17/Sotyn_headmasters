@@ -6,6 +6,7 @@ import { mounts as chat } from "./chat.mounts.ts";
 import { mounts as staff } from "./staff.mounts.ts";
 import { mounts as hr } from "./hr.mounts.ts";
 import { mounts as ops } from "./ops.mounts.ts";
+import announcements from "./announcements.ts";
 
 export const extraMounts: Array<[string, RouterImpl]> = [
   ...salon,
@@ -13,4 +14,5 @@ export const extraMounts: Array<[string, RouterImpl]> = [
   ...staff,
   ...hr,
   ...ops,
+  ["/announcements", announcements],
 ];

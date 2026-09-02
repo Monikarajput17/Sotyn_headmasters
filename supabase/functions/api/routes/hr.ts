@@ -1146,4 +1146,32 @@ router.post('/training/assignments/:id/complete', async (req, res) => {
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 
+// ═════════════════════════════════════════════════════════════════
+// NOTIFICATIONS (mam 2026-05-22 Phase 1 Batch E, module #15)
+// Bell-icon in the Layout polls /my-notifications every 60 sec.
+// ═════════════════════════════════════════════════════════════════
+router.get("/my-notifications", async (req, res) => {
+  try {
+    const { unread } = req.query;
+    let sql = "SELECT * FROM notifications WHERE user_id = ?";
+    if (unread === "1") sql += " AND read_at IS NULL";
+    sql += " ORDER BY created_at DESC LIMIT 50";
+    res.json(await pg.all(sql, req.user.id));
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
+router.put("/notifications/:id/read", async (req, res) => {
+  try {
+    await pg.run(`UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ? AND read_at IS NULL`, req.params.id, req.user.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
+router.post("/notifications/mark-all-read", async (req, res) => {
+  try {
+    await pg.run(`UPDATE notifications SET read_at = CURRENT_TIMESTAMP WHERE user_id = ? AND read_at IS NULL`, req.user.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+});
+
 export default router;

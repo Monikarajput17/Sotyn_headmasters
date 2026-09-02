@@ -35,37 +35,60 @@ export const anonClient = () => {
 
 const jwks = createRemoteJWKSet(new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`));
 
-export interface TokenClaims { sub: string; exp?: number; email?: string }
+// A rejected token (bad signature / expired / disabled account) is an
+// AuthError → 401. Anything else (JWKS fetch hiccup, DB connection blip on a
+// cold isolate) is INFRASTRUCTURE and must never look like a bad token — the
+// client treats 401 as "maybe log out"; a 503 just gets retried.
+export class AuthError extends Error {}
+
+export interface TokenClaims { sub: string; exp?: number; iat?: number; email?: string }
 export async function verifyAccessToken(token: string): Promise<TokenClaims> {
-  try {
-    const { payload } = await jwtVerify(token, jwks);
-    return { sub: String(payload.sub), exp: payload.exp, email: payload.email as string | undefined };
-  } catch (_jwksErr) {
-    // Legacy-secret (HS256) tokens aren't verifiable via JWKS → ask GoTrue.
-    const { data, error } = await adminClient().auth.getUser(token);
-    if (error || !data?.user) throw new Error("Invalid token");
-    let exp: number | undefined;
-    try { exp = decodeJwt(token).exp; } catch { /* ignore */ }
-    return { sub: data.user.id, exp, email: data.user.email ?? undefined };
+  let header: { alg?: string } = {};
+  try { header = JSON.parse(atob(token.split(".")[0].replace(/-/g, "+").replace(/_/g, "/"))); } catch { throw new AuthError("Malformed token"); }
+  if (header.alg && header.alg !== "HS256") {
+    // Asymmetric project keys → verify locally against the published JWKS.
+    try {
+      const { payload } = await jwtVerify(token, jwks);
+      return { sub: String(payload.sub), exp: payload.exp, iat: payload.iat, email: payload.email as string | undefined };
+    } catch (e) {
+      const code = (e as { code?: string }).code || "";
+      // jose signals token problems with ERR_JWT_* / ERR_JWS_* codes; anything
+      // else (network, JWKS timeout) is infrastructure → let it surface as such.
+      if (code.startsWith("ERR_JWT") || code.startsWith("ERR_JWS") || code.startsWith("ERR_JWKS_NO_MATCHING_KEY")) throw new AuthError("Invalid token");
+      throw e;
+    }
   }
+  // Legacy-secret (HS256) tokens → ask GoTrue.
+  const { data, error } = await adminClient().auth.getUser(token);
+  if (error || !data?.user) throw new AuthError("Invalid token");
+  let exp: number | undefined, iat: number | undefined;
+  try { const p = decodeJwt(token); exp = p.exp; iat = p.iat; } catch { /* ignore */ }
+  return { sub: data.user.id, exp, iat, email: data.user.email ?? undefined };
 }
 
-export interface AuthUser { id: number; email: string | null; role: string; name: string; auth_id: string; exp?: number }
+export interface AuthUser { id: number; email: string | null; role: string; name: string; auth_id: string; exp?: number; iat?: number }
 const cache = new Map<string, { u: AuthUser; at: number }>();
+const inflight = new Map<string, Promise<AuthUser>>();   // one verification per token at a time
 const CACHE_MS = 60_000;
 
 export async function userFromToken(token: string): Promise<AuthUser> {
   const hit = cache.get(token);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.u;
-  const claims = await verifyAccessToken(token);
-  const row = await pg.get(
-    "SELECT id, name, email, username, role, department, active, archived FROM users WHERE auth_user_id = ?", claims.sub);
-  if (!row) throw new Error("No ERP profile linked to this login");
-  if (row.archived === 1 || row.active === 0) throw new Error("Account disabled");
-  const u: AuthUser = { id: row.id, email: row.email, role: row.role, name: row.name, auth_id: claims.sub, exp: claims.exp };
-  cache.set(token, { u, at: Date.now() });
-  if (cache.size > 500) cache.delete(cache.keys().next().value as string);
-  return u;
+  const pending = inflight.get(token);
+  if (pending) return pending;
+  const p = (async () => {
+    const claims = await verifyAccessToken(token);
+    const row = await pg.get(
+      "SELECT id, name, email, username, role, department, active, archived FROM users WHERE auth_user_id = ?", claims.sub);
+    if (!row) throw new AuthError("No ERP profile linked to this login");
+    if (row.archived === 1 || row.active === 0) throw new AuthError("Account disabled");
+    const u: AuthUser = { id: row.id, email: row.email, role: row.role, name: row.name, auth_id: claims.sub, exp: claims.exp, iat: claims.iat };
+    cache.set(token, { u, at: Date.now() });
+    if (cache.size > 500) cache.delete(cache.keys().next().value as string);
+    return u;
+  })();
+  inflight.set(token, p);
+  try { return await p; } finally { inflight.delete(token); }
 }
 export const forgetToken = (token: string) => cache.delete(token);
 
@@ -76,8 +99,13 @@ export const authMiddleware: Handler = async (req, res, next) => {
     req.user = await userFromToken(token);
     next();
   } catch (e) {
-    if (String(req.originalUrl || "").includes("/auth/me")) console.warn(`[auth] /auth/me 401 — ${(e as Error).message}`);
-    res.status(401).json({ error: "Invalid token" });
+    if (e instanceof AuthError) {
+      if (String(req.originalUrl || "").includes("/auth/me")) console.warn(`[auth] /auth/me 401 — ${e.message}`);
+      return res.status(401).json({ error: "Invalid token" });
+    }
+    console.error("[auth] verification infrastructure error:", (e as Error).message);
+    res.setHeader("Retry-After", "2");
+    res.status(503).json({ error: "Authentication temporarily unavailable — please retry" });
   }
 };
 
@@ -178,7 +206,11 @@ export async function maybeSlideSession(req: Req, res: Res) {
     const rt = req.headers["x-refresh-token"];
     if (!exp || !rt) return;
     const remaining = exp - Math.floor(Date.now() / 1000);
-    if (remaining > 2 * 24 * 3600) return;
+    // Slide once the token is in its last quarter (min 30 min): a 1-hour token
+    // rotates in its last 30 min, a 7-day token in its last ~1.75 days —
+    // without rotating the refresh token on every single /auth/me call.
+    const lifetime = req.user?.iat ? exp - req.user.iat : 7 * 24 * 3600;
+    if (remaining > Math.max(1800, lifetime * 0.25)) return;
     const { data, error } = await anonClient().auth.refreshSession({ refresh_token: rt });
     if (error || !data.session) return;
     res.setHeader("X-Refresh-Token", data.session.access_token);
