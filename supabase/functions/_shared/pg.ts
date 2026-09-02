@@ -19,7 +19,12 @@ if (!url) console.error("[pg] DB_POOL_URL / SUPABASE_DB_URL not set");
 // max=4 → only 4–10 ever resolve; forcing the extended protocol is 14/14).
 // So we never let it queue: at most POOL_MAX queries/transactions run at
 // once and the rest wait here, in our own FIFO, until a slot frees.
-const POOL_MAX = 6;
+// Keep this SMALL: Supabase runs many short-lived isolates of this function,
+// each with its own pool, and the pooler caps the project at 200 client
+// connections (Free tier) — verified 2026-09-02: 6/isolate + 20 s idle hold
+// → "EMAXCONN max client connections reached" under bursts. 2 per isolate,
+// released after 3 s idle, keeps a page load fast while staying far under cap.
+const POOL_MAX = 2;
 let slots = POOL_MAX;
 const waiters: Array<() => void> = [];
 async function acquire(): Promise<() => void> {
@@ -38,8 +43,9 @@ async function acquire(): Promise<() => void> {
 const sql = postgres(url, {
   prepare: false,           // transaction pooler
   max: POOL_MAX,
-  idle_timeout: 20,
-  connect_timeout: 15,
+  idle_timeout: 3,          // give connections back to the pooler quickly
+  max_lifetime: 300,
+  connect_timeout: 10,
   ssl: "require",
   types: {
     int8: { to: 20, from: [20], serialize: (x: unknown) => String(x), parse: (x: string) => Number(x) },

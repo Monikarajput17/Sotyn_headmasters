@@ -12,33 +12,46 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (token) {
-      api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-      api.get('/auth/me')
-        .then(r => {
-          setUser({
-            id: r.data.id, name: r.data.name, email: r.data.email, username: r.data.username,
-            role: r.data.role, department: r.data.department, phone: r.data.phone,
-            approval_role: r.data.approval_role || null,
-            avatar_url: r.data.avatar_url || null,
-            has_recovery_code: !!r.data.has_recovery_code,
-          });
-          setPermissions(r.data.permissions || {});
-          setUserRoles(r.data.userRoles || []);
-        })
-        // Only log out when the server actually rejects the token (401).
-        // A 500 / network blip must NOT nuke a valid session — that was
-        // turning a transient error into an instant logout (mam 2026-06-23).
-        // Also ignore a 401 from a STALE /auth/me (one that used an older
-        // token than the now-active one) — that stale-request race logged a
-        // just-logged-in user straight back out (mam 2026-06-24, Nitin Jain).
-        .catch((e) => {
-          if (e?.response?.status === 401 && (e.config?.metadata?.tokenAtSend || null) === getToken()) logout();
-        })
-        .finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    if (!token) { setLoading(false); return; }
+    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    let cancelled = false;
+    // Only log out when the server actually rejects the token (401).
+    // A 500/503 / network blip must NOT nuke a valid session — that was
+    // turning a transient error into an instant logout (mam 2026-06-23).
+    // Also ignore a 401 from a STALE /auth/me (one that used an older
+    // token than the now-active one) — that stale-request race logged a
+    // just-logged-in user straight back out (mam 2026-06-24, Nitin Jain).
+    // Supabase migration: a serverless cold start / pooler hiccup can 503
+    // the very first session check, and with user still null the router
+    // would bounce to /login — so retry transient failures with backoff
+    // (1s, 2s, 4s, 8s) before giving up.
+    const attempt = (n) => api.get('/auth/me')
+      .then(r => {
+        if (cancelled) return;
+        setUser({
+          id: r.data.id, name: r.data.name, email: r.data.email, username: r.data.username,
+          role: r.data.role, department: r.data.department, phone: r.data.phone,
+          approval_role: r.data.approval_role || null,
+          avatar_url: r.data.avatar_url || null,
+          has_recovery_code: !!r.data.has_recovery_code,
+        });
+        setPermissions(r.data.permissions || {});
+        setUserRoles(r.data.userRoles || []);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const st = e?.response?.status;
+        if (st === 401) {
+          if ((e.config?.metadata?.tokenAtSend || null) === getToken()) logout();
+          setLoading(false);
+          return;
+        }
+        if (n < 4) { setTimeout(() => attempt(n + 1), 1000 * Math.pow(2, n)); return; }
+        setLoading(false);
+      });
+    attempt(0);
+    return () => { cancelled = true; };
   }, [token]);
 
   // Live-refresh permissions so a grant an admin just made takes effect WITHOUT
