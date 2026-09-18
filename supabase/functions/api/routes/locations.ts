@@ -13,11 +13,16 @@
 //                                      can see how much they moved.
 import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
+import { scopeSql, inScope, hasPermission } from "../../_shared/attendance-access.ts";
 import { adminOnly, authMiddleware } from "../../_shared/auth.ts";
 
 const router = Router();
 router.use(authMiddleware);
-router.use(adminOnly);
+router.use(async(req,res,next)=>{
+ if(!await hasPermission(req.user.id,'attendance_tracking','view'))return res.status(403).json({error:'Tracking view permission required'});
+ if(req.query.user_id&&!await inScope(req,'attendance_tracking','view',req.query.user_id))return res.status(403).json({error:'User outside permitted scope'});
+ next();
+});
 
 // Haversine — meters between two GPS points.
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -55,7 +60,7 @@ router.get("/live", async (req, res) => {
             WHERE time >= ?
             GROUP BY user_id
          ) latest ON latest.user_id = lt.user_id AND latest.max_time = lt.time
-        WHERE COALESCE(u.track_location, 1) = 1
+        WHERE COALESCE(u.track_location, 1) = 1 AND ${await scopeSql(req,"attendance_tracking","view","u.id")}
         ORDER BY
           CASE
             WHEN lt.site_name = 'GPS_OFF' THEN 0       -- alerts first (audit priority)
@@ -110,7 +115,7 @@ router.get("/latest", async (req, res) => {
             WHERE time >= ?
             GROUP BY user_id
          ) latest ON latest.user_id = lt.user_id AND latest.max_time = lt.time
-        WHERE COALESCE(u.track_location, 1) = 1
+        WHERE COALESCE(u.track_location, 1) = 1 AND ${await scopeSql(req,"attendance_tracking","view","u.id")}
         ORDER BY lt.time DESC`, sinceIso);
 
     const geofences = await pg.all(
@@ -239,13 +244,13 @@ router.get("/timeline", async (req, res) => {
 // GET /api/admin/locations/users
 //   helper for the timeline picker — list of every user that has any
 //   location ping ever AND has not opted out (track_location != 0).
-router.get("/users", async (_req, res) => {
+router.get("/users", async (req, res) => {
   try {
     const rows = await pg.all(
       `SELECT DISTINCT u.id, u.name, u.department
          FROM location_tracking lt
          JOIN users u ON u.id = lt.user_id
-        WHERE COALESCE(u.track_location, 1) = 1
+        WHERE COALESCE(u.track_location, 1) = 1 AND ${await scopeSql(req,"attendance_tracking","view","u.id")}
         ORDER BY u.name`);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }

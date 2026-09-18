@@ -1,0 +1,62 @@
+# Used only inside the ignored .local workspace. Never link this project.
+project_id = "sotyn-headmasters-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[db.seed]
+enabled = true
+sql_paths = ["./seed.sql"]
+
+[studio]
+enabled = true
+port = 54323
+api_url = "http://127.0.0.1"
+
+[local_smtp]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3055"
+additional_redirect_urls = ["http://localhost:3055"]
+enable_signup = false
+minimum_password_length = 8
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+
+[edge_runtime]
+enabled = true
+policy = "oneshot"
+inspector_port = 8083
+deno_version = 2
+
+[edge_runtime.secrets]
+LOCAL_DEVELOPMENT = "1"
+LOCAL_PUBLIC_SUPABASE_URL = "http://127.0.0.1:54321"
+DB_POOL_URL = "postgresql://postgres:postgres@db:5432/postgres"
+
+[functions.api]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/api/index.ts"
+import_map = "./functions/api/deno.json"
+
+[analytics]
+enabled = false

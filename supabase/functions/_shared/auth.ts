@@ -11,6 +11,8 @@
 import { createClient } from "@supabase/supabase-js";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 import pg from "./pg.ts";
+import { FOUNDATION_MODULES, isPermissionManager } from "./attendance-access.ts";
+import { WORK_MODULES } from "./work-access.ts";
 import type { Handler, Req, Res } from "./express-lite.ts";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
@@ -115,49 +117,30 @@ export const adminOnly: Handler = (req, res, next) => {
 };
 
 export function requirePermission(module: string, action: string): Handler {
-  return async (req, res, next) => {
-    if (req.user?.role === "admin") return next();
-    try {
-      const perms = await pg.get(`
-        SELECT rp.* FROM role_permissions rp
-        JOIN user_roles ur ON rp.role_id = ur.role_id
-        WHERE ur.user_id = ? AND rp.module = ?`, req.user.id, module);
-      if (!perms) return res.status(403).json({ error: `No access to ${module}` });
-      const actionMap: Record<string, string> = { view: "can_view", create: "can_create", edit: "can_edit", delete: "can_delete", approve: "can_approve" };
-      const field = actionMap[action];
-      if (!field || !perms[field]) return res.status(403).json({ error: `No ${action} permission for ${module}` });
-      next();
-    } catch (e) {
-      console.error("[auth] permission check failed:", (e as Error).message);
-      res.status(500).json({ error: "Permission check failed" });
-    }
-  };
+ return async(req,res,next)=>{
+  const map:Record<string,string>={view:'can_view',create:'can_create',edit:'can_edit',delete:'can_delete',approve:'can_approve'};
+  const permissions=await getUserPermissions(req.user.id);
+  if(!map[action]||!permissions[module]?.[map[action]])return res.status(403).json({error:'No '+action+' permission for '+module});
+  next();
+ };
 }
-
-export async function getUserPermissions(userId: number) {
-  const user = await pg.get("SELECT role FROM users WHERE id = ?", userId);
-  if (user?.role === "admin") {
-    const modules = [
-      "dashboard", "leads", "quotations", "solar_quotation", "orders", "business_book", "item_master", "vendors", "customers", "procurement",
-      "cashflow", "collections", "payment_required", "attendance", "indent_fms", "dpr",
-      "installation", "billing", "complaints", "hr", "payroll", "employees", "expenses", "checklists", "users", "delegations", "pms_tasks", "inventory", "scoring", "gamification", "tools", "rentals",
-      "salon_services", "salon_stylists", "salon_clients", "salon_appointments", "salon_pos", "salon_products", "salon_memberships", "salon_commissions",
-    ];
-    // deno-lint-ignore no-explicit-any
-    const perms: Record<string, any> = {};
-    for (const m of modules) perms[m] = { can_view: 1, can_create: 1, can_edit: 1, can_delete: 1, can_approve: 1, can_see_all: 1 };
-    return perms;
-  }
-  const rows = await pg.all(`
-    SELECT rp.module, rp.can_view, rp.can_create, rp.can_edit, rp.can_delete, rp.can_approve, rp.can_see_all
-    FROM role_permissions rp JOIN user_roles ur ON rp.role_id = ur.role_id WHERE ur.user_id = ?`, userId);
-  // deno-lint-ignore no-explicit-any
-  const perms: Record<string, any> = {};
-  for (const r of rows) {
-    if (!perms[r.module]) perms[r.module] = { can_view: 0, can_create: 0, can_edit: 0, can_delete: 0, can_approve: 0, can_see_all: 0 };
-    for (const k of ["can_view", "can_create", "can_edit", "can_delete", "can_see_all", "can_approve"]) perms[r.module][k] = perms[r.module][k] || r[k];
-  }
-  return perms;
+export async function getUserPermissions(userId:number){
+ const permissions:Record<string,any>={};
+ const user=await pg.get('SELECT role FROM users WHERE id=?',userId);
+ // Preserve unrelated legacy modules during this bounded attendance rollout.
+ if(user?.role==='admin'){
+  const modules=['dashboard','leads','quotations','solar_quotation','orders','business_book','item_master','vendors','customers','procurement','cashflow','collections','payment_required','indent_fms','dpr','installation','billing','complaints','hr','expenses','checklists','users','delegations','pms_tasks','inventory','scoring','gamification','tools','rentals','salon_services','salon_stylists','salon_clients','salon_appointments','salon_pos','salon_products','salon_memberships','salon_commissions'];
+  for(const m of modules)if(!FOUNDATION_MODULES.has(m)&&!WORK_MODULES.has(m))permissions[m]={can_view:1,can_create:1,can_edit:1,can_delete:1,can_approve:1,can_see_all:1};
+ }
+ const rows=await pg.all('SELECT rp.* FROM role_permissions rp JOIN user_roles ur ON ur.role_id=rp.role_id WHERE ur.user_id=?',userId);
+ for(const r of rows){
+  const p=permissions[r.module] ||= {can_view:0,can_create:0,can_edit:0,can_delete:0,can_approve:0,can_see_all:0,can_view_others:0};
+  for(const key of ['can_view','can_create','can_edit','can_delete','can_approve'])p[key]=p[key]||Number(r[key])||0;
+  p.can_see_all=p.can_see_all||(r.can_view && r.scope_mode==='all'?1:0);
+  p.can_view_others=p.can_view_others||(r.can_view && r.scope_mode!=='self'?1:0);
+ }
+ if(await isPermissionManager(userId))permissions.permission_admin={can_view:1,can_create:1,can_edit:1,can_delete:1,can_approve:1,can_see_all:1};
+ return permissions;
 }
 
 // ─── Supabase Auth account helpers (used by routes/auth.ts) ─────────────────

@@ -27,10 +27,17 @@ router.get('/', requirePermission(M, 'view'), async (req, res) => {
     let sql = `SELECT p.*, c.name AS client_name, c.phone AS client_phone
                FROM pos_sales p LEFT JOIN salon_clients c ON c.id = p.client_id WHERE 1=1`;
     const pa: any[] = [];
-    if (from) { sql += ' AND LEFT(p.created_at,10)>=?'; pa.push(from); }
-    if (to) { sql += ' AND LEFT(p.created_at,10)<=?'; pa.push(to); }
+    if (from) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date>=?"; pa.push(from); }
+    if (to) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date<=?"; pa.push(to); }
     if (client_id) { sql += ' AND p.client_id=?'; pa.push(client_id); }
     if (payment_mode) { sql += ' AND p.payment_mode=?'; pa.push(payment_mode); }
+    if(req.query.status){sql+=' AND p.status=?';pa.push(req.query.status);}
+    if(req.query.page){
+      const page=Math.max(1,Math.min(100000,Math.floor(Number(req.query.page)||1))),limit=50;
+      const count=await pg.get(`SELECT count(*) AS n FROM (${sql}) matching`,...pa);
+      const rows=await pg.all(sql+' ORDER BY p.created_at DESC,p.id DESC LIMIT ? OFFSET ?',...pa,limit,(page-1)*limit);
+      return res.json({rows,total:count.n,page,limit});
+    }
     sql += ' ORDER BY p.created_at DESC LIMIT 500';
     res.json(await pg.all(sql, ...pa));
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }

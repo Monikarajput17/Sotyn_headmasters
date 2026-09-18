@@ -8,6 +8,7 @@ import { useAuth } from '../context/AuthContext';
 import { FiClock, FiMapPin, FiCamera, FiUsers, FiCalendar, FiCheckCircle, FiXCircle, FiPlus, FiAlertTriangle, FiTrash2, FiEdit2, FiDownload } from 'react-icons/fi';
 import { exportCsv } from '../utils/exportCsv';
 import TimePicker from '../components/TimePicker';
+import AttendanceOperations from '../components/AttendanceOperations';
 
 // Render a stored UTC ISO timestamp as IST time (hh:mm AM/PM). Always pins to
 // Asia/Kolkata so a punch shows the correct Indian time even when the viewing
@@ -22,11 +23,15 @@ const fmtT = (iso) => {
 };
 
 export default function Attendance() {
-  const { user, isAdmin, canDelete, canSeeAll } = useAuth();
+  const { user, canCreate, canEdit, canApprove, canView, canViewOthers, canDelete, canSeeAll } = useAuth();
   // Admins, or anyone granted "See All" on the attendance module, can view
   // everyone's attendance (mam 2026-06-15: "show all attendance if I give some
   // permission to see all"). Write tools (Grid / Geofence) stay admin-only.
-  const seeAll = isAdmin() || canSeeAll('attendance');
+  const seeAll = canViewOthers('attendance') || canSeeAll('attendance');
+  const canCapture = canCreate('attendance_capture');
+  const canReadCapture = canView('attendance_capture');
+  const canManageLocations = canView('attendance_locations');
+  const pendingCapture = useRef(null);
   const [tab, setTab] = useUrlTab('punch');
   const [myToday, setMyToday] = useState(null);
   // Mam: daily attendance detail (in/out times + leave) belongs on the
@@ -41,6 +46,8 @@ export default function Attendance() {
   const [report, setReport] = useState([]);
   const [leaves, setLeaves] = useState([]);
   const [geofences, setGeofences] = useState([]);
+  const [captureLocations, setCaptureLocations] = useState([]);
+  const [captureSetup, setCaptureSetup] = useState(null);
   // True only after a SUCCESSFUL geofence fetch — so a failed fetch (transient
   // server blip) never gets mistaken for "no sites configured" (mam 2026-07-01:
   // "No site locations configured" showing in the office).
@@ -50,8 +57,8 @@ export default function Attendance() {
   const [userSearch, setUserSearch] = useState('');
   const [selectedUserId, setSelectedUserId] = useState('');
   const [userRecords, setUserRecords] = useState([]);
-  const today = new Date().toISOString().split('T')[0];
-  const firstOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().split('T')[0];
+  const today = new Date().toLocaleDateString('en-CA', {timeZone:'Asia/Kolkata'});
+  const firstOfMonth = today.slice(0,7) + '-01';
   const [userDateFrom, setUserDateFrom] = useState(firstOfMonth);
   const [userDateTo, setUserDateTo] = useState(today);
   // "My History" tab — every employee can review their OWN past attendance
@@ -68,6 +75,8 @@ export default function Attendance() {
   const [location, setLocation] = useState(null);
   const [address, setAddress] = useState('');
   const [photo, setPhoto] = useState(null);
+  const [exceptionReason,setExceptionReason]=useState('');
+  const exceptionAllowed=captureSetup?.capture_exception==='review';
   const [cameraOpen, setCameraOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState(null);
@@ -92,27 +101,37 @@ export default function Attendance() {
     // only mark it loaded on a real success so the warning can't fire on a
     // failed fetch (mam 2026-07-01).
     (function loadGeofences(tries) {
-      api.get('/attendance/geofence')
-        .then(r => { setGeofences(r.data || []); setGeofencesLoaded(true); })
+      if (!canReadCapture) return;
+      api.get('/attendance/my-capture-context')
+        .then(r => { setCaptureLocations(r.data.locations || []); setCaptureSetup(r.data); setGeofencesLoaded(true); })
         .catch(() => { if (tries > 1) setTimeout(() => loadGeofences(tries - 1), 2000); });
     })(4);
+    if (canManageLocations && tab==='geofence') api.get('/attendance/geofence').then(r => setGeofences(r.data || [])).catch(() => {});
+    if(tab==='leaves') api.get('/attendance/leaves').then(r => setLeaves(r.data)).catch(() => {});
     if (seeAll) {
-      api.get('/attendance/dashboard').then(r => setDashboard(r.data)).catch(() => {});
-      api.get(`/attendance?date=${filterDate}`).then(r => setRecords(r.data)).catch(() => {});
-      api.get('/attendance/leaves').then(r => setLeaves(r.data)).catch(() => {});
-      api.get('/auth/users').then(r => setAllUsers((r.data || []).filter(u => u.active !== 0))).catch(() => {});
+      if(tab==='dashboard') api.get('/attendance/dashboard').then(r => setDashboard(r.data)).catch(() => {});
+      if(tab==='records') api.get(`/attendance?date=${filterDate}`).then(r => setRecords(r.data)).catch(() => {});
+      if(tab==='byuser') api.get('/auth/users').then(r => setAllUsers((r.data || []).filter(u => u.active !== 0))).catch(() => {});
       const m = new Date().getMonth() + 1, y = new Date().getFullYear();
-      api.get(`/attendance/report?month=${m}&year=${y}`).then(r => setReport(r.data)).catch(() => {});
+      if(tab==='report') api.get(`/attendance/report?month=${m}&year=${y}`).then(r => setReport(r.data)).catch(() => {});
     }
-  }, [filterDate]);
+  }, [filterDate, seeAll, canReadCapture, canManageLocations, tab]);
 
   // Load per-user records when the By User tab filters change
   useEffect(() => {
-    if (!seeAll || tab !== 'byuser' || !selectedUserId) { setUserRecords([]); return; }
+    // Depend on the permission value, not a function recreated each render.
+    // Repeatedly setting a new [] here starves router transitions and leaves
+    // the previous screen visible even after the address bar has changed.
+    if (!seeAll || tab !== 'byuser' || !selectedUserId) {
+      setUserRecords(previous => previous.length ? [] : previous);
+      return;
+    }
+    let cancelled = false;
     api.get(`/attendance?user_id=${selectedUserId}&date_from=${userDateFrom}&date_to=${userDateTo}`)
-      .then(r => setUserRecords(r.data))
-      .catch(() => setUserRecords([]));
-  }, [tab, selectedUserId, userDateFrom, userDateTo, isAdmin]);
+      .then(r => { if (!cancelled) setUserRecords(r.data); })
+      .catch(() => { if (!cancelled) setUserRecords([]); });
+    return () => { cancelled = true; };
+  }, [tab, selectedUserId, userDateFrom, userDateTo, seeAll]);
 
   // Load the logged-in user's own attendance when the My History tab /
   // its date range changes. Self-service — works for every employee.
@@ -142,20 +161,17 @@ export default function Attendance() {
       // heartbeat so admin sees "online but GPS unavailable" instead of
       // mistaking the user for absent / off-network.
       if (!navigator.geolocation) {
-        api.post('/attendance/track-location', { gps_off: true, reason: 'no-geolocation-api' }).catch(() => {});
         return;
       }
       navigator.geolocation.getCurrentPosition(pos => {
         const loc = { latitude: pos.coords.latitude, longitude: pos.coords.longitude, accuracy: pos.coords.accuracy || 0 };
         setLocation(loc);
-        api.post('/attendance/track-location', { ...loc, address: '' }).catch(() => {});
       }, (err) => {
         // GPS off / permission denied / timeout — send a "GPS OFF"
         // heartbeat so the admin Location Tracking page can surface
         // them in red. Mam: 'can show me here like some off GPS even
         // network is good'.
         const reasonMap = { 1: 'permission-denied', 2: 'position-unavailable', 3: 'timeout' };
-        api.post('/attendance/track-location', { gps_off: true, reason: reasonMap[err?.code] || 'unknown-error' }).catch(() => {});
       }, { enableHighAccuracy: true, timeout: 15000 });
     };
     trackLocation(); // fire immediately
@@ -187,23 +203,24 @@ export default function Attendance() {
   //   outside — precise lock, confidently away (red; will be blocked)
   const geoStatus = (() => {
     if (!location) return { state: 'locating' };
-    const active = (geofences || []).filter(g => g.active !== 0);
+    const active = captureLocations.filter(g => g.active !== 0);
     // Only claim "no sites" once we've actually loaded an empty list from the
     // server. Before that (still loading, or the fetch failed on an OOM blip)
     // stay in 'locating' so we never falsely tell on-site staff there are no
     // geofences (mam 2026-07-01).
     if (active.length === 0) return { state: geofencesLoaded ? 'no_sites' : 'locating' };
     const accRaw = +location.accuracy || 0;
-    const acc = Math.min(Math.max(accRaw, 50), 3000);   // floor 50 / ceiling 3000 — matches server
+    const limits=captureSetup?.geo_settings||{floor:50,ceiling:3000,trust:200};
+    const acc = Math.min(Math.max(accRaw, limits.floor), limits.ceiling);   // floor 50 / ceiling 3000 — matches server
     let nearest = { d: Infinity, g: null }, matched = null;
     for (const g of active) {
       const d = haversineMeters(location.latitude, location.longitude, g.latitude, g.longitude);
       if (d < nearest.d) nearest = { d, g };
       if (!matched && d - acc <= (g.radius_meters || 200)) matched = g;
     }
-    const goodFix = accRaw > 0 && accRaw <= 200;   // a real GPS lock — matches server trust threshold
-    if (matched) return { state: 'inside', site: matched, dist: Math.round(haversineMeters(location.latitude, location.longitude, matched.latitude, matched.longitude)), acc: Math.round(accRaw) };
-    if (!goodFix) return { state: 'weak', site: nearest.g, dist: Math.round(nearest.d), acc: Math.round(accRaw) };
+    const goodFix = accRaw > 0 && accRaw <= limits.trust;   // a real GPS lock — matches server trust threshold
+    if (matched) return { state: goodFix?'inside':'weak', site: matched, dist: Math.round(haversineMeters(location.latitude, location.longitude, matched.latitude, matched.longitude)), acc: Math.round(accRaw) };
+    if (!goodFix || nearest.d-acc <= (nearest.g?.radius_meters||200)+(limits.blockBuffer||300)) return { state: 'weak', site: nearest.g, dist: Math.round(nearest.d), acc: Math.round(accRaw) };
     return { state: 'outside', site: nearest.g, dist: Math.round(nearest.d), acc: Math.round(accRaw) };
   })();
 
@@ -274,27 +291,33 @@ export default function Attendance() {
 
   // Punch In
   const handlePunchIn = async () => {
-    if (!photo) return toast.error('Please take a selfie first');
+    if (!canCreate('attendance_capture')) return toast.error('Attendance capture permission required');
+    if (!photo && !(exceptionAllowed && exceptionReason.trim().length>=3)) return toast.error('Take a selfie, or enter a reason if exception review is enabled');
     setLoading(true);
     try {
-      const loc = await getLocation();
-      const res = await api.post('/attendance/punch-in', { ...loc, address, photo, site_name: '' });
+      const loc = await getLocation().catch(e=>{if(exceptionAllowed && exceptionReason.trim().length>=3)return {};throw e;});
+      if (!pendingCapture.current || pendingCapture.current.kind !== 'in') pendingCapture.current = {kind:'in',body:{...loc,address,photo,exception_reason:exceptionReason,request_id:crypto.randomUUID(),captured_at:new Date().toISOString()}};
+      const res = await api.post('/attendance/punch-in', pendingCapture.current.body);
+      pendingCapture.current = null;
       toast.success(res.data.message);
-      setPhoto(null); load();
-    } catch (err) { toast.error(typeof err === 'string' ? err : err.response?.data?.error || 'Failed'); }
+      setPhoto(null); setExceptionReason(''); load();
+    } catch (err) { if(err.response?.status>=400 && err.response?.status<500) pendingCapture.current=null; toast.error(typeof err === 'string' ? err : err.response?.data?.error || 'Failed'); }
     setLoading(false);
   };
 
   // Punch Out
   const handlePunchOut = async () => {
-    if (!photo) return toast.error('Please take a selfie first');
+    if (!canCreate('attendance_capture')) return toast.error('Attendance capture permission required');
+    if (!photo && !(exceptionAllowed && exceptionReason.trim().length>=3)) return toast.error('Take a selfie, or enter a reason if exception review is enabled');
     setLoading(true);
     try {
-      const loc = await getLocation();
-      const res = await api.post('/attendance/punch-out', { ...loc, address, photo });
+      const loc = await getLocation().catch(e=>{if(exceptionAllowed && exceptionReason.trim().length>=3)return {};throw e;});
+      if (!pendingCapture.current || pendingCapture.current.kind !== 'out') pendingCapture.current = {kind:'out',body:{...loc,address,photo,exception_reason:exceptionReason,request_id:crypto.randomUUID(),captured_at:new Date().toISOString()}};
+      const res = await api.post('/attendance/punch-out', pendingCapture.current.body);
+      pendingCapture.current = null;
       toast.success(res.data.message);
-      setPhoto(null); load();
-    } catch (err) { toast.error(typeof err === 'string' ? err : err.response?.data?.error || 'Failed'); }
+      setPhoto(null); setExceptionReason(''); load();
+    } catch (err) { if(err.response?.status>=400 && err.response?.status<500) pendingCapture.current=null; toast.error(typeof err === 'string' ? err : err.response?.data?.error || 'Failed'); }
     setLoading(false);
   };
 
@@ -304,7 +327,7 @@ export default function Attendance() {
 
   // ── Monthly Attendance Grid helpers ──────────────────────────────
   const loadGrid = useCallback(() => {
-    if (!isAdmin()) return;
+    if (!canView('attendance')) return;
     api.get(`/attendance/grid?month=${gridMonth}`).then(r => setGrid(r.data)).catch(() => setGrid(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gridMonth]);
@@ -312,6 +335,10 @@ export default function Attendance() {
 
   const cellMeta = (c) => {
     const s = c?.status || '';
+    if (s === 'review_required') return {t:'?',cls:'bg-amber-100 text-amber-800'};
+    if (s === 'corrected') return {t:'C',cls:'bg-blue-100 text-blue-800'};
+    if (s === 'weekly_off' || s === 'weekly_off_sandwich') return {t:'WO',cls:'bg-gray-100 text-gray-700'};
+    if (s === 'leave_and_work') return {t:'L+W',cls:'bg-purple-100 text-purple-700'};
     if (s === 'present') return { t: 'P', cls: 'bg-emerald-100 text-emerald-700' };
     if (s === 'late') return { t: 'L', cls: 'bg-amber-100 text-amber-700' };
     if (s === 'half_day') return { t: '½', cls: 'bg-orange-100 text-orange-700' };
@@ -345,6 +372,7 @@ export default function Attendance() {
     toast.success('Monthly grid exported — open the file in Excel to print or send.');
   };
   const markCell = async (emp, date, status) => {
+    if(!emp.can_correct) return;
     if (!emp.user_id) return;
     setGridBusy(true);
     try { await api.post('/attendance/admin-mark', { user_id: emp.user_id, date, status }); loadGrid(); }
@@ -362,6 +390,7 @@ export default function Attendance() {
     markCell(emp, day.date, next);
   };
   const markAllPresent = async (emp) => {
+    if(!emp.can_correct) return;
     if (!emp.user_id) return;
     if (!confirm(`Mark ${emp.name} PRESENT on every blank working day in ${gridMonth}? (Sundays, real punches and leaves are left untouched.)`)) return;
     setGridBusy(true);
@@ -380,26 +409,26 @@ export default function Attendance() {
       <div className="flex gap-2 flex-wrap">
         <button onClick={() => setTab('punch')} className={`btn ${tab === 'punch' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Punch In/Out</button>
         <button onClick={() => setTab('myhistory')} className={`btn ${tab === 'myhistory' ? 'btn-primary' : 'btn-secondary'} text-sm`}>My History</button>
+        <button onClick={() => setTab('leaves')} className={`btn ${tab === 'leaves' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Leaves</button>
         {seeAll && <>
           <button onClick={() => setTab('dashboard')} className={`btn ${tab === 'dashboard' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Dashboard</button>
           <button onClick={() => setTab('records')} className={`btn ${tab === 'records' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Records</button>
           <button onClick={() => setTab('byuser')} className={`btn ${tab === 'byuser' ? 'btn-primary' : 'btn-secondary'} text-sm`}>By User</button>
           <button onClick={() => setTab('report')} className={`btn ${tab === 'report' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Monthly Report</button>
-          <button onClick={() => setTab('leaves')} className={`btn ${tab === 'leaves' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Leaves</button>
         </>}
-        {isAdmin() && <>
+        {canViewOthers('attendance') && <>
           <button onClick={() => setTab('grid')} className={`btn ${tab === 'grid' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Monthly Grid</button>
-          <button onClick={() => setTab('geofence')} className={`btn ${tab === 'geofence' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Geofence</button>
         </>}
+        {canManageLocations && <button onClick={() => setTab('geofence')} className={`btn ${tab === 'geofence' ? 'btn-primary' : 'btn-secondary'} text-sm`}>Geofence</button>}
       </div>
 
+      <div className="flex flex-wrap gap-2">{[['schedule','My Schedule','attendance'],['results','Daily Results','attendance'],['requests','Requests & Reviews','attendance_requests'],['rosters','Shifts & Rosters','attendance_rosters'],['policies','Policies','attendance_policies'],['periods','Periods','attendance_periods'],['adjustments','Payroll Adjustments','payroll']].filter(t=>canView(t[2])).map(([key,label])=><button key={key} onClick={()=>setTab(key)} className={`btn ${tab===key?'btn-primary':'btn-secondary'} text-sm`}>{label}</button>)}</div>
+      {[['schedule','My Schedule','attendance'],['results','Daily Results','attendance'],['requests','Requests & Reviews','attendance_requests'],['rosters','Shifts & Rosters','attendance_rosters'],['policies','Policies','attendance_policies'],['periods','Periods','attendance_periods'],['adjustments','Payroll Adjustments','payroll']].some(t=>t[0]===tab&&canView(t[2]))&&<AttendanceOperations key={tab} mode={tab} employeeId={captureSetup?.employee_id}/>}
       {/* MONTHLY ATTENDANCE GRID TAB */}
-      {tab === 'grid' && isAdmin() && (
+      {tab === 'grid' && canView('attendance') && (
         <div className="space-y-3">
           <div className="text-xs text-gray-600 bg-amber-50 border border-amber-100 rounded-lg px-4 py-2.5">
-            A day with <b>no punch counts as absent</b> in payroll. Mark people here so salary is right.
-            Click a cell to cycle <b>P</b>resent → <b>A</b>bsent → <b>½</b> half → <b>CL</b> leave → clear.
-            Real punches and approved leaves are read-only. Use <b>“P all”</b> to fill a person’s blank working days as present.
+            This grid shows evaluated attendance. Use Requests & Reviews for a correction; original punches and closed-period results are preserved.
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <input type="month" className="input text-sm" value={gridMonth} onChange={e => setGridMonth(e.target.value)} />
@@ -439,17 +468,14 @@ export default function Attendance() {
                         {emp.no_login && (
                           <div className="mt-0.5 flex items-center gap-1">
                             <span className="text-[10px] bg-amber-200 text-amber-800 px-1 rounded">⚠ no login</span>
-                            <select className="select text-[10px] py-0 h-6" defaultValue="" onChange={e => linkLogin(emp, e.target.value)} title="Link this employee to their login user">
-                              <option value="" disabled>link…</option>
-                              {emp.suggestions.map(s => <option key={s.user_id} value={s.user_id}>{s.name}</option>)}
-                            </select>
+                            <span className="text-[10px] text-gray-600">Select a verified login ID in Employees.</span>
                           </div>
                         )}
                       </td>
                       {grid.days.map(day => {
                         const c = emp.cells[day.date] || {};
                         const meta = cellMeta(c);
-                        const ro = !emp.user_id || day.future || c.source === 'punch' || c.source === 'leave';
+                        const ro = !emp.can_correct || !emp.user_id || day.future || c.source === 'punch' || c.source === 'leave';
                         return (
                           <td key={day.date} className="p-0 text-center">
                             <button type="button" disabled={gridBusy || ro}
@@ -463,7 +489,7 @@ export default function Attendance() {
                       })}
                       <td className="px-2 py-1.5 whitespace-nowrap">
                         {emp.user_id
-                          ? <button onClick={() => markAllPresent(emp)} disabled={gridBusy} className="btn btn-secondary text-[11px] py-0.5">P all</button>
+                          ? <span className="text-gray-400">Review requests</span>
                           : <span className="text-[10px] text-gray-300">—</span>}
                       </td>
                     </tr>
@@ -484,6 +510,8 @@ export default function Attendance() {
             <p className="text-sm text-gray-500">{dateStr}</p>
             <p className="text-sm font-medium text-red-600 mt-1">{user?.name}</p>
           </div>
+          {captureSetup?.setup_message && <div role="status" className="card border border-amber-200 bg-amber-50 text-sm text-amber-800">{captureSetup.setup_message}</div>}
+          {!canCapture && <div role="status" className="card text-sm text-gray-600">You can view your attendance. Punching is not enabled for this login; contact the owner.</div>}
 
           {/* Status */}
           {myToday ? (
@@ -561,14 +589,16 @@ export default function Attendance() {
 
             {location && <p className="text-xs text-gray-500 flex items-center gap-1"><FiMapPin size={12} /> {address || `${location.latitude.toFixed(6)}, ${location.longitude.toFixed(6)}`}</p>}
 
+            {exceptionAllowed && <label className="block text-sm">Capture exception reason (if selfie or location cannot be verified)<textarea className="input w-full" value={exceptionReason} onChange={e=>setExceptionReason(e.target.value)} placeholder="Explain the camera or location problem"/><span className="text-xs text-amber-700">Exceptions require an authorized review before they count as accepted attendance.</span></label>}
+            {myToday?.review_state==='pending' && <p role="status" className="text-amber-700">This session is awaiting review.</p>}
             {/* Punch Buttons — "Manual" prefix dropped since auto-punch is
                 disabled; these are now THE punch in/out actions. */}
-            {!myToday ? (
-              <button onClick={handlePunchIn} disabled={loading || !photo} className="btn btn-success w-full py-3 text-sm font-bold disabled:opacity-50">
-                {loading ? 'Getting Location…' : 'PUNCH IN'}
+            {(!myToday || myToday.punch_out_time && captureSetup?.can_start_another_session || myToday.capture_state==='review_closed') ? (
+              <button onClick={handlePunchIn} disabled={!canCapture || !captureSetup?.employee_link_ready || loading || (!photo && !(exceptionAllowed && exceptionReason.trim().length>=3))} className="btn btn-success w-full py-3 text-sm font-bold disabled:opacity-50">
+                {loading ? 'Getting Location…' : myToday ? 'PUNCH IN - NEXT SESSION' : 'PUNCH IN'}
               </button>
             ) : !myToday.punch_out_time ? (
-              <button onClick={handlePunchOut} disabled={loading || !photo} className="btn btn-danger w-full py-3 text-sm font-bold disabled:opacity-50">
+              <button onClick={handlePunchOut} disabled={!canCapture || !captureSetup?.employee_link_ready || loading || (!photo && !(exceptionAllowed && exceptionReason.trim().length>=3))} className="btn btn-danger w-full py-3 text-sm font-bold disabled:opacity-50">
                 {loading ? 'Getting Location…' : 'PUNCH OUT'}
               </button>
             ) : (
@@ -577,7 +607,7 @@ export default function Attendance() {
           </div>
 
           {/* Leave Request */}
-          <button onClick={() => { setForm({ leave_type: 'full_day', from_date: '', to_date: '', reason: '' }); setModal('leave'); }} className="btn btn-secondary w-full text-sm">Apply for Leave</button>
+          <button disabled={!canCreate('attendance')} onClick={() => { setForm({ leave_type: 'full_day', from_date: '', to_date: '', reason: '' }); setModal('leave'); }} className="btn btn-secondary w-full text-sm">Apply for Leave</button>
 
           {/* Daily Detail — last 15 working days with in/out times + any
               leave taken on that date. Mam: "where punch/punch out [...]
@@ -656,8 +686,8 @@ export default function Attendance() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             <div className="card p-3 border-l-4 border-red-500"><p className="text-xs text-gray-500">Total</p><p className="text-2xl font-bold">{dashboard.totalUsers}</p></div>
-            <div className="card p-3 border-l-4 border-emerald-500"><p className="text-xs text-gray-500">Present</p><p className="text-2xl font-bold text-emerald-600">{dashboard.present}</p></div>
-            <div className="card p-3 border-l-4 border-red-500"><p className="text-xs text-gray-500">Absent</p><p className="text-2xl font-bold text-red-600">{dashboard.absent}</p></div>
+            <div className="card p-3 border-l-4 border-emerald-500"><p className="text-xs text-gray-500">Punched in</p><p className="text-2xl font-bold text-emerald-600">{dashboard.present}</p></div>
+            <div className="card p-3 border-l-4 border-red-500"><p className="text-xs text-gray-500">No punch yet</p><p className="text-2xl font-bold text-red-600">{dashboard.absent}</p></div>
             <div className="card p-3 border-l-4 border-amber-500"><p className="text-xs text-gray-500">Late</p><p className="text-2xl font-bold text-amber-600">{dashboard.late}</p></div>
             <div className="card p-3 border-l-4 border-purple-500"><p className="text-xs text-gray-500">On Leave</p><p className="text-2xl font-bold text-purple-600">{dashboard.onLeave}</p></div>
           </div>
@@ -666,10 +696,10 @@ export default function Attendance() {
               forgot to punch / on-site with no network). Opens a modal that
               hits the same admin-mark endpoint the per-day button uses. */}
           <div className="flex justify-end">
-            <button
-              onClick={() => { setForm({ user_id: '', date: today, status: 'present', remarks: '' }); setModal('admin-mark'); }}
+            <button disabled={!canApprove('attendance_corrections')}
+              onClick={() => setTab('requests')}
               className="btn btn-primary text-sm flex items-center gap-1">
-              <FiCheckCircle size={14} /> Mark / Backfill Attendance
+              <FiCheckCircle size={14} /> Requests & Reviews
             </button>
           </div>
 
@@ -683,20 +713,10 @@ export default function Attendance() {
                   <div className="text-xs text-gray-500 mb-1.5">{u.department}</div>
                   {/* Admin override — back-fill present for users who didn't
                       punch. Row is hidden from the user's own dashboard. */}
-                  <button onClick={async () => {
-                    const remark = prompt(`Mark ${u.name} as PRESENT for today?\n\nReason (optional, for audit):`);
-                    if (remark === null) return;
-                    try {
-                      await api.post('/attendance/admin-mark', { user_id: u.id, date: today, status: 'present', remarks: remark });
-                      toast.success(`${u.name} marked present`);
-                      load();
-                    } catch (err) { toast.error(err.response?.data?.error || 'Failed'); }
-                  }} className="btn btn-success text-[10px] py-1 px-2 w-full">
-                    <FiCheckCircle className="inline mr-0.5" size={11} /> Mark Present
-                  </button>
+                  {canView('attendance_requests') && <button className="btn btn-secondary text-xs" onClick={()=>setTab('requests')}>Request correction</button>}
                 </div>
               ))}</div>
-              <p className="text-[10px] text-red-700 mt-2 italic">Admin-marked rows don't appear in the user's own dashboard or month view — only in admin reports.</p>
+              <p className="text-xs text-red-700 mt-2">No punch is a capture status. Daily Results determines leave, weekly offs and payable attendance.</p>
             </div>
           )}
 
@@ -790,7 +810,7 @@ export default function Attendance() {
                 <td><StatusBadge status={r.status} /></td>
                 <td>{r.punch_in_photo && <img src={r.punch_in_photo} alt="" onClick={() => setLightbox({ src: r.punch_in_photo, label: `${r.user_name} — Punch In` })} className="w-10 h-8 rounded object-cover cursor-pointer hover:ring-2 hover:ring-blue-400 transition" />}</td>
                 <td>{r.punch_out_photo && <img src={r.punch_out_photo} alt="" onClick={() => setLightbox({ src: r.punch_out_photo, label: `${r.user_name} — Punch Out` })} className="w-10 h-8 rounded object-cover cursor-pointer hover:ring-2 hover:ring-blue-400 transition" />}</td>
-                <td>{canDelete('attendance') && <button onClick={async () => {
+                <td>{r.can_delete && <button onClick={async () => {
                   if (!confirm(`Delete attendance record for "${r.user_name}" on ${r.date}?`)) return;
                   try { await api.delete(`/attendance/${r.id}`); toast.success('Deleted'); load(); }
                   catch (err) { toast.error(err.response?.data?.error || 'Delete failed'); }
@@ -872,7 +892,7 @@ export default function Attendance() {
                     )}
                   </div>
                 )}
-                {canDelete('attendance') && (
+                {r.can_delete && (
                   <div className="flex items-center justify-end pt-2 border-t border-gray-100">
                     <button onClick={async () => {
                       if (!confirm(`Delete attendance record for "${r.user_name}" on ${r.date}?`)) return;
@@ -1192,17 +1212,17 @@ export default function Attendance() {
         <>
           <div className="flex justify-between items-center">
             <h4 className="font-semibold">Geofence Areas</h4>
-            <button onClick={() => { setForm({ site_name: '', latitude: '', longitude: '', radius_meters: 200 }); setModal('geofence'); }} className="btn btn-primary flex items-center gap-2 text-sm"><FiPlus size={14} /> Add Geofence</button>
+            <button disabled={!canCreate('attendance_locations')} onClick={() => { setForm({ site_name: '', latitude: '', longitude: '', radius_meters: 200 }); setModal('geofence'); }} className="btn btn-primary flex items-center gap-2 text-sm"><FiPlus size={14} /> Add Geofence</button>
           </div>
-          <p className="text-xs text-gray-500">Employees can only punch in/out when inside these areas. If no geofence set, punch from anywhere.</p>
+          <p className="text-xs text-gray-500">Employees can only punch in/out when inside these areas. A configured active location is required. Weak GPS readings are flagged for review.</p>
           <div className="card p-0 overflow-x-auto"><table className="text-sm">
             <thead><tr><th>Site</th><th>Latitude</th><th>Longitude</th><th>Radius</th><th>Active</th><th>Actions</th></tr></thead>
             <tbody>{geofences.map(g => (
               <tr key={g.id}>
                 <td className="font-medium">{g.site_name}</td><td className="text-xs">{g.latitude}</td><td className="text-xs">{g.longitude}</td><td>{g.radius_meters}m</td><td>{g.active ? 'Yes' : 'No'}</td>
                 <td className="flex gap-1">
-                  <button onClick={() => { setForm({ ...g }); setModal('edit-geofence'); }} className="text-xs text-red-600 font-bold">Edit</button>
-                  <button onClick={async () => { if (!confirm('Delete this geofence?')) return; await api.delete(`/attendance/geofence/${g.id}`); toast.success('Deleted'); load(); }} className="text-xs text-red-600 font-bold">Delete</button>
+                  <button disabled={!g.can_edit} onClick={() => { setForm({ ...g }); setModal('edit-geofence'); }} className="text-xs text-red-600 font-bold">Edit</button>
+                  <button disabled={!g.can_delete} onClick={async () => { if (!confirm('Delete this geofence?')) return; await api.delete(`/attendance/geofence/${g.id}`); toast.success('Deleted'); load(); }} className="text-xs text-red-600 font-bold">Delete</button>
                 </td>
               </tr>
             ))}{geofences.length === 0 && <tr><td colSpan="6" className="text-center py-6 text-gray-400">No geofence set. Add site locations for attendance.</td></tr>}</tbody>
@@ -1241,13 +1261,13 @@ export default function Attendance() {
               <td><StatusBadge status={l.status} /></td>
               <td>
                 <div className="flex items-center gap-1">
-                  {l.status === 'pending' && (
+                  {l.status === 'pending' && l.can_approve && (
                     <>
                       <button onClick={async () => { await api.put(`/attendance/leave/${l.id}/approve`, { status: 'approved' }); toast.success('Approved'); load(); }} className="text-xs text-emerald-600 font-bold mr-1">Approve</button>
                       <button onClick={async () => { await api.put(`/attendance/leave/${l.id}/approve`, { status: 'rejected' }); toast.success('Rejected'); load(); }} className="text-xs text-red-600 font-bold mr-1">Reject</button>
                     </>
                   )}
-                  <button
+                  <button disabled={!l.can_edit}
                     onClick={() => {
                       setEditingLeave(l);
                       setLeaveEditForm({
@@ -1264,7 +1284,7 @@ export default function Attendance() {
                     className="p-1 text-gray-400 hover:text-blue-600"
                     title="Edit"
                   ><FiEdit2 size={14} /></button>
-                  <button
+                  <button disabled={!l.can_delete}
                     onClick={async () => {
                       if (!confirm(`Delete this leave request for ${l.user_name}?`)) return;
                       try {
@@ -1321,7 +1341,7 @@ export default function Attendance() {
                 {l.reason && (
                   <div className="text-[11px] text-gray-600 italic pt-1 border-t border-gray-100 line-clamp-2">"{l.reason}"</div>
                 )}
-                {l.status === 'pending' && (
+                {l.status === 'pending' && l.can_approve && (
                   <div className="flex items-center gap-2 pt-1">
                     <button onClick={async () => { await api.put(`/attendance/leave/${l.id}/approve`, { status: 'approved' }); toast.success('Approved'); load(); }}
                       className="btn btn-success text-xs py-1.5 px-3 flex-1">Approve</button>
@@ -1330,7 +1350,7 @@ export default function Attendance() {
                   </div>
                 )}
                 <div className="flex items-center justify-end gap-3 pt-2 border-t border-gray-100 text-xs">
-                  <button onClick={() => {
+                  <button disabled={!l.can_edit} onClick={() => {
                     setEditingLeave(l);
                     setLeaveEditForm({
                       leave_type: l.leave_type || 'casual',
@@ -1342,7 +1362,7 @@ export default function Attendance() {
                   }} className="text-blue-600 hover:underline flex items-center gap-1 font-semibold">
                     <FiEdit2 size={11} /> Edit
                   </button>
-                  <button onClick={async () => {
+                  <button disabled={!l.can_delete} onClick={async () => {
                     if (!confirm(`Delete this leave request for ${l.user_name}?`)) return;
                     try { await api.delete(`/attendance/leave/${l.id}`); toast.success('Deleted'); load(); }
                     catch (err) { toast.error(err.response?.data?.error || 'Delete failed'); }
@@ -1560,7 +1580,7 @@ export default function Attendance() {
           </div>
           <div><label className="label">Radius (meters)</label><input className="input" type="number" value={form.radius_meters} onChange={e => setForm({ ...form, radius_meters: +e.target.value })} /></div>
           <button type="button" onClick={async () => {
-            try { const loc = await getLocation(); setForm(f => ({ ...f, latitude: loc.latitude, longitude: loc.longitude })); toast.success('Current location set'); }
+            try { const loc = await getLocation().catch(e=>{if(exceptionAllowed && exceptionReason.trim().length>=3)return {};throw e;}); setForm(f => ({ ...f, latitude: loc.latitude, longitude: loc.longitude })); toast.success('Current location set'); }
             catch { toast.error('GPS failed'); }
           }} className="btn btn-secondary text-sm w-full"><FiMapPin className="inline mr-1" /> Use My Current Location</button>
           <div className="flex justify-end gap-3"><button type="button" onClick={() => setModal(null)} className="btn btn-secondary">Cancel</button><button type="submit" className="btn btn-primary">Save Geofence</button></div>

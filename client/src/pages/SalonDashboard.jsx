@@ -1,185 +1,74 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import {useEffect,useMemo,useState} from 'react';
+import {Link} from 'react-router-dom';
+import {FiArrowUpRight,FiArrowRight,FiRefreshCw,FiClock,FiCheckSquare,FiCalendar,FiDollarSign,FiAlertCircle,FiCheckCircle,FiUsers,FiPackage,FiScissors,FiMessageSquare,FiGrid,FiFilter,FiX,FiSun} from 'react-icons/fi';
+import {useAuth} from '../context/AuthContext';
 import api from '../api';
-import { Link } from 'react-router-dom';
-import { FiCalendar, FiDollarSign, FiUsers, FiAward, FiClock, FiScissors, FiTrendingUp, FiPercent, FiArrowUpRight } from 'react-icons/fi';
-
-const money = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-const fmtDate = (s) => s ? new Date(s + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short' }) : '';
-
-// A card that tilts in 3D toward the cursor (real perspective transform).
-function Tilt({ children, className = '', max = 10, style = {} }) {
-  const ref = useRef(null);
-  const move = (e) => {
-    const el = ref.current; if (!el) return;
-    const r = el.getBoundingClientRect();
-    const px = (e.clientX - r.left) / r.width - 0.5;
-    const py = (e.clientY - r.top) / r.height - 0.5;
-    el.style.transform = `perspective(1000px) rotateX(${(-py * max).toFixed(2)}deg) rotateY(${(px * max).toFixed(2)}deg) translateY(-6px)`;
-  };
-  const reset = () => { const el = ref.current; if (el) el.style.transform = 'perspective(1000px) rotateX(0deg) rotateY(0deg) translateY(0)'; };
-  return (
-    <div ref={ref} onMouseMove={move} onMouseLeave={reset} className={className}
-      style={{ transformStyle: 'preserve-3d', transition: 'transform .18s cubic-bezier(.03,.98,.52,.99)', willChange: 'transform', ...style }}>
-      {children}
-    </div>
-  );
-}
-
-export default function SalonDashboard() {
-  const [stats, setStats] = useState(null);
-  useEffect(() => { api.get('/salon/commissions/dashboard/stats').then(r => setStats(r.data)).catch(() => {}); }, []);
-
-  return (
-    <div className="sd-wrap">
-      {/* ambient 3D backdrop */}
-      <div className="sd-orb sd-orb-a" />
-      <div className="sd-orb sd-orb-b" />
-      <div className="sd-orb sd-orb-c" />
-
-      <div className="relative" style={{ zIndex: 1 }}>
-        <div className="flex items-center gap-3 mb-7">
-          <div className="sd-logo3d"><FiScissors size={26} /></div>
-          <div>
-            <h1 className="text-2xl font-extrabold text-slate-800 tracking-tight">Headmasters</h1>
-            <p className="text-sm text-slate-500">Today at a glance</p>
-          </div>
-        </div>
-
-        {/* KPI tiles — 3D */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-          <Kpi to="/salon/appointments" icon={FiCalendar} grad="a" label="Today's appointments" value={stats?.today?.appointments ?? '—'} />
-          <Kpi to="/salon/billing" icon={FiDollarSign} grad="b" label="Today's sales" value={money(stats?.today?.sales?.v)} sub={`${stats?.today?.sales?.c ?? 0} bills`} />
-          <Kpi icon={FiTrendingUp} grad="c" label="This month revenue" value={money(stats?.month?.revenue)} sub={`${stats?.month?.bills ?? 0} bills`} />
-          <Kpi to="/salon/clients" icon={FiUsers} grad="d" label="Total clients" value={stats?.clients ?? '—'} />
-        </div>
-
-        <div className="grid lg:grid-cols-2 gap-4">
-          {/* Upcoming */}
-          <Tilt max={4} className="sd-panel">
-            <div className="flex items-center justify-between mb-3" style={{ transform: 'translateZ(24px)' }}>
-              <h3 className="font-bold text-slate-800 flex items-center gap-2"><FiClock className="text-blue-600" /> Upcoming appointments</h3>
-              <Link to="/salon/appointments" className="text-xs font-semibold text-blue-700 hover:underline flex items-center gap-0.5">View all <FiArrowUpRight size={12} /></Link>
-            </div>
-            <div style={{ transform: 'translateZ(14px)' }}>
-              {stats?.upcoming?.length ? (
-                <div className="divide-y divide-slate-100">
-                  {stats.upcoming.map(a => (
-                    <div key={a.id} className="flex items-center gap-3 py-2.5 text-sm">
-                      <div className="sd-time">
-                        <div className="font-bold text-slate-800 leading-none">{a.start_time || '—'}</div>
-                        <div className="text-[10px] text-slate-400 mt-0.5">{fmtDate(a.appt_date)}</div>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-semibold text-slate-800 truncate">{a.client_name || 'Walk-in'}</div>
-                        <div className="text-xs text-slate-500 truncate">{a.stylist_name || 'Any stylist'}</div>
-                      </div>
-                      <span className={`text-[11px] px-2 py-0.5 rounded-full font-medium ${a.status === 'confirmed' ? 'bg-indigo-100 text-indigo-700' : 'bg-blue-100 text-blue-700'}`}>{a.status}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : <Empty>No upcoming appointments</Empty>}
-            </div>
-          </Tilt>
-
-          {/* right column */}
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <MiniStat icon={FiPercent} label="Commission (month)" value={money(stats?.month?.commission)} />
-              <MiniStat icon={FiAward} label="Active memberships" value={stats?.active_memberships ?? '—'} />
-            </div>
-            <Tilt max={4} className="sd-panel">
-              <div className="flex items-center justify-between mb-3" style={{ transform: 'translateZ(24px)' }}>
-                <h3 className="font-bold text-slate-800 flex items-center gap-2"><FiScissors className="text-blue-600" /> Top services</h3>
-                <Link to="/salon/services" className="text-xs font-semibold text-blue-700 hover:underline flex items-center gap-0.5">View all <FiArrowUpRight size={12} /></Link>
-              </div>
-              <div style={{ transform: 'translateZ(12px)' }}>
-                {stats?.top_services?.length ? (
-                  <div className="space-y-2.5">
-                    {stats.top_services.map((s, i) => {
-                      const max = Math.max(...stats.top_services.map(x => x.revenue || 0), 1);
-                      return (
-                        <div key={i}>
-                          <div className="flex items-center justify-between text-sm mb-1">
-                            <span className="text-slate-700 truncate">{s.name}</span>
-                            <span className="text-slate-400 text-xs whitespace-nowrap ml-2">{s.c}× · {money(s.revenue)}</span>
-                          </div>
-                          <div className="sd-bar"><div className="sd-bar-fill" style={{ width: `${Math.max(6, (s.revenue / max) * 100)}%` }} /></div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : <Empty>No sales data yet</Empty>}
-              </div>
-            </Tilt>
-          </div>
-        </div>
-      </div>
-
-      <style>{`
-        .sd-wrap{position:relative;overflow:hidden;padding:1.5rem;min-height:100%;
-          background:radial-gradient(1200px 600px at 15% -10%, #eef4ff 0%, transparent 55%),
-                     radial-gradient(1000px 700px at 110% 10%, #f3ecff 0%, transparent 50%),
-                     linear-gradient(180deg,#f8fafc 0%,#eef2f9 100%);}
-        @media(min-width:640px){.sd-wrap{padding:1.5rem 2rem}}
-        .sd-orb{position:absolute;border-radius:50%;filter:blur(60px);opacity:.5;pointer-events:none;z-index:0;animation:sdFloat 14s ease-in-out infinite}
-        .sd-orb-a{width:340px;height:340px;top:-80px;left:-60px;background:radial-gradient(circle at 30% 30%,#93c5fd,#3b82f6)}
-        .sd-orb-b{width:300px;height:300px;top:40px;right:-80px;background:radial-gradient(circle at 30% 30%,#c4b5fd,#7c3aed);animation-delay:-4s}
-        .sd-orb-c{width:280px;height:280px;bottom:-120px;left:35%;background:radial-gradient(circle at 30% 30%,#a5b4fc,#4f46e5);animation-delay:-8s}
-        @keyframes sdFloat{0%,100%{transform:translateY(0) translateX(0)}50%{transform:translateY(-22px) translateX(14px)}}
-
-        .sd-logo3d{width:52px;height:52px;border-radius:16px;display:flex;align-items:center;justify-content:center;color:#fff;
-          background:linear-gradient(145deg,#3b82f6,#1e3a8a);
-          box-shadow:0 10px 24px -6px rgba(37,99,235,.6), inset 0 2px 3px rgba(255,255,255,.45), inset 0 -4px 8px rgba(0,0,0,.25);}
-
-        .sd-kpi{position:relative;border-radius:20px;padding:18px;color:#fff;overflow:hidden;display:block;
-          box-shadow:0 18px 34px -14px rgba(30,41,90,.55), 0 2px 0 rgba(255,255,255,.35) inset;
-          transform-style:preserve-3d;transition:transform .18s cubic-bezier(.03,.98,.52,.99),box-shadow .18s;}
-        .sd-kpi:hover{box-shadow:0 30px 50px -16px rgba(30,41,90,.6), 0 2px 0 rgba(255,255,255,.4) inset}
-        .sd-kpi .sheen{position:absolute;inset:0;background:linear-gradient(120deg,rgba(255,255,255,.35),transparent 40%);pointer-events:none}
-        .sd-kpi .badge{width:44px;height:44px;border-radius:13px;display:flex;align-items:center;justify-content:center;
-          background:rgba(255,255,255,.22);box-shadow:inset 0 2px 3px rgba(255,255,255,.5), 0 6px 14px rgba(0,0,0,.18);
-          transform:translateZ(40px);margin-bottom:12px}
-        .sd-kpi .val{font-size:1.9rem;font-weight:800;line-height:1;transform:translateZ(26px);text-shadow:0 2px 6px rgba(0,0,0,.18)}
-        .sd-kpi .lab{font-size:.72rem;opacity:.92;margin-top:6px;transform:translateZ(16px)}
-        .sd-kpi .sub{font-size:.66rem;opacity:.8;transform:translateZ(12px)}
-        .g-a{background:linear-gradient(145deg,#3b82f6,#4338ca)}
-        .g-b{background:linear-gradient(145deg,#10b981,#0f766e)}
-        .g-c{background:linear-gradient(145deg,#6366f1,#7c3aed)}
-        .g-d{background:linear-gradient(145deg,#f59e0b,#ea580c)}
-
-        .sd-panel{background:rgba(255,255,255,.75);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.9);
-          border-radius:20px;padding:18px;box-shadow:0 20px 40px -18px rgba(30,41,90,.35), 0 1px 0 rgba(255,255,255,.9) inset;}
-        .sd-mini{background:rgba(255,255,255,.8);backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,.9);border-radius:16px;padding:14px;
-          box-shadow:0 14px 28px -16px rgba(30,41,90,.35), 0 1px 0 rgba(255,255,255,.9) inset;transition:transform .18s}
-        .sd-mini:hover{transform:translateY(-4px)}
-        .sd-mini .orb{width:34px;height:34px;border-radius:11px;display:flex;align-items:center;justify-content:center;color:#fff;
-          background:linear-gradient(145deg,#60a5fa,#4338ca);box-shadow:inset 0 2px 2px rgba(255,255,255,.5),0 6px 12px rgba(37,99,235,.35);margin-bottom:8px}
-        .sd-time{width:56px;text-align:center;flex-shrink:0;padding:6px 0;border-radius:12px;
-          background:linear-gradient(145deg,#eff6ff,#e0e7ff);box-shadow:inset 0 1px 2px #fff,0 4px 8px -3px rgba(37,99,235,.25)}
-        .sd-bar{height:8px;border-radius:99px;background:#e6ebf5;overflow:hidden;box-shadow:inset 0 1px 2px rgba(0,0,0,.08)}
-        .sd-bar-fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#60a5fa,#4f46e5);box-shadow:0 1px 3px rgba(79,70,229,.5)}
-      `}</style>
-    </div>
-  );
-}
-
-function Kpi({ icon: Icon, label, value, sub, to, grad }) {
-  const card = (
-    <Tilt max={12} className={`sd-kpi g-${grad}`}>
-      <span className="sheen" />
-      <div className="badge"><Icon size={22} /></div>
-      <div className="val">{value}</div>
-      <div className="lab">{label}</div>
-      {sub && <div className="sub">{sub}</div>}
-    </Tilt>
-  );
-  return to ? <Link to={to} className="block">{card}</Link> : card;
-}
-const MiniStat = ({ icon: Icon, label, value }) => (
-  <div className="sd-mini">
-    <div className="orb"><Icon size={16} /></div>
-    <div className="text-lg font-bold text-slate-800">{value}</div>
-    <div className="text-[11px] text-slate-500">{label}</div>
+import './SalonDashboard.css';
+const money=n=>'₹'+Number(n).toLocaleString('en-IN',{maximumFractionDigits:2});
+const status=s=>s?.replaceAll('_',' ');
+const workIds=new Set(['attendance','attendance-review','employees','tasks','tasks-overdue','tasks-review','occurrences','occurrences-overdue','occurrences-review','tickets']);
+const category=id=>workIds.has(id)?'work':'salon';
+const urgent=c=>(c.id.includes('overdue')||c.id.includes('review')||c.id==='stock')&&Number(c.value)>0;
+const needsAction=item=>['submitted','blocked','waiting'].includes(item.status)||(item.due_at&&Date.parse(item.due_at)<Date.now());
+const icons={attendance:FiClock,appointments:FiCalendar,employees:FiUsers,clients:FiUsers,stock:FiPackage,services:FiScissors,tickets:FiMessageSquare,occurrences:FiCheckSquare};
+function iconFor(c){return urgent(c)?FiAlertCircle:c.format==='money'?FiDollarSign:icons[c.id]||FiCheckSquare;}
+function toneFor(c){return urgent(c)?'amber':c.format==='money'?'green':['attendance','appointments'].includes(c.id)?'blue':['occurrences','services'].includes(c.id)?'violet':'blue';}
+export default function SalonDashboard(){
+ const {user,userRoles,permissions,can,canView}=useAuth();
+ const [data,setData]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[revision,setRevision]=useState(0);
+ const [section,setSection]=useState('all'),[attention,setAttention]=useState(false);
+ const permissionKey=JSON.stringify(permissions);
+ useEffect(()=>{let cancelled=false;setLoading(true);setError('');setData(null);
+  api.get('/dashboard').then(r=>{if(!cancelled)setData(r.data);}).catch(e=>{if(!cancelled)setError(e.response?.data?.error||'Could not load your dashboard. Please retry.');}).finally(()=>{if(!cancelled)setLoading(false);});
+  return()=>{cancelled=true;};
+ },[permissionKey,revision,user?.id]);
+ useEffect(()=>{setSection('all');setAttention(false);},[user?.id,permissionKey]);
+ useEffect(()=>{let last=Date.now();const refresh=()=>{if(document.visibilityState==='visible'&&Date.now()-last>60000){last=Date.now();setRevision(v=>v+1);}};window.addEventListener('focus',refresh);return()=>window.removeEventListener('focus',refresh);},[]);
+ const ordered=useMemo(()=>{
+  const management=can('delegations','approve')||can('checklists','approve');
+  const operational=can('salon_appointments','create')||can('salon_pos','create');
+  const priorities=management?['tasks-review','occurrences-review','attendance-review','tasks-overdue','occurrences-overdue','appointments','attendance']:operational?['appointments','bills','sales','stock','attendance']:canView('salon_commissions')?['appointments','commissions','attendance','tasks','occurrences']:['attendance','tasks','occurrences','tickets','tasks-overdue','occurrences-overdue'];
+  const rank=id=>priorities.includes(id)?priorities.indexOf(id):100;
+  return [...(data?.cards||[])].sort((a,b)=>rank(a.id)-rank(b.id));
+ },[data,permissionKey]);
+ const focused=ordered.find(urgent)||ordered.find(c=>c.id==='appointments'&&Number(c.value)>0)||ordered.find(c=>c.id==='attendance')||ordered[0];
+ const visible=ordered.filter(c=>(section==='all'||category(c.id)===section)&&(!attention||urgent(c)));
+ const queues=(data?.queues||[]).filter(q=>section==='all'||(q.id==='appointments'?'salon':'work')===section).map(q=>({...q,items:attention?q.items.filter(needsAction):q.items}));
+ const roles=userRoles.map(r=>typeof r==='string'?r:r.name).filter(Boolean);
+ const date=data?.today?new Date(data.today+'T12:00:00').toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'}):'Your daily workspace';
+ const reset=()=>{setSection('all');setAttention(false);};
+ return <div className="role-dashboard">
+  <header className="dash-hero">
+   <div className="dash-hero-main"><div className="dash-eyebrow"><FiSun aria-hidden="true"/> HEADMASTERS <span>YOUR WORKSPACE</span></div>
+    <h1>Welcome, {user?.name||'there'}</h1><p>A clear view of your day. Start with what matters.</p>
+    <div className="dash-role-tags">{roles.slice(0,2).map(r=><span key={r}>{r}</span>)}{roles.length>2&&<details><summary>+{roles.length-2} roles</summary><div>{roles.slice(2).map(r=><p key={r}>{r}</p>)}</div></details>}</div>
+   </div>
+   <div className="dash-hero-side"><div className="dash-date"><FiCalendar aria-hidden="true"/>{date}</div>
+    {data&&focused&&<Link to={focused.href} className="dash-focus" aria-label={`Open ${focused.label}`}><span className="dash-focus-label">{urgent(focused)?'NEEDS YOUR ATTENTION':'YOUR NEXT STOP'}</span><strong>{focused.format==='text'?focused.value:focused.label}</strong><span>{urgent(focused)?`${focused.value} to review`:'Open details and take the next step'}<FiArrowRight aria-hidden="true"/></span></Link>}
+   </div>
+  </header>
+  <div className="dash-toolbar"><span className="dash-updated"><span className={`dash-update-dot ${loading?'is-loading':''}`}/>{loading?'Updating your workspace…':data?`Updated ${new Date(data.generated_at).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Kolkata'})} IST`:'Your workspace'}</span>
+   <button className="dash-button" disabled={loading} onClick={()=>setRevision(v=>v+1)}><FiRefreshCw className={loading?'dash-spin':''} aria-hidden="true"/>Refresh dashboard</button>
   </div>
-);
-const Empty = ({ children }) => <div className="py-6 text-center text-slate-400 text-sm">{children}</div>;
+  {loading&&<div role="status" aria-live="polite"><span className="sr-only">Loading your dashboard…</span><div className="dash-summary-grid dash-skeletons" aria-hidden="true">{[0,1,2,3].map(i=><div key={i}><i/><b/><span/></div>)}</div></div>}
+  {error&&<div role="alert" className="dash-error"><FiAlertCircle aria-hidden="true"/><div><h2>Your dashboard couldn't load</h2><p>{error}</p><button className="dash-button" onClick={()=>setRevision(v=>v+1)}>Retry dashboard</button></div></div>}
+  {data&&<>
+   <nav className="dash-shortcuts" aria-label="Dashboard shortcuts"><span>QUICK ACCESS</span><div>{data.links.map(l=><Link key={l.href} to={l.href}>{l.label}<FiArrowUpRight aria-hidden="true"/></Link>)}</div></nav>
+   <section aria-labelledby="dash-overview-title"><div className="dash-section-heading"><div><h2 id="dash-overview-title">At a glance</h2><p>Your latest numbers, with a direct path to the details.</p></div><span className="dash-scope-label">Personalised to your access</span></div>
+    <div className="dash-filterbar"><div className="dash-segments" aria-label="Dashboard view">{[['all','Overview',FiGrid],['work','Work & attendance',FiCheckSquare],['salon','Salon & billing',FiScissors]].filter(([id])=>id==='all'||ordered.some(c=>category(c.id)===id)).map(([id,label,Icon])=><button key={id} aria-pressed={section===id} onClick={()=>setSection(id)}><Icon aria-hidden="true"/>{label}</button>)}</div>
+     <button className={`dash-attention-filter ${attention?'is-active':''}`} aria-pressed={attention} onClick={()=>setAttention(v=>!v)}><FiFilter aria-hidden="true"/>Needs attention{attention&&<FiX aria-hidden="true"/>}</button>
+    </div>
+    <div className="dash-summary-grid" aria-label="Dashboard summaries">{visible.map(c=>{const Icon=iconFor(c);return <Link data-card={c.id} data-tone={toneFor(c)} className="dash-metric" to={c.href} key={c.id}>
+     <div className="dash-metric-top"><span className="dash-metric-icon"><Icon aria-hidden="true"/></span>{urgent(c)?<span className="dash-urgent-tag">Action needed</span>:<FiArrowUpRight className="dash-card-arrow" aria-hidden="true"/>}</div>
+     <div className={`dash-metric-value ${c.format==='text'?'is-text':''}`}>{c.format==='money'?money(c.value):c.value}</div><h3>{c.label}</h3><p>{c.detail}</p><span className="dash-card-bottom">View details<FiArrowRight aria-hidden="true"/></span>
+    </Link>;})}</div>
+    {!visible.length&&<div className="dash-empty"><span><FiCheckCircle aria-hidden="true"/></span><h3>{attention?'Nothing flagged in this view':'No summaries in this view'}</h3><p>{attention?'Try another view or return to your full overview.':'Your summaries will appear when work modules are assigned to your role.'}</p>{ordered.length>0&&<button className="dash-button" onClick={reset}>Show overview</button>}</div>}
+   </section>
+   {!!queues.length&&<section aria-labelledby="dash-activity-title"><div className="dash-section-heading"><div><h2 id="dash-activity-title">{attention?'Items to look at':'Keep things moving'}</h2><p>{attention?'Flagged items among your dashboard previews. Open a list to see all records.':'Upcoming bookings and unfinished work, ready to open.'}</p></div></div>
+    <div className="dash-queue-grid">{queues.map(q=>{const Icon=icons[q.id]||FiCheckSquare;return <section className="dash-queue" key={q.id} aria-label={q.label}><div className="dash-queue-heading"><div><span className="dash-queue-icon"><Icon aria-hidden="true"/></span><h3>{q.label}</h3></div><Link to={q.href}>View all<FiArrowUpRight aria-hidden="true"/></Link></div>
+     {!q.items.length?<div className="dash-queue-empty"><FiCheckCircle aria-hidden="true"/><p>{attention?'No flagged items in this preview.':'Nothing pending in this view.'}</p><span>You can still open the full list.</span></div>:q.items.map(item=><Link key={item.id} to={item.href} className="dash-queue-row"><span className={`dash-row-marker ${needsAction(item)?'is-urgent':''}`}/><div className="dash-row-content"><strong>{item.title}</strong><div className="dash-row-meta"><span className={`dash-status status-${item.status}`}>{status(item.status)}</span>{item.appt_date&&<span>{new Date(item.appt_date+'T12:00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short'})} · {item.start_time||'Time not set'}</span>}</div>{item.due_at&&<span className="dash-due"><FiClock aria-hidden="true"/>Due {new Date(item.due_at).toLocaleString('en-IN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</span>}</div><FiArrowUpRight className="dash-row-arrow" aria-hidden="true"/></Link>)}
+    </section>;})}</div>
+   </section>}
+  </>}
+ </div>;
+}

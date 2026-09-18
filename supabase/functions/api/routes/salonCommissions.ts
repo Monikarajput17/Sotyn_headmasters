@@ -4,6 +4,7 @@
 import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
 import { authMiddleware, requirePermission } from "../../_shared/auth.ts";
+import {stylistScope,hasAllSalonAccess} from '../../_shared/salon-access.ts';
 const router = Router();
 router.use(authMiddleware);
 
@@ -22,9 +23,10 @@ router.get('/', requirePermission(M, 'view'), async (req, res) => {
       JOIN pos_sales p ON p.id = i.sale_id
       JOIN stylists st ON st.id = i.stylist_id
       WHERE i.stylist_id IS NOT NULL AND p.status='paid'`;
+    sql += ` AND ${await stylistScope(req,M,'i.stylist_id')}`;
     const pa: any[] = [];
-    if (from) { sql += ' AND LEFT(p.created_at,10)>=?'; pa.push(from); }
-    if (to) { sql += ' AND LEFT(p.created_at,10)<=?'; pa.push(to); }
+    if (from) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date>=?"; pa.push(from); }
+    if (to) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date<=?"; pa.push(to); }
     if (stylist_id) { sql += ' AND i.stylist_id=?'; pa.push(stylist_id); }
     sql += ' GROUP BY st.id ORDER BY commission DESC';
     const rows = await pg.all(sql, ...pa);
@@ -45,17 +47,20 @@ router.get('/:stylistId/detail', requirePermission(M, 'view'), async (req, res) 
       JOIN pos_sales p ON p.id = i.sale_id
       LEFT JOIN salon_clients c ON c.id = p.client_id
       WHERE i.stylist_id=? AND p.status='paid'`;
+    sql += ` AND ${await stylistScope(req,M,'i.stylist_id')}`;
     const pa: any[] = [req.params.stylistId];
-    if (from) { sql += ' AND LEFT(p.created_at,10)>=?'; pa.push(from); }
-    if (to) { sql += ' AND LEFT(p.created_at,10)<=?'; pa.push(to); }
+    if (from) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date>=?"; pa.push(from); }
+    if (to) { sql += " AND (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date<=?"; pa.push(to); }
     sql += ' ORDER BY p.created_at DESC LIMIT 500';
     res.json(await pg.all(sql, ...pa));
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 
 // Salon dashboard KPI tiles
-router.get('/dashboard/stats', requirePermission(M, 'view'), async (_req, res) => {
+router.get('/dashboard/stats', requirePermission('dashboard', 'view'), async (req, res) => {
   try {
+    if(!await hasAllSalonAccess(req,'dashboard'))return res.status(403).json({error:'Salon-wide dashboard permission required'});
+    for(const module of ['salon_pos','salon_commissions','salon_clients','salon_appointments','salon_memberships','salon_services'])if(!await hasAllSalonAccess(req,module))return res.status(403).json({error:'The legacy salon-wide report requires all source-module permissions. Use your personal dashboard.'});
     const today = new Date().toISOString().slice(0, 10);
     const monthStart = today.slice(0, 7) + '-01';
     const one = async (sql: string, ...p: any[]) => (await pg.get(sql, ...p)) || {};
@@ -67,7 +72,7 @@ router.get('/dashboard/stats', requirePermission(M, 'view'), async (_req, res) =
       month: {
         revenue: (await one("SELECT COALESCE(SUM(total),0) v FROM pos_sales WHERE LEFT(created_at,10)>=? AND status='paid'", monthStart)).v || 0,
         bills: (await one("SELECT COUNT(*)::int c FROM pos_sales WHERE LEFT(created_at,10)>=? AND status='paid'", monthStart)).c || 0,
-        commission: (await one("SELECT COALESCE(SUM(i.commission_amount),0) v FROM pos_sale_items i JOIN pos_sales p ON p.id=i.sale_id WHERE LEFT(p.created_at,10)>=? AND p.status='paid'", monthStart)).v || 0,
+        commission: (await one("SELECT COALESCE(SUM(i.commission_amount),0) v FROM pos_sale_items i JOIN pos_sales p ON p.id=i.sale_id WHERE (p.created_at::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date>=? AND p.status='paid'", monthStart)).v || 0,
       },
       clients: (await one('SELECT COUNT(*)::int c FROM salon_clients')).c || 0,
       active_memberships: (await one("SELECT COUNT(*)::int c FROM client_memberships WHERE status='active' AND (end_date IS NULL OR end_date>=?)", today)).c || 0,

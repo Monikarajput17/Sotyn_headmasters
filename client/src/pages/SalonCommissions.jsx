@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import api from '../api';
+import {useSearchParams} from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { FiPercent, FiTrendingUp } from 'react-icons/fi';
 
@@ -8,8 +9,9 @@ const firstOfMonth = () => new Date().toISOString().slice(0, 7) + '-01';
 const today = () => new Date().toISOString().slice(0, 10);
 
 export default function SalonCommissions() {
-  const [from, setFrom] = useState(firstOfMonth());
-  const [to, setTo] = useState(today());
+  const [params]=useSearchParams();
+  const [from, setFrom] = useState(()=>params.get('from')||firstOfMonth());
+  const [to, setTo] = useState(()=>params.get('to')||today());
   const [data, setData] = useState({ rows: [], totals: { revenue: 0, commission: 0, lines: 0 } });
 
   const load = async () => {

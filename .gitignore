@@ -14,3 +14,5 @@ client/dist/*.xlsx
 supabase/.temp/
 supabase/.branches/
 backups/
+.local/
+supabase/functions/.env

@@ -123,7 +123,6 @@ export function AuthProvider({ children }) {
 
   // Permission helper functions
   const can = (module, action = 'view') => {
-    if (user?.role === 'admin') return true;
     const perm = permissions[module];
     if (!perm) return false;
     const actionMap = { view: 'can_view', create: 'can_create', edit: 'can_edit', delete: 'can_delete', approve: 'can_approve' };
@@ -139,7 +138,6 @@ export function AuthProvider({ children }) {
   // (e.g. show every help ticket / DPR / cashflow project, not just
   // the user's own). Admin always passes.
   const canSeeAll = (module) => {
-    if (user?.role === 'admin') return true;
     return !!permissions[module]?.can_see_all;
   };
   const isAdmin = () => user?.role === 'admin';
@@ -153,6 +151,8 @@ export function AuthProvider({ children }) {
       user, token, permissions, userRoles,
       login, logout, loading,
       can, canView, canCreate, canEdit, canDelete, canApprove, canSeeAll, isAdmin,
+      canViewOthers: (module) => !!permissions[module]?.can_view_others,
+      canManagePermissions: !!permissions.permission_admin?.can_view,
       markRecoveryCodeSet,
     }}>
       {children}

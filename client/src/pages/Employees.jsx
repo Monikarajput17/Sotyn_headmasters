@@ -8,10 +8,9 @@ import { useAuth } from '../context/AuthContext';
 import { FiPlus, FiEdit2, FiTrash2, FiDownload, FiUpload, FiSearch, FiUsers, FiLink, FiLink2 } from 'react-icons/fi';
 
 export default function Employees() {
-  const { canDelete, isAdmin, userRoles, user } = useAuth();
+  const { canDelete, canCreate, canEdit, canView, isAdmin, userRoles, user } = useAuth();
   // Salary is confidential — only admins and HR-role users see it
-  const canSeeSalary = isAdmin() || (userRoles || []).some(r => String(r).toLowerCase().includes('hr'))
-    || String(user?.department || '').toLowerCase().includes('hr');
+  const canSeeSalary = canView('payroll');
   const [employees, setEmployees] = useState([]);
   const [users, setUsers] = useState([]);
   const [modal, setModal] = useState(false);
@@ -28,6 +27,7 @@ export default function Employees() {
   // schema.js: keeps past attendance from being reclassified retroactively).
   const [shiftHistory, setShiftHistory] = useState([]);
   const [shiftForm, setShiftForm] = useState({ effective_from: new Date().toISOString().slice(0, 10), shift_start: '', shift_end: '', week_off_day: '0' });
+  const currentShift = shiftHistory.filter(s => s.effective_from <= new Date().toLocaleDateString('en-CA', {timeZone:'Asia/Kolkata'})).at(-1);
   const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
   const load = () => {
@@ -42,7 +42,7 @@ export default function Employees() {
   };
 
   const saveShift = async () => {
-    if (!editing) return;
+    if (!editing?.can_assign_shift) return;
     if (!shiftForm.effective_from) return toast.error('Effective from date is required');
     try {
       await api.post(`/hr/employees/${editing.id}/shifts`, shiftForm);
@@ -89,13 +89,7 @@ export default function Employees() {
   };
 
   // Auto-link employees to users by matching email — for existing records
-  const autoLink = async () => {
-    try {
-      const res = await api.post('/hr/employees/auto-link');
-      toast.success(`Linked ${res.data.linked} employee${res.data.linked === 1 ? '' : 's'} by email`);
-      load();
-    } catch { toast.error('Auto-link failed'); }
-  };
+  const autoLink = () => toast('Automatic matching is disabled. Edit an employee and select the explicit login ID.');
 
   const [uploading, setUploading] = useState(false);
 
@@ -117,10 +111,12 @@ export default function Employees() {
 
   const save = async (e) => {
     e.preventDefault();
+    if(editing && !editing.can_edit) return toast.error('Employee edit permission required');
     // Upload any newly-attached document files first, then save the URLs
     // alongside the rest of the employee fields. Existing URLs (when
     // editing) stay untouched if no new file is picked.
     const payload = { ...form };
+    if (!canEdit('employee_links')) delete payload.user_id;
     delete payload._aadhar_file;
     delete payload._pan_file;
     delete payload._qualification_file;
@@ -269,9 +265,9 @@ export default function Employees() {
         </div>
         <div className="flex gap-2 flex-wrap">
           <button onClick={exportCSV} className="btn btn-secondary flex items-center gap-2 text-sm"><FiDownload size={15} /> Export CSV</button>
-          <button onClick={autoLink} className="btn btn-secondary flex items-center gap-2 text-sm" title="Link unlinked employees to users by matching email"><FiLink2 size={15} /> Auto-Link by Email</button>
-          <button onClick={() => { setBulkData(''); setBulkPreview([]); setBulkModal(true); }} className="btn btn-secondary flex items-center gap-2 text-sm"><FiUpload size={15} /> Bulk Import</button>
-          <button onClick={() => { setEditing(null); setForm({ name: '', phone: '', email: '', designation: '', department: '', join_date: '', salary: 0, user_id: null }); setShiftHistory([]); setShowMgr2(false); setModal(true); }} className="btn btn-primary flex items-center gap-2"><FiPlus size={15} /> Add Employee</button>
+          <button onClick={autoLink} className="btn btn-secondary flex items-center gap-2 text-sm" title="How to select an explicit login ID"><FiLink2 size={15} /> Login-link help</button>
+          <button disabled={!canCreate('employees')} onClick={() => { setBulkData(''); setBulkPreview([]); setBulkModal(true); }} className="btn btn-secondary flex items-center gap-2 text-sm"><FiUpload size={15} /> Bulk Import</button>
+          <button disabled={!canCreate('employees')} onClick={() => { setEditing(null); setForm({ name: '', phone: '', email: '', designation: '', department: '', join_date: '', salary: 0, user_id: null }); setShiftHistory([]); setShowMgr2(false); setModal(true); }} className="btn btn-primary flex items-center gap-2"><FiPlus size={15} /> Add Employee</button>
         </div>
       </div>
 
@@ -302,8 +298,8 @@ export default function Employees() {
               {canSeeSalary && <td className="font-medium">Rs {(e.salary || 0).toLocaleString('en-IN')}</td>}
               <td><StatusBadge status={e.status} /></td>
               <td><div className="flex gap-1">
-                <button onClick={() => { setEditing(e); setForm(e); setModal(true); loadShiftHistory(e.id); setShowMgr2(!!e.reporting_manager_id_2); setShiftForm({ effective_from: new Date().toISOString().slice(0, 10), shift_start: e.shift_start || '', shift_end: e.shift_end || '', week_off_day: e.week_off_day != null ? String(e.week_off_day) : '0' }); }} className="p-1.5 hover:bg-red-50 rounded text-red-600"><FiEdit2 size={15} /></button>
-                {canDelete('employees') && <button onClick={() => deleteEmployee(e)} className="p-1 text-gray-400 hover:text-red-600"><FiTrash2 size={14} /></button>}
+                <button disabled={!e.can_edit && !e.can_assign_shift} onClick={() => { setEditing(e); setForm(e); setModal(true); loadShiftHistory(e.id); setShowMgr2(!!e.reporting_manager_id_2); setShiftForm({ effective_from: new Date().toISOString().slice(0, 10), shift_start: e.shift_start || '', shift_end: e.shift_end || '', week_off_day: e.week_off_day != null ? String(e.week_off_day) : '0' }); }} className="p-1.5 hover:bg-red-50 rounded text-red-600"><FiEdit2 size={15} /></button>
+                {e.can_delete && <button onClick={() => deleteEmployee(e)} className="p-1 text-gray-400 hover:text-red-600"><FiTrash2 size={14} /></button>}
               </div></td>
             </tr>
           ))}
@@ -363,7 +359,7 @@ export default function Employees() {
               <button onClick={() => { setEditing(e); setForm(e); setModal(true); loadShiftHistory(e.id); setShowMgr2(!!e.reporting_manager_id_2); setShiftForm({ effective_from: new Date().toISOString().slice(0, 10), shift_start: e.shift_start || '', shift_end: e.shift_end || '', week_off_day: e.week_off_day != null ? String(e.week_off_day) : '0' }); }} className="text-blue-600 hover:underline flex items-center gap-1 font-semibold">
                 <FiEdit2 size={11} /> Edit
               </button>
-              {canDelete('employees') && (
+              {e.can_delete && (
                 <button onClick={() => deleteEmployee(e)} className="text-red-600 hover:underline flex items-center gap-1 font-semibold">
                   <FiTrash2 size={11} /> Delete
                 </button>
@@ -383,19 +379,20 @@ export default function Employees() {
             <div><label className="label">Designation</label><input className="input" list="empDesigDL" value={form.designation || ''} onChange={e => setForm({...form, designation: e.target.value})} placeholder="Pick or type" /><datalist id="empDesigDL">{[...new Set(employees.map(e => e.designation).filter(Boolean))].map(d => <option key={d} value={d} />)}</datalist></div>
             <div><label className="label">Department</label><input className="input" list="empDeptDL" value={form.department || ''} onChange={e => setForm({...form, department: e.target.value})} placeholder="Pick or type" /><datalist id="empDeptDL">{[...new Set(employees.map(e => e.department).filter(Boolean))].map(d => <option key={d} value={d} />)}</datalist></div>
             <div><label className="label">Join Date</label><input className="input" type="date" value={form.join_date || ''} onChange={e => setForm({...form, join_date: e.target.value})} /></div>
+            <div><label className="label">Last employment date (if left)</label><input className="input" type="date" value={form.employment_end_date || ''} onChange={e=>setForm({...form, employment_end_date:e.target.value})}/></div>
             {canSeeSalary && <div><label className="label">Salary (Rs)</label><input className="input" type="number" value={form.salary || 0} onChange={e => setForm({...form, salary: +e.target.value})} /></div>}
             {editing && <div><label className="label">Status</label><select className="select" value={form.status || ''} onChange={e => setForm({...form, status: e.target.value})}>{['active','training','inactive','terminated'].map(s => <option key={s} value={s}>{s}</option>)}</select></div>}
             <div className="col-span-2">
               <label className="label flex items-center gap-1"><FiLink size={12} /> Linked Login User <span className="text-gray-400 font-normal">(required for DPR Staff Cost auto-calc)</span></label>
-              <SearchableSelect
-                options={users.map(u => ({ ...u, label: `${u.name} (${u.username || u.email})` }))}
+              {canEdit('employee_links') ? <SearchableSelect
+                options={users.map(u => ({ ...u, label: `#${u.id}: ${u.name} (${u.username || u.email})` }))}
                 value={form.user_id || null}
                 valueKey="id"
                 displayKey="label"
                 placeholder="Search by name, username or email…"
                 onChange={(u) => setForm({ ...form, user_id: u?.id || null })}
-              />
-              <p className="text-[10px] text-gray-500 mt-0.5">If left blank and email matches a user, it will auto-link on save.</p>
+              /> : <p className="text-sm">{form.user_id ? `Login ID #${form.user_id}` : 'No linked login'}</p>}
+              <p className="text-[10px] text-gray-500 mt-0.5">Select the verified login ID explicitly. Blank stays unlinked; names and emails are never matched automatically.</p>
             </div>
             <div className="col-span-2">
               <label className="label">Reporting Manager</label>
@@ -452,9 +449,9 @@ export default function Employees() {
               <div className="text-xs font-semibold text-blue-800 uppercase tracking-wide">Shift &amp; Week-Off</div>
               {shiftHistory.length > 0 && (
                 <p className="text-[11px] text-gray-600">
-                  Current: {shiftHistory[shiftHistory.length - 1].shift_start || '—'}–{shiftHistory[shiftHistory.length - 1].shift_end || '—'},
-                  {' '}Week-Off: {WEEKDAYS[shiftHistory[shiftHistory.length - 1].week_off_day ?? 0]}
-                  {' '}(since {shiftHistory[shiftHistory.length - 1].effective_from})
+                  Current: {currentShift?.shift_start || '—'}–{currentShift?.shift_end || '—'},
+                  {' '}Week-Off: {WEEKDAYS[currentShift?.week_off_day ?? 0]}
+                  {' '}(since {currentShift?.effective_from})
                 </p>
               )}
               {shiftHistory.length === 0 && <p className="text-[11px] text-gray-500">No shift configured yet — late is judged against the company-wide default cutoff, week-off defaults to Sunday.</p>}
@@ -468,7 +465,7 @@ export default function Employees() {
                 </div>
                 <div><label className="label text-[10px]">Effective From</label><input className="input" type="date" value={shiftForm.effective_from} onChange={e => setShiftForm({ ...shiftForm, effective_from: e.target.value })} /></div>
               </div>
-              <button type="button" onClick={saveShift} className="btn btn-secondary text-xs">Save Shift Change</button>
+              <button type="button" disabled={!editing?.can_assign_shift} onClick={saveShift} className="btn btn-secondary text-xs">Save Shift Change</button>
               {shiftHistory.length > 0 && (
                 <div className="text-[10px] text-gray-500 space-y-0.5 pt-1 border-t">
                   {shiftHistory.slice().reverse().map(h => (

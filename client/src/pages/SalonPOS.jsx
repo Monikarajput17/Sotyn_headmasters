@@ -1,5 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import api from '../api';
+import {useSearchParams} from 'react-router-dom';
+import SaleHistory from '../components/SaleHistory';
 import Modal from '../components/Modal';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
@@ -9,6 +11,8 @@ const M = 'salon_pos';
 const money = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
 export default function SalonPOS() {
+  const [params]=useSearchParams();
+  const history=params.get('view')==='history';
   const { canCreate } = useAuth();
   const [clients, setClients] = useState([]);
   const [stylists, setStylists] = useState([]);
@@ -26,6 +30,7 @@ export default function SalonPOS() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if(history)return;
     Promise.all([
       api.get('/salon/clients'), api.get('/salon/stylists', { params: { active: 1 } }),
       api.get('/salon/services', { params: { active: 1 } }), api.get('/salon/pos/settings'),
@@ -34,7 +39,7 @@ export default function SalonPOS() {
       setClients(c.data); setStylists(st.data); setServices(sv.data); setProducts(pr.data);
       if (s.data && s.data.id) { setSettings(s.data); setTaxPct(s.data.default_tax_pct ?? 18); }
     }).catch(() => {});
-  }, []);
+  }, [history]);
 
   useEffect(() => {
     if (!clientId) { setClientDetail(null); return; }
@@ -85,6 +90,7 @@ export default function SalonPOS() {
 
   if (!canCreate(M)) return <div className="p-10 text-center text-gray-400">You don't have billing access.</div>;
 
+  if(history)return <SaleHistory />;
   return (
     <div className="p-4 sm:p-6 max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold text-gray-800 flex items-center gap-2 mb-5"><FiShoppingBag className="text-blue-700" /> Billing / POS</h1>

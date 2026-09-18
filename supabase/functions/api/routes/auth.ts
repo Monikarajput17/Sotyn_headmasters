@@ -3,10 +3,12 @@
 // addition is `refresh_token` on login (the client stores it and sends it as
 // X-Refresh-Token to /auth/me so the session can slide — mam's no-logout rule).
 // deno-lint-ignore-file no-explicit-any
-import * as XLSX from "xlsx";
 import bcrypt from "bcryptjs";
 import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
+import { isLocalDevelopment } from "../../_shared/environment.ts";
+import { permissionManager, isPermissionManager, scopeSql, idNumber, assignAttendanceSelfService } from "../../_shared/attendance-access.ts";
+import { mountFoundationAccess } from "./foundation-access.ts";
 import { logAuditEvent } from "../../_shared/audit.ts";
 import {
   adminOnly, adminClient, anonClient, authEmailFor, authMiddleware, ensureAuthAccount, forgetToken,
@@ -14,6 +16,7 @@ import {
 } from "../../_shared/auth.ts";
 
 const router = Router();
+mountFoundationAccess(router);
 const err = (res: any, e: unknown, code = 500) => res.status(code).json({ error: (e as Error)?.message || String(e) });
 
 router.post("/login", async (req, res) => {
@@ -76,7 +79,7 @@ router.post("/refresh", async (req, res) => {
   } catch (e) { err(res, e); }
 });
 
-router.post("/register", authMiddleware, adminOnly, async (req, res) => {
+router.post("/register", authMiddleware, permissionManager, async (req, res) => {
   const { name, email, username, password, role, department, phone, role_ids, avatar_url } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: "Name, email and password required" });
   const uname = username ? String(username).trim() : null;
@@ -91,6 +94,7 @@ router.post("/register", authMiddleware, adminOnly, async (req, res) => {
     if (role_ids && role_ids.length > 0) {
       for (const rid of role_ids) await pg.run("INSERT INTO user_roles (user_id, role_id) VALUES (?, ?) ON CONFLICT DO NOTHING", id, rid);
     }
+    await assignAttendanceSelfService(id);
     const user = await pg.get("SELECT id, name, email, username, role, department, phone FROM users WHERE id = ?", id);
     res.status(201).json({ user, message: "User created successfully" });
   } catch (e) {
@@ -121,15 +125,14 @@ router.post("/avatar", authMiddleware, async (req, res) => {
   } catch (e) { err(res, e); }
 });
 
-router.get("/users/export.xlsx", authMiddleware, adminOnly, async (_req, res) => {
+router.get("/users/export.xlsx", authMiddleware, permissionManager, async (req, res) => {
+  const XLSX = await import('xlsx');
   try {
     const rows = await pg.all(`
       SELECT u.name, u.email, u.username, u.role, u.department, u.phone,
-             COALESCE((SELECT e.salary FROM employees e WHERE e.user_id = u.id ORDER BY e.id DESC LIMIT 1),
-                      (SELECT e.salary FROM employees e WHERE LOWER(TRIM(e.name)) = LOWER(TRIM(u.name)) ORDER BY e.id DESC LIMIT 1), 0) AS salary,
-             COALESCE((SELECT e.designation FROM employees e WHERE e.user_id = u.id ORDER BY e.id DESC LIMIT 1),
-                      (SELECT e.designation FROM employees e WHERE LOWER(TRIM(e.name)) = LOWER(TRIM(u.name)) ORDER BY e.id DESC LIMIT 1)) AS designation
-        FROM users u WHERE COALESCE(u.active, 1) = 1 ORDER BY LOWER(u.name)`);
+             (SELECT e.salary FROM employees e WHERE e.user_id=u.id AND ${await scopeSql(req,'payroll','view','e.id',true)} ORDER BY e.id DESC LIMIT 1) AS salary,
+             (SELECT e.designation FROM employees e WHERE e.user_id=u.id ORDER BY e.id DESC LIMIT 1) AS designation
+        FROM users u WHERE COALESCE(u.active, 1) = 1 AND ${await isPermissionManager(req.user.id)?"TRUE":await scopeSql(req,"employees","view","u.id")} ORDER BY LOWER(u.name)`);
     const header = ["Name", "Email", "Username", "Role", "Department", "Designation", "Phone", "Salary (₹)"];
     const aoa = [header, ...rows.map((r: any) => [r.name || "", r.email || "", r.username || "", r.role || "", r.department || "", r.designation || "", r.phone || "", +r.salary || 0])];
     const wb = XLSX.utils.book_new();
@@ -143,18 +146,17 @@ router.get("/users/export.xlsx", authMiddleware, adminOnly, async (_req, res) =>
   } catch (e) { err(res, e); }
 });
 
-router.get("/users/hierarchy", authMiddleware, async (_req, res) => {
+router.get("/users/hierarchy", authMiddleware, async (req, res) => {
   try {
     res.json(await pg.all(`
       SELECT u.id, u.name, u.role, u.department, u.manager_id, u.avatar_url, m.name AS manager_name,
-             COALESCE((SELECT e.designation FROM employees e WHERE e.user_id = u.id ORDER BY e.id DESC LIMIT 1),
-                      (SELECT e.designation FROM employees e WHERE LOWER(TRIM(e.name)) = LOWER(TRIM(u.name)) ORDER BY e.id DESC LIMIT 1)) AS designation
+             (SELECT e.designation FROM employees e WHERE e.user_id=u.id ORDER BY e.id DESC LIMIT 1) AS designation
         FROM users u LEFT JOIN users m ON m.id = u.manager_id
-       WHERE COALESCE(u.active, 1) = 1 ORDER BY LOWER(u.name)`));
+       WHERE COALESCE(u.active, 1) = 1 AND ${await isPermissionManager(req.user.id)?'TRUE':await scopeSql(req,'employees','view','u.id')} ORDER BY LOWER(u.name)`));
   } catch (e) { err(res, e); }
 });
 
-router.put("/users/:id/manager", authMiddleware, adminOnly, async (req, res) => {
+router.put("/users/:id/manager", authMiddleware, permissionManager, async (req, res) => {
   try {
     const id = +req.params.id;
     let mgr = req.body.manager_id;
@@ -174,17 +176,17 @@ router.put("/users/:id/manager", authMiddleware, adminOnly, async (req, res) => 
 
 router.get("/users", authMiddleware, async (req, res) => {
   try {
-    const whereClause = req.query.active_only === "1" ? "WHERE u.active = 1" : "";
+    const whereClause = req.query.active_only === "1" ? "WHERE u.active = 1" : "WHERE TRUE";
     res.json(await pg.all(`
       SELECT u.id, u.name, u.email, u.username, u.role, u.department, u.phone, u.active, u.avatar_url,
              COALESCE(u.track_location, 1) as track_location, COALESCE(u.archived, 0) as archived, u.created_at, u.approval_role,
              STRING_AGG(r.name, ',') as role_names
       FROM users u LEFT JOIN user_roles ur ON u.id = ur.user_id LEFT JOIN roles r ON ur.role_id = r.id
-      ${whereClause} GROUP BY u.id ORDER BY u.name`));
+      ${whereClause} AND ${await isPermissionManager(req.user.id)?"TRUE":await scopeSql(req,"employees","view","u.id")} GROUP BY u.id ORDER BY u.name`));
   } catch (e) { err(res, e); }
 });
 
-router.patch("/users/:id/track-location", authMiddleware, adminOnly, async (req, res) => {
+router.patch("/users/:id/track-location", authMiddleware, permissionManager, async (req, res) => {
   try {
     const v = req.body?.track_location ? 1 : 0;
     await pg.run("UPDATE users SET track_location=? WHERE id=?", v, req.params.id);
@@ -192,20 +194,22 @@ router.patch("/users/:id/track-location", authMiddleware, adminOnly, async (req,
   } catch (e) { err(res, e); }
 });
 
-router.patch("/users/:id/archive", authMiddleware, adminOnly, async (req, res) => {
+router.patch("/users/:id/archive", authMiddleware, permissionManager, async (req, res) => {
   try {
     const id = +req.params.id;
     if (id === req.user.id) return res.status(400).json({ error: "You can't archive your own account." });
     const target = await pg.get("SELECT id, name FROM users WHERE id=?", id);
     if (!target) return res.status(404).json({ error: "User not found" });
     const arch = req.body?.archived ? 1 : 0;
+    if(arch && await isPermissionManager(id))return res.status(409).json({error:"Permission manager account must remain active for recovery"});
     if (arch) await pg.run("UPDATE users SET archived=1, active=0 WHERE id=?", id);
     else await pg.run("UPDATE users SET archived=0 WHERE id=?", id);
     res.json({ message: arch ? `"${target.name}" archived — hidden from lists, all data kept` : `"${target.name}" restored to the Inactive list`, archived: arch });
   } catch (e) { err(res, e); }
 });
 
-router.put("/users/:id", authMiddleware, adminOnly, async (req, res) => {
+router.put("/users/:id", authMiddleware, permissionManager, async (req, res) => {
+  if(await isPermissionManager(Number(req.params.id)) && !req.body.active)return res.status(409).json({error:"A permission manager account cannot be disabled through user editing"});
   const { name, email, username, department, phone, role, active, role_ids, password, approval_role, avatar_url } = req.body || {};
   try {
     const uname = username !== undefined ? (username ? String(username).trim() : null) : undefined;
@@ -291,7 +295,7 @@ router.post("/forgot-password", async (req, res) => {
   } catch (e) { console.error("[forgot-password] failed:", (e as Error).message); res.status(500).json({ error: "Reset failed — please try again" }); }
 });
 
-router.post("/users/:id/reset-password", authMiddleware, adminOnly, async (req, res) => {
+router.post("/users/:id/reset-password", authMiddleware, permissionManager, async (req, res) => {
   try {
     const user = await pg.get("SELECT id, name, username, email, auth_user_id FROM users WHERE id=?", req.params.id);
     if (!user) return res.status(404).json({ error: "User not found" });
@@ -332,7 +336,8 @@ async function usersStillReferencedBy(t: any, id: number) {
   return hits;
 }
 
-router.delete("/users/:id", authMiddleware, adminOnly, async (req, res) => {
+router.delete("/users/:id", authMiddleware, permissionManager, async (req, res) => {
+  if(await isPermissionManager(Number(req.params.id)))return res.status(409).json({error:"Permission manager accounts must be retained for recovery"});
   const id = +req.params.id;
   const force = req.query.force === "1";
   if (id === req.user.id) return res.status(400).json({ error: "You can't delete your own account. Ask another admin." });
@@ -407,22 +412,32 @@ router.delete("/users/:id", authMiddleware, adminOnly, async (req, res) => {
 });
 
 // ===== ROLES & PERMISSIONS =====
-router.get("/roles", authMiddleware, async (_req, res) => { try { res.json(await pg.all("SELECT * FROM roles ORDER BY name")); } catch (e) { err(res, e); } });
-router.post("/roles", authMiddleware, adminOnly, async (req, res) => {
+router.get("/roles", authMiddleware, permissionManager, async (req, res) => {
+  try {
+    const roles = await pg.all("SELECT * FROM roles ORDER BY name");
+    // Keep local regression fixtures available for diagnostics without filling
+    // the normal role editor and user-assignment dropdown with generated roles.
+    const hideFixtures = isLocalDevelopment && req.query.include_test !== "1";
+    res.json(hideFixtures ? roles.filter((role: any) =>
+      !(role.description === "Synthetic fixture" && /^af[0-9]{13}/.test(role.name))) : roles);
+  } catch (e) { err(res, e); }
+});
+router.post("/roles", authMiddleware, permissionManager, async (req, res) => {
   const { name, description } = req.body || {};
   if (!name) return res.status(400).json({ error: "Role name required" });
   try {
     const r = await pg.run("INSERT INTO roles (name, description) VALUES (?, ?)", name, description);
+    await pg.run("INSERT INTO role_permissions(role_id,module,can_view,scope_mode) VALUES(?,'dashboard',1,'self') ON CONFLICT DO NOTHING",r.lastInsertRowid);
     res.status(201).json({ id: r.lastInsertRowid, message: "Role created" });
   } catch (e) {
     if ((e as Error).message.includes("UNIQUE")) return res.status(409).json({ error: "Role already exists" });
     err(res, e);
   }
 });
-router.put("/roles/:id", authMiddleware, adminOnly, async (req, res) => {
+router.put("/roles/:id", authMiddleware, permissionManager, async (req, res) => {
   try { await pg.run("UPDATE roles SET name=?, description=? WHERE id=?", req.body.name, req.body.description, req.params.id); res.json({ message: "Role updated" }); } catch (e) { err(res, e); }
 });
-router.delete("/roles/:id", authMiddleware, adminOnly, async (req, res) => {
+router.delete("/roles/:id", authMiddleware, permissionManager, async (req, res) => {
   try {
     const role = await pg.get("SELECT * FROM roles WHERE id=?", req.params.id);
     if (role?.is_system) return res.status(400).json({ error: "Cannot delete system role" });
@@ -430,23 +445,31 @@ router.delete("/roles/:id", authMiddleware, adminOnly, async (req, res) => {
     res.json({ message: "Role deleted" });
   } catch (e) { err(res, e); }
 });
-router.get("/roles/:id/permissions", authMiddleware, async (req, res) => {
+router.get("/roles/:id/permissions", authMiddleware, permissionManager, async (req, res) => {
   try { res.json(await pg.all("SELECT * FROM role_permissions WHERE role_id=?", req.params.id)); } catch (e) { err(res, e); }
 });
-router.put("/roles/:id/permissions", authMiddleware, adminOnly, async (req, res) => {
+router.put("/roles/:id/permissions", authMiddleware, permissionManager, async (req, res) => {
   try {
     const { permissions } = req.body || {};
-    await pg.run("DELETE FROM role_permissions WHERE role_id=?", req.params.id);
-    for (const p of (permissions || [])) {
-      await pg.run("INSERT INTO role_permissions (role_id, module, can_view, can_create, can_edit, can_delete, can_approve, can_see_all) VALUES (?,?,?,?,?,?,?,?)",
-        req.params.id, p.module, p.can_view ? 1 : 0, p.can_create ? 1 : 0, p.can_edit ? 1 : 0, p.can_delete ? 1 : 0, p.can_approve ? 1 : 0, p.can_see_all ? 1 : 0);
+    if(!Array.isArray(permissions)||permissions.length>200)return res.status(400).json({error:'Permission rows required'});
+    for(const p of permissions){
+     if(p.module==='permission_admin'||!/^[a-z_]+$/.test(p.module)||!['self','team','branch','all'].includes(p.scope_mode||'self'))return res.status(400).json({error:'Invalid module or scope'});
+     const ids=typeof p.scope_branches==='string'?JSON.parse(p.scope_branches):p.scope_branches||[];
+     if(!Array.isArray(ids)||ids.some((id:any)=>!idNumber(id)))return res.status(400).json({error:'Valid branch IDs required'});
+     for(const id of ids)if(!await pg.get('SELECT id FROM attendance_branches WHERE id=?',id))return res.status(400).json({error:'Unknown branch ID'});
+     p.scope_branches=JSON.stringify(ids);
     }
+    await pg.tx(async t=>{for(const p of permissions){
+     await t.run(`INSERT INTO role_permissions(role_id,module,can_view,can_create,can_edit,can_delete,can_approve,can_see_all,scope_mode,scope_branches) VALUES(?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(role_id,module) DO UPDATE SET can_view=EXCLUDED.can_view,can_create=EXCLUDED.can_create,can_edit=EXCLUDED.can_edit,can_delete=EXCLUDED.can_delete,can_approve=EXCLUDED.can_approve,can_see_all=EXCLUDED.can_see_all,scope_mode=EXCLUDED.scope_mode,scope_branches=EXCLUDED.scope_branches`,
+      req.params.id,p.module,p.can_view?1:0,p.can_create?1:0,p.can_edit?1:0,p.can_delete?1:0,p.can_approve?1:0,p.scope_mode==='all'?1:0,p.scope_mode||'self',p.scope_branches);
+    }});
     res.json({ message: "Permissions updated" });
   } catch (e) { err(res, e); }
 });
 router.get("/my-permissions", authMiddleware, async (req, res) => { try { res.json(await getUserPermissions(req.user.id)); } catch (e) { err(res, e); } });
 
-router.post("/bulk-import", authMiddleware, adminOnly, async (req, res) => {
+router.post("/bulk-import", authMiddleware, permissionManager, async (req, res) => {
   const { users } = req.body || {};
   if (!users || !Array.isArray(users) || users.length === 0) return res.status(400).json({ error: "No users provided" });
   let added = 0; const errors: string[] = [];
@@ -463,6 +486,7 @@ router.post("/bulk-import", authMiddleware, adminOnly, async (req, res) => {
           const role = await pg.get("SELECT id FROM roles WHERE name=?", u.role_name);
           if (role) await pg.run("INSERT INTO user_roles (user_id, role_id) VALUES (?,?) ON CONFLICT DO NOTHING", r.lastInsertRowid, role.id);
         }
+        await assignAttendanceSelfService(r.lastInsertRowid);
       }
       if (r.changes > 0) added++; else errors.push(`Row ${i + 1}: Email ${u.email} already exists`);
     } catch (e) { errors.push(`Row ${i + 1}: ${(e as Error).message}`); }

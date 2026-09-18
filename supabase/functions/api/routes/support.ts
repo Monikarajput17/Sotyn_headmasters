@@ -4,6 +4,7 @@
 // the shared libs (both no-op safely when SMTP / VAPID are not configured).
 import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
+import { legacyWork } from "../../_shared/work-legacy.ts";
 import { authMiddleware } from "../../_shared/auth.ts";
 import { nextSequencePg } from "../../_shared/nextSequence.ts";
 import { fireEmailEvent } from "../../_shared/lib/emailRules.ts";
@@ -14,6 +15,7 @@ const stUserEmail = async (id: any) => { try { return (await pg.get("SELECT emai
 const stDirector = () => { try { return getDirectorEmail(); } catch { return null; } };
 const router = Router();
 router.use(authMiddleware);
+router.use(legacyWork('tickets'));
 
 // GET tickets. Admin can see all by default; non-admin only sees tickets
 // they raised or were assigned to. Optional ?scope=mine|given|all changes

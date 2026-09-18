@@ -183,7 +183,7 @@ export class App {
   private cors(h: Headers, req: Request) {
     const origin = req.headers.get("origin") || "*";
     h.set("access-control-allow-origin", this.allowOrigin === "*" ? origin : this.allowOrigin);
-    h.set("access-control-allow-headers", "authorization, x-client-info, apikey, content-type, x-refresh-token");
+    h.set("access-control-allow-headers", "authorization, x-client-info, apikey, content-type, x-refresh-token, idempotency-key");
     h.set("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     h.set("access-control-expose-headers", "x-refresh-token, x-new-refresh-token, content-disposition");
     h.set("vary", "origin");

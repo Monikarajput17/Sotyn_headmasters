@@ -45,7 +45,9 @@ const Snags = lazy(() => import('./pages/Snags'));
 const CompanyAssets = lazy(() => import('./pages/CompanyAssets'));
 const Employees = lazy(() => import('./pages/Employees'));
 const Expenses = lazy(() => import('./pages/Expenses'));
-const Checklists = lazy(() => import('./pages/Checklists'));
+const Checklists = lazy(() => import('./pages/Workflows'));
+const WorkSettings = lazy(() => import('./pages/WorkSettings'));
+const MyWorkOverview = lazy(() => import('./components/MyWorkOverview'));
 const CashFlow = lazy(() => import('./pages/CashFlow'));
 const Collections = lazy(() => import('./pages/Collections'));
 const ArApTracker = lazy(() => import('./pages/ArApTracker'));
@@ -53,10 +55,10 @@ const SiteChat = lazy(() => import('./pages/SiteChat'));
 const IndentFMS = lazy(() => import('./pages/IndentFMS'));
 const DPR = lazy(() => import('./pages/DPR'));
 const IndentLabourPayment = lazy(() => import('./pages/IndentLabourPayment'));
-const Delegation = lazy(() => import('./pages/Delegation'));
+const Delegation = lazy(() => import('./pages/Workflows'));
 const PMSTasks = lazy(() => import('./pages/PMSTasks'));
 const Inventory = lazy(() => import('./pages/Inventory'));
-const HelpTickets = lazy(() => import('./pages/HelpTickets'));
+const HelpTickets = lazy(() => import('./pages/Workflows'));
 const VendorPOPrint = lazy(() => import('./pages/VendorPOPrint'));
 const DebitNotePrint = lazy(() => import('./pages/DebitNotePrint'));
 const PaymentAdvicePrint = lazy(() => import('./pages/PaymentAdvicePrint'));
@@ -131,7 +133,7 @@ function ModuleRoute({ module, children }) {
 }
 
 export default function App() {
-  const { user, loading } = useAuth();
+  const { user, loading, canView } = useAuth();
 
   if (loading) return <div className="flex items-center justify-center h-screen text-lg">Loading...</div>;
 
@@ -164,7 +166,7 @@ export default function App() {
       {/* Public online booking — no login required (share this link with clients) */}
       <Route path="/book" element={<PublicBooking />} />
       <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-        <Route index element={<SalonDashboard />} />
+        <Route index element={<ModuleRoute module="dashboard"><SalonDashboard /></ModuleRoute>} />
         {/* ─── Sotyn.Headmasters fork — salon & spa routes ─── */}
         <Route path="salon/services" element={<ModuleRoute module="salon_services"><SalonServices /></ModuleRoute>} />
         <Route path="salon/stylists" element={<ModuleRoute module="salon_stylists"><SalonStylists /></ModuleRoute>} />
@@ -225,7 +227,9 @@ export default function App() {
         <Route path="procurement" element={<ModuleRoute module="procurement"><Procurement /></ModuleRoute>} />
         <Route path="price-required" element={<PriceRequired />} />
         <Route path="inventory" element={<ModuleRoute module="inventory"><Inventory /></ModuleRoute>} />
-        <Route path="help-tickets" element={<HelpTickets />} />
+        <Route path="help-tickets" element={<ModuleRoute module="help_tickets"><HelpTickets kind="tickets" /></ModuleRoute>} />
+        <Route path="work-settings" element={<ModuleRoute module="work_settings"><WorkSettings /></ModuleRoute>} />
+        <Route path="my-work" element={<MyWorkOverview />} />
         <Route path="installation" element={<ModuleRoute module="installation"><SalesBilling /></ModuleRoute>} />
         <Route path="billing" element={<ModuleRoute module="billing"><Billing /></ModuleRoute>} />
         <Route path="complaints" element={<ModuleRoute module="complaints"><Complaints /></ModuleRoute>} />
@@ -243,14 +247,14 @@ export default function App() {
         <Route path="rentals" element={<ModuleRoute module="rentals"><Rentals /></ModuleRoute>} />
         <Route path="employees" element={<ModuleRoute module="employees"><Employees /></ModuleRoute>} />
         <Route path="expenses" element={<ModuleRoute module="expenses"><Expenses /></ModuleRoute>} />
-        <Route path="checklists" element={<ModuleRoute module="checklists"><Checklists /></ModuleRoute>} />
+        <Route path="checklists" element={<ModuleRoute module="checklists"><Checklists kind="occurrences" /></ModuleRoute>} />
         {/* Admin Routes */}
-        <Route path="admin/users" element={<AdminRoute><UserManagement /></AdminRoute>} />
-        <Route path="admin/roles" element={<AdminRoute><RolesPermissions /></AdminRoute>} />
+        <Route path="admin/users" element={<ModuleRoute module="permission_admin"><UserManagement /></ModuleRoute>} />
+        <Route path="admin/roles" element={<ModuleRoute module="permission_admin"><RolesPermissions /></ModuleRoute>} />
         <Route path="admin/backups" element={<AdminRoute><DatabaseBackups /></AdminRoute>} />
         <Route path="admin/audit" element={<AdminRoute><AuditLog /></AdminRoute>} />
         <Route path="admin/word-count" element={<AdminRoute><WordCount /></AdminRoute>} />
-        <Route path="admin/locations" element={<AdminRoute><Locations /></AdminRoute>} />
+        <Route path="admin/locations" element={<ModuleRoute module="attendance_tracking"><Locations /></ModuleRoute>} />
         <Route path="admin/collections-md" element={<AdminRoute><CollectionsMD /></AdminRoute>} />
         <Route path="admin/ai-settings" element={<AdminRoute><AISettings /></AdminRoute>} />
         <Route path="admin/email-settings" element={<AdminRoute><EmailSettings /></AdminRoute>} />

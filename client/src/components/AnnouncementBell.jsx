@@ -214,8 +214,15 @@ export default function AnnouncementBell() {
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-1 w-[92vw] sm:w-[420px] max-h-[80vh] bg-white border border-gray-200 rounded-lg shadow-xl z-50 flex flex-col">
-          {/* Mam (2026-05-22): unified header with tabs.  Title +
+        <>
+          {/* Backdrop on mobile to dim background and dismiss on tap */}
+          <div
+            className="fixed inset-0 z-40 bg-black/25 sm:hidden"
+            onClick={() => setOpen(false)}
+            onTouchStart={() => setOpen(false)}
+          />
+          <div className="fixed sm:absolute left-2.5 right-2.5 sm:left-auto sm:right-0 top-[calc(max(0.625rem,env(safe-area-inset-top))+3.25rem)] sm:top-full mt-0 sm:mt-1 sm:w-[420px] max-h-[82vh] sm:max-h-[80vh] bg-white border border-gray-200 rounded-xl shadow-2xl z-50 flex flex-col overflow-hidden">
+            {/* Mam (2026-05-22): unified header with tabs.  Title +
               close button on row 1, two-tab strip on row 2 with
               per-tab unread badges. */}
           <div className="border-b bg-gradient-to-r from-blue-50 to-blue-100">
@@ -478,6 +485,7 @@ export default function AnnouncementBell() {
           </div>
           )}
         </div>
+        </>
       )}
 
       {/* Mam (2026-05-22): full-screen photo viewer.  Renders outside

@@ -8,12 +8,17 @@ import * as XLSX from "xlsx";
 import { Router, upload } from "../../_shared/express-lite.ts";
 import type { Handler } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
+import { legacyChecklists } from "../../_shared/work-legacy.ts";
+import { scopeSql, hasPermission, permissionRows, linkEmployee } from "../../_shared/attendance-access.ts";
+import { employeeGuard } from "../../_shared/attendance-guards.ts";
 import type { Db } from "../../_shared/pg.ts";
 import { authMiddleware, requirePermission } from "../../_shared/auth.ts";
 import { getShiftHistory } from "../../_shared/lib/shifts.ts";   // async: await getShiftHistory(pg, id)
 
 const router = Router();
 router.use(authMiddleware);
+router.use(legacyChecklists);
+router.use(employeeGuard);
 
 // Mam (2026-05-22): bulk Excel upload for checklists.  10MB cap so behaviour
 // matches the PO/BOQ upload flow.  The file never touches disk here — it is
@@ -92,15 +97,7 @@ export async function findDuplicates(db: Db, { email, phone, excludeId }: any = 
 // from the DB on each request. The DPR staff-cost endpoint works independently
 // via a server-side aggregate, so non-HR users never see individual figures
 // even if they are site engineers.
-export const canSeeSalary = async (userId: number, userRole: string) => {
-  if (userRole === 'admin') return true;
-  const u = await pg.get('SELECT department FROM users WHERE id=?', userId);
-  if (u?.department && String(u.department).toLowerCase().includes('hr')) return true;
-  const roles = await pg.all(
-    `SELECT r.name FROM user_roles ur JOIN roles r ON ur.role_id=r.id WHERE ur.user_id=?`,
-    userId);
-  return roles.some((r: any) => String(r.name || '').toLowerCase().includes('hr'));
-};
+export const canSeeSalary = async(userId:number,_role:string)=>hasPermission(userId,'payroll','view');
 
 // Helper — only admin / HR can approve or reject.  Hiring manager who
 // raised the request CANNOT approve their own (separation of duties,
@@ -119,7 +116,11 @@ router.get('/employees', async (req, res) => {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const rows = await pg.all(
-      `SELECT e.*, u.name as linked_user_name, u.username as linked_username,
+      `SELECT e.*,
+              (${await scopeSql(req,'employees','edit','e.id',true)}) AS can_edit,
+              (${await scopeSql(req,'employees','delete','e.id',true)}) AS can_delete,
+              (${await scopeSql(req,'employee_shifts','edit','e.id',true)}) AS can_assign_shift,
+              (${await scopeSql(req,"payroll","view","e.id",true)}) as salary_visible, u.name as linked_user_name, u.username as linked_username,
               m1.name as reporting_manager_1_name, m2.name as reporting_manager_2_name,
               (SELECT shift_start FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_start,
               (SELECT shift_end   FROM employee_shifts WHERE employee_id=e.id AND effective_from<=? ORDER BY effective_from DESC, id DESC LIMIT 1) as shift_end,
@@ -128,11 +129,9 @@ router.get('/employees', async (req, res) => {
        LEFT JOIN users u ON u.id = e.user_id
        LEFT JOIN employees m1 ON m1.id = e.reporting_manager_id_1
        LEFT JOIN employees m2 ON m2.id = e.reporting_manager_id_2
-       ORDER BY LOWER(e.name)`,
+       WHERE ${await scopeSql(req,"employees","view","e.id",true)} ORDER BY LOWER(e.name)`,
       today, today, today);
-    if (await canSeeSalary(req.user.id, req.user.role)) return res.json(rows);
-    // Redact salary for everyone else
-    res.json(rows.map(({ salary: _salary, ...rest }: any) => rest));
+    res.json(rows.map(({salary_visible,salary,...rest}:any)=>salary_visible?{...rest,salary}:rest));
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 
@@ -146,7 +145,7 @@ router.get('/employees/:id/shifts', async (req, res) => {
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 
-router.post('/employees/:id/shifts', requirePermission('employees', 'edit'), async (req, res) => {
+router.post('/employees/:id/shifts', requirePermission('employee_shifts', 'edit'), async (req, res) => {
   try {
     const { effective_from, shift_start, shift_end, week_off_day } = req.body;
     if (!effective_from) return res.status(400).json({ error: 'Effective from date is required' });
@@ -167,39 +166,27 @@ router.post('/employees', requirePermission('employees', 'create'), async (req, 
             aadhar_file, pan_file, qualification_file,
             reporting_manager_id_1, reporting_manager_id_2 } = req.body;
     let { user_id } = req.body;
-    // Auto-link by email if user_id wasn't explicitly set
-    if (!user_id && email) {
-      const u = await pg.get('SELECT id FROM users WHERE LOWER(email) = LOWER(?)', email);
-      if (u) user_id = u.id;
-    }
+    if(user_id && !(await permissionRows(req.user.id,'employee_links','edit')).some(r=>r.scope_mode==='all'))return res.status(403).json({error:'Explicit employee linking authority required'});
     // KYC docs (Aadhar/PAN/qualification) are optional — can be added later
     // from Edit once the employee has time to bring them in.
-    const r = await pg.run(`
+    const r = await pg.tx(async t=>{
+    const r = await t.run(`
       INSERT INTO employees (user_id,name,phone,email,designation,department,join_date,salary,
                              aadhar_file, pan_file, qualification_file,
                              reporting_manager_id_1, reporting_manager_id_2)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-    `, user_id || null, name, phone, email, designation, department, join_date, salary,
+    `, null, name, phone, email, designation, department, join_date, salary,
       aadhar_file || null, pan_file || null, qualification_file || null,
       reporting_manager_id_1 || null, reporting_manager_id_2 || null);
+    if(user_id)await linkEmployee(t,r.lastInsertRowid!,Number(user_id));
+    return r;});
     res.status(201).json({ id: r.lastInsertRowid, linked_user_id: user_id || null });
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });
 
 // Auto-link existing employees to users by matching email (case-insensitive).
 // Safe to run any time — only fills rows where user_id IS NULL.
-router.post('/employees/auto-link', requirePermission('employees', 'edit'), async (_req, res) => {
-  try {
-    const candidates = await pg.all(
-      `SELECT e.id, u.id as user_id FROM employees e
-       JOIN users u ON LOWER(u.email) = LOWER(e.email)
-       WHERE e.user_id IS NULL AND e.email IS NOT NULL AND e.email != ''`
-    );
-    let linked = 0;
-    for (const c of candidates) { await pg.run('UPDATE employees SET user_id = ? WHERE id = ?', c.user_id, c.id); linked++; }
-    res.json({ linked, scanned: candidates.length });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
+router.post('/employees/auto-link',async(_req,res)=>res.status(410).json({error:'Automatic matching is disabled. Select explicit employee and login IDs in employee maintenance; see permission management for ambiguous links.'}));
 
 // Bulk import employees
 router.post('/employees/bulk', requirePermission('employees', 'create'), async (req, res) => {
@@ -235,18 +222,21 @@ router.put('/employees/:id', requirePermission('employees', 'edit'), async (req,
     }
     // COALESCE so passing undefined for a doc field doesn't wipe the existing
     // upload — frontend can edit other fields without re-uploading docs.
-    await pg.run(`
+    await pg.tx(async t=>{
+    if(user_id!==undefined && Number(user_id||0)!==Number(req.existingEmployee.user_id||0))await linkEmployee(t,empId,user_id?Number(user_id):null);
+    await t.run(`
       UPDATE employees
-         SET name=?, phone=?, email=?, designation=?, department=?, salary=?, status=?, user_id=?,
+         SET name=?, phone=?, email=?, designation=?, department=?, salary=?, status=?, join_date=?, employment_end_date=?,
              aadhar_file        = COALESCE(?, aadhar_file),
              pan_file           = COALESCE(?, pan_file),
              qualification_file = COALESCE(?, qualification_file),
              reporting_manager_id_1 = ?,
              reporting_manager_id_2 = ?
        WHERE id=?
-    `, name, phone, email, designation, department, salary, status, user_id || null,
+    `, name, phone, email, designation, department, salary, status, req.body.join_date||null, req.body.employment_end_date||null,
       aadhar_file || null, pan_file || null, qualification_file || null,
       mgr1, mgr2, req.params.id);
+    });
     res.json({ message: 'Updated' });
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }
 });

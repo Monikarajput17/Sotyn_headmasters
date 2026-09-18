@@ -2,15 +2,15 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const bcrypt = require('bcryptjs');
 
-const DB_PATH = path.join(__dirname, '..', '..', 'data', 'erp.db');
+const DB_PATH = process.env.ERP_SQLITE_PATH || path.join(__dirname, '..', '..', 'data', 'erp.db');
 
 let db;
 
 function getDb() {
   if (!db) {
     const fs = require('fs');
-    const dataDir = path.join(__dirname, '..', '..', 'data');
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    const dataDir = DB_PATH === ':memory:' ? null : path.dirname(DB_PATH);
+    if (dataDir && !fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
     db = new Database(DB_PATH);
     // Performance pragmas — measurable speedup on the SEPL VPS:
     // - WAL: concurrent reads while a write is happening (mam: pages
@@ -5929,7 +5929,7 @@ in your first week. If a process feels broken, raise a Help Ticket
   try {
     const fs = require('fs');
     const existingHash = db.prepare("SELECT value FROM app_settings WHERE key='emergency_reset_hash'").get();
-    if (!existingHash) {
+    if (!existingHash && DB_PATH !== ':memory:') {
       const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
       const code = Array.from({ length: 16 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
       const hash = bcrypt.hashSync(code, 10);

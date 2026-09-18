@@ -7,7 +7,31 @@ import react from '@vitejs/plugin-react'
 // the iPhone PWA had picked up the latest cards or was still on the
 // cached old bundle — this kills that guesswork.
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), {
+    name: 'local-backend-only',
+    configResolved(config) {
+      if (config.command !== 'serve') return
+      const endpoints = {
+        API_PROXY_TARGET: config.server.proxy['/api'].target,
+        VITE_API_BASE: config.env.VITE_API_BASE || '/api',
+        VITE_SUPABASE_URL: config.env.VITE_SUPABASE_URL,
+      }
+      for (const [name, value] of Object.entries(endpoints)) {
+        if (!value) continue
+        if (name === 'VITE_API_BASE' && value === '/api') continue
+        let local = false
+        try {
+          const url = new URL(value)
+          local = ['http:', 'https:'].includes(url.protocol)
+            && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+            && !url.username && !url.password
+        } catch { /* Invalid URLs must also fail closed. */ }
+        if (!local) {
+          throw new Error(`${name} must point to localhost for local testing. Remote backends are blocked to protect production data.`)
+        }
+      }
+    },
+  }],
   define: {
     __BUILD_STAMP__: JSON.stringify(
       // ISO without milliseconds — readable in the badge as "06-02 12:45"
@@ -41,6 +65,8 @@ export default defineConfig({
     },
   },
   server: {
+    host: '127.0.0.1',
+    strictPort: true,
     // Dev-only (server.* is ignored by `vite build`). Pre-transform the
     // logged-in first-route graph at server boot so the FIRST load after each
     // `npm run dev` isn't waiting on cold on-demand transforms of the big
@@ -56,22 +82,10 @@ export default defineConfig({
     },
     port: 3055,
     proxy: {
-      // Use 127.0.0.1, NOT "localhost": on Node 17+ "localhost" resolves to IPv6
-      // ::1 first, but the API server binds IPv4 only -> "connect ECONNREFUSED
-      // ::1:5000", which vite surfaces as a 500 on every proxied login in dev.
-      // Sotyn Salon fork runs the API on 5055 to avoid clashing with the
-      // business-erp project on 5000.
-      // Supabase-native backend: '/api' → the Edge Function. Locally that is
-      // `supabase functions serve` (port 54321); set API_PROXY_TARGET to point
-      // elsewhere (e.g. the deployed function, or the legacy Express server on
-      // http://127.0.0.1:5055/api during the transition).
+      // Local Supabase Edge Function. Overrides must also use a loopback host.
       '/api': {
         target: process.env.API_PROXY_TARGET || 'http://127.0.0.1:54321/functions/v1/api',
         changeOrigin: true,
-        // Dev-only: this machine's network does TLS inspection (WARP), and
-        // Node's proxy can't verify the substituted certificate. The production
-        // build never proxies — the browser calls the function URL directly.
-        secure: false,
         rewrite: (p) => p.replace(/^\/api/, ''),
       },
     }

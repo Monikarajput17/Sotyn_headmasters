@@ -46,7 +46,9 @@ export const auditMiddleware: Handler = (req, res, next) => {
         METHOD_TO_ACTION[req.method] || req.method, entityTypeFromPath(pathOnly), entityIdFromPath(pathOnly),
         req.method, pathOnly,
         req.query && Object.keys(req.query).length ? JSON.stringify(req.query) : null,
-        summariseBody(req.body), res.statusCode ?? null, req.ip || null,
+        // Work payloads can contain requester-private internal notes and evidence.
+        // Their transactional, permission-scoped history is authoritative.
+        pathOnly.startsWith('/api/work/') ? '[Details retained in scoped workflow history]' : summariseBody(req.body), res.statusCode ?? null, req.ip || null,
         (req.headers["user-agent"] || "").slice(0, 200) || null,
       ).catch((e) => console.error("[audit] insert failed:", e.message, "path=", pathOnly));
     });

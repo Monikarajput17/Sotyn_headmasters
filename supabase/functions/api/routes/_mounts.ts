@@ -7,6 +7,9 @@ import { mounts as staff } from "./staff.mounts.ts";
 import { mounts as hr } from "./hr.mounts.ts";
 import { mounts as ops } from "./ops.mounts.ts";
 import announcements from "./announcements.ts";
+import attendanceOperations from './attendance-operations.ts';
+import work from './work.ts';
+import dashboard from './dashboard.ts';
 
 export const extraMounts: Array<[string, RouterImpl]> = [
   ...salon,
@@ -15,4 +18,7 @@ export const extraMounts: Array<[string, RouterImpl]> = [
   ...hr,
   ...ops,
   ["/announcements", announcements],
+  ['/attendance-ops',attendanceOperations],
+  ['/work',work],
+  ['/dashboard',dashboard],
 ];

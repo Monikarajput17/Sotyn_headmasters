@@ -12,7 +12,13 @@
     "client": "cd client && npm run dev",
     "build": "cd client && npm install && npm run build",
     "install-all": "npm install && cd client && npm install",
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev": "node scripts/local/index.js frontend",
+    "local:prepare": "node scripts/local/index.js prepare",
+    "local:start": "node scripts/local/index.js start",
+    "local:stop": "node scripts/local/index.js stop",
+    "local:check": "node scripts/local/index.js check",
+    "local:status": "node scripts/local/index.js status",
+    "local:test-isolation": "node --test scripts/local/isolation.test.mjs",
     "build:client": "cd client && npm install && npm run build",
     "_comment_postinstall": "No auto-build on install — client/dist is prebuilt & committed (Render/VPS deploy with no front-end build → avoids OOM). Rebuild manually with: npm run build:client"
   },
@@ -38,5 +44,8 @@
     "twilio": "^6.0.2",
     "web-push": "^3.6.7",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "supabase": "2.117.0"
   }
 }

@@ -92,7 +92,7 @@ const LABEL_PILL = {
 
 export default function Payroll() {
   const { user, canApprove, canEdit } = useAuth();
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = canEdit('payroll');
   const [tab, setTab] = useUrlTab('monthly');
   const [month, setMonth] = useState(monthNow());
   const [settings, setSettings] = useState(null);
@@ -267,9 +267,9 @@ export default function Payroll() {
   };
 
   const unlockMonth = async () => {
-    if (!confirm(`Unlock ${month}? Slips will recalc from live attendance.`)) return;
+    const reason=prompt(`Reason for reopening unpaid payroll for ${month}. Reopen attendance under Attendance > Periods first. Paid slips remain unchanged.`); if(!reason)return;
     try {
-      await api.post('/payroll/unlock', { month });
+      await api.post('/payroll/unlock', { month, reason });
       toast.success('Unlocked');
       loadMonth();
     } catch (err) { toast.error(err.response?.data?.error || 'Failed'); }
@@ -314,7 +314,7 @@ export default function Payroll() {
           <button onClick={() => setTab('leaves')} className={`btn ${tab === 'leaves' ? 'btn-primary' : 'btn-secondary'} text-sm flex items-center gap-1`}>
             <FiCalendar size={14} /> Leave Balances
           </button>
-          {isAdmin && (
+          {canEdit('attendance_rules') && (
             <button onClick={() => setTab('settings')} className={`btn ${tab === 'settings' ? 'btn-primary' : 'btn-secondary'} text-sm flex items-center gap-1`}>
               <FiSettings size={14} /> Rules / Settings
             </button>
@@ -389,7 +389,7 @@ export default function Payroll() {
                   <th className="text-center" title="Late count — informational only, no pay impact">Late</th>
                   <th className="text-right" title="Late deduction (charged from late time)">Late ₹</th>
                   <th className="text-center">Leaves</th>
-                  <th className="text-right" title="Overtime for hours worked beyond 9/day, paid at salary ÷ days ÷ 9 per hour">OT (&gt;9h)</th>
+                  <th className="text-right" title="Overtime for hours worked beyond 9/day, paid at salary ÷ days ÷ 9 per hour">Overtime</th>
                   <th className="text-right" title="Salary before overtime is added">Before OT</th>
                   <th className="text-right" title="Advance salary taken this month — deducted from net pay">Advance</th>
                   <th className="text-right" title="Food allowance — added to net pay">Food</th>
@@ -404,7 +404,7 @@ export default function Payroll() {
                 {!loading && list.map(r => (
                   <tr key={r.employee_id} className={r.locked ? 'bg-emerald-50/30' : (r.user_linked === false ? 'bg-amber-50/40' : '')}>
                     <td className="font-medium">
-                      {r.employee_name}
+                      {r.employee_name}{r.ready===false&&<span className="block text-xs text-amber-700">Review required ({r.exceptions?.length})</span>}
                       {r.locked && <FiLock size={11} className="inline text-emerald-600 ml-1" title="Finalised" />}
                       {r.user_linked === false && <span className="ml-1 text-[10px] bg-amber-200 text-amber-800 px-1 py-0.5 rounded" title="No login user linked — attendance can't be looked up. Open HR → Employees and set the User for this employee.">⚠ no login</span>}
                     </td>
@@ -468,7 +468,7 @@ export default function Payroll() {
                       {r.locked ? (
                         <label className={`inline-flex items-center gap-1 ${canMarkPaid ? 'cursor-pointer' : 'cursor-default'}`}
                           title={r.paid ? `Paid${r.paid_at ? ' on ' + fmtDate(r.paid_at) : ''}` : 'Not paid yet'}>
-                          <input type="checkbox" checked={!!r.paid} disabled={!canMarkPaid}
+                          <input type="checkbox" checked={!!r.paid} disabled={!canMarkPaid || !!r.paid}
                             onChange={e => savePaid(r.employee_id, e.target.checked)} />
                           <span className={`text-[11px] font-semibold ${r.paid ? 'text-emerald-600' : 'text-rose-500'}`}>{r.paid ? 'Paid' : 'Unpaid'}</span>
                         </label>
@@ -517,7 +517,7 @@ export default function Payroll() {
                   </div>
                   <div>
                     <div className="text-[9px] uppercase text-gray-400">Paid Days</div>
-                    <div className="font-semibold text-gray-800">{r.paid_days}</div>
+                    <div className="font-semibold text-gray-800">{r.paid_days}{r.ready===false&&<span className="block text-amber-700 text-xs">Provisional: {r.exceptions?.length} exception(s)</span>}</div>
                     <div className="text-[8px] text-gray-400">att {r.present_days ?? 0}·sun {r.sunday_count ?? 0}{r.paid_leaves ? `·CL ${r.paid_leaves}` : ''}</div>
                     {r.sunday_worked > 0 && <div className="text-[8px] text-emerald-600">+{r.sunday_worked_pay}d for {r.sunday_worked} Sun worked</div>}
                   </div>
@@ -595,7 +595,7 @@ export default function Payroll() {
                     title={r.paid ? `Paid${r.paid_at ? ' on ' + fmtDate(r.paid_at) : ''}` : 'Not paid yet'}>
                     <span className="text-[11px] text-gray-500 font-semibold">Salary disbursed?</span>
                     <span className="inline-flex items-center gap-1.5">
-                      <input type="checkbox" checked={!!r.paid} disabled={!canMarkPaid}
+                      <input type="checkbox" checked={!!r.paid} disabled={!canMarkPaid || !!r.paid}
                         onChange={e => savePaid(r.employee_id, e.target.checked)} />
                       <span className={`text-[12px] font-semibold ${r.paid ? 'text-emerald-600' : 'text-rose-500'}`}>{r.paid ? 'Paid' : 'Unpaid'}</span>
                     </span>
@@ -623,7 +623,8 @@ export default function Payroll() {
             <button onClick={saveSettings} className="btn btn-primary flex items-center gap-1"><FiSave size={14} /> Save Rules</button>
           </div>
 
-          {SETTING_GROUPS.map(group => (
+          <p className="card bg-amber-50">Attendance, leave, weekly-off and overtime rules are versioned in Attendance &gt; Policies. Configure them there before closing attendance. This page changes salary component percentages.</p>
+            {SETTING_GROUPS.filter(g=>g.title.startsWith('Salary Slip')).map(group => (
             <div key={group.title} className="card p-4">
               <h4 className="font-semibold text-sm mb-3 text-red-700 border-b pb-1">{group.title}</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

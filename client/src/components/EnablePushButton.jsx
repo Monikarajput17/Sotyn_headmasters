@@ -3,7 +3,7 @@
 // its own subscription. Mam can also click "Test" to verify.
 
 import { useState, useEffect } from 'react';
-import { FiBell, FiBellOff } from 'react-icons/fi';
+import { FiBell, FiBellOff, FiX } from 'react-icons/fi';
 import toast from 'react-hot-toast';
 import api from '../api';
 import { pushSupported, enablePushNotifications, disablePushNotifications, getPermissionState } from '../lib/push';
@@ -70,11 +70,24 @@ export default function EnablePushButton() {
       </button>
       {open && (
         <>
-          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 mt-1 w-72 bg-white border rounded-lg shadow-lg z-40 p-3 text-sm">
-            <h4 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
-              <FiBell className="text-blue-600" /> Push Notifications
-            </h4>
+          <div
+            className="fixed inset-0 z-30 bg-black/25 sm:bg-transparent"
+            onClick={() => setOpen(false)}
+            onTouchStart={() => setOpen(false)}
+          />
+          <div className="fixed sm:absolute left-3 right-3 sm:left-auto sm:right-0 top-[calc(max(0.625rem,env(safe-area-inset-top))+3.25rem)] sm:top-full mt-0 sm:mt-1 max-w-sm sm:w-72 ml-auto sm:ml-0 bg-white border border-gray-200 rounded-xl shadow-2xl z-40 p-4 text-sm">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="font-bold text-gray-800 flex items-center gap-2">
+                <FiBell className="text-blue-600" /> Push Notifications
+              </h4>
+              <button
+                onClick={() => setOpen(false)}
+                className="p-1 hover:bg-gray-100 rounded text-gray-400 hover:text-gray-600 sm:hidden"
+                aria-label="Close"
+              >
+                <FiX size={15} />
+              </button>
+            </div>
             {state === 'unsupported' && (
               <p className="text-xs text-amber-700">This browser doesn't support push notifications. Try Chrome / Edge / Firefox / Safari 16.4+.</p>
             )}

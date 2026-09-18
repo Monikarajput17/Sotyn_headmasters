@@ -3,6 +3,11 @@
 // Ported from server/routes/attendance.js (Phase-3 Postgres version).
 import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
+import {calculateAttendanceMonth,resolveDuty,assertOpen,writeLock,hashPayload,AttendanceError} from '../../_shared/attendance-operations.ts';
+import {monthDays,jsonValue,validMonth,addDays} from '../../_shared/attendance-engine.ts';
+import { scopeSql, branchSql, hasPermission, linkEmployee } from "../../_shared/attendance-access.ts";
+import { attendanceGuard } from "../../_shared/attendance-guards.ts";
+import { capture, workDate, validDate } from "../../_shared/attendance-capture.ts";
 import { authMiddleware, requirePermission } from "../../_shared/auth.ts";
 // Shared geofence math + the "is this punch on-site?" decision. Single source
 // of truth for punch-in, punch-out, live tracking AND the audit endpoint so
@@ -23,6 +28,8 @@ const atUserEmail = async (id: any) => { try { return (await pg.get("SELECT emai
 const atDirector = () => { try { return getDirectorEmail(); } catch { return null; } };
 const router = Router();
 router.use(authMiddleware);
+router.use(attendanceGuard);
+router.get('/tracking-preference',async(req,res)=>{const u=await pg.get('SELECT track_location FROM users WHERE id=?',req.user.id);res.json({enabled:!!u?.track_location});});
 
 // Late detection — cutoff is the punching employee's OWN shift start (as
 // effective on the punch date), falling back to payroll_settings.late_after_time
@@ -64,201 +71,37 @@ async function isPunchLate(whenIso: string, userId: any) {
 // present/half-day appears on the employee's calendar. Only the silent
 // auto-mark allow-list rows stay hidden (they're a convenience flag, not a
 // real presence the user should see).
+// Capture locations are read-only employee information, not location maintenance.
+// Match the current capture handler's active-zone eligibility without granting edits.
+router.get('/my-capture-context',async(req,res)=>{
+  const employees=await pg.all('SELECT * FROM employees WHERE user_id=?',req.user.id);
+  const open=await pg.get("SELECT date,policy_version_id FROM attendance WHERE user_id=? AND punch_in_time IS NOT NULL AND punch_out_time IS NULL AND COALESCE(capture_state,'open')<>'review_closed' ORDER BY id DESC LIMIT 1",req.user.id);
+  const duty=employees.length===1?await resolveDuty(pg,employees[0],open?.date||workDate()):null;
+  const policy=jsonValue(open?.policy_version_id?(await pg.get('SELECT rules FROM attendance_policy_versions WHERE id=?',open.policy_version_id))?.rules:duty?.policy?.rules);
+  const locations=await pg.all(`SELECT id,site_name,latitude,longitude,radius_meters,active FROM geofence_settings WHERE active=1 ${policy?.location_scope==='branch'?'AND attendance_branch_id=?':''} ORDER BY site_name`,...(policy?.location_scope==='branch'?[employees[0]?.attendance_branch_id||0]:[]));
+  res.json({employee_link_ready:employees.length===1,employee_id:employees.length===1?employees[0].id:null,plan:duty?.plan||null,geo_settings:await geoSettings(pg),capture_exception:policy?.capture_exception||'reject',can_start_another_session:!!(policy?.allow_multiple_sessions||duty?.plan?.segments.length>1),
+    setup_message:employees.length===0?'Your login is not linked to an employee. Ask the owner to select your login in Employees.':employees.length>1?'Your login is linked to more than one employee. Ask the owner to resolve the duplicate link.':null,
+    locations});
+});
+
 router.get("/my-today", async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
+    const today = workDate();
     const record = await pg.get(
-      `SELECT * FROM attendance WHERE user_id=? AND date=?
-          AND NOT (COALESCE(admin_marked,0)=1 AND COALESCE(remarks,'')='Auto-marked (allow-list)')`,
-      req.user.id, today);
+      `SELECT * FROM attendance WHERE user_id=? AND (date=? OR (punch_in_time IS NOT NULL AND punch_out_time IS NULL AND COALESCE(capture_state,'open')<>'review_closed')) ORDER BY CASE WHEN punch_out_time IS NULL AND punch_in_time IS NOT NULL THEN 0 ELSE 1 END,id DESC LIMIT 1`,req.user.id,today);
     res.json(record || null);
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GET current month's attendance for the logged-in user — used by the
 // dashboard card so employees can see their month at a glance. Optional
 // query param ?month=YYYY-MM lets them view a different month.
-router.get("/my-month", async (req, res) => {
-  try {
-    const now = new Date();
-    const monthParam = String(req.query.month || "").match(/^\d{4}-\d{2}$/) ? req.query.month : null;
-    const year = monthParam ? parseInt(monthParam.slice(0, 4), 10) : now.getFullYear();
-    const month = monthParam ? parseInt(monthParam.slice(5, 7), 10) : now.getMonth() + 1;
-    const pad = (n: number) => String(n).padStart(2, "0");
-    const monthStart = `${year}-${pad(month)}-01`;
-    const lastDay = new Date(year, month, 0).getDate();
-    const monthEnd = `${year}-${pad(month)}-${pad(lastDay)}`;
-
-    // Pull attendance + leave records for this user, this month.
-    // Manual admin back-fills are included so they show on the calendar
-    // (mam 2026-05-30: "i marked previous attendance but not show").
-    // Only the silent auto-mark allow-list rows stay hidden.
-    const attendance = await pg.all(
-      `SELECT date, status, punch_in_time, punch_out_time, total_hours
-         FROM attendance
-        WHERE user_id=? AND date BETWEEN ? AND ?
-          AND NOT (COALESCE(admin_marked,0)=1 AND COALESCE(remarks,'')='Auto-marked (allow-list)')
-        ORDER BY date`,
-      req.user.id, monthStart, monthEnd);
-
-    const leaves = await pg.all(
-      `SELECT leave_type, from_date, to_date, from_time, to_time, status, hours, days
-       FROM leave_requests
-       WHERE user_id=? AND status='approved'
-         AND NOT (to_date < ? OR from_date > ?)`,
-      req.user.id, monthStart, monthEnd);
-
-    // Pull configured late-cutoff from payroll_settings so the dashboard
-    // late-count reflects mam's actual policy (e.g. 09:30) instead of the
-    // hard-coded 09:45 from the punch-in flow. Falls back to 09:45 if the
-    // settings table doesn't exist yet on a stale DB. This is only the
-    // FALLBACK now — per-employee shift, resolved per-day below, takes
-    // priority whenever that employee has a shift configured for that date.
-    let lateCutoffMin = 9 * 60 + 46;
-    try {
-      const ps = await pg.get(`SELECT late_after_time FROM payroll_settings WHERE id=1`);
-      if (ps?.late_after_time) {
-        const [h, m] = ps.late_after_time.split(":").map(Number);
-        lateCutoffMin = h * 60 + (m || 0);
-      }
-    } catch { /* stale DB */ }
-
-    // Shift/week-off history for this user's employee record, resolved
-    // per-day below so a shift change (or week-off change) only applies from
-    // its effective_from date onward — past days keep whatever applied then.
-    const empId = await employeeIdForUser(pg, req.user.id);
-    const shiftHistory = await getShiftHistory(pg, empId);
-
-    // Build a per-day map of status. Key = YYYY-MM-DD.
-    // Order of precedence: attendance row wins; else leave; else (past weekdays) absent; future = blank.
-    const today = new Date().toISOString().slice(0, 10);
-    const todayObj = new Date(today);
-    const days: any[] = [];
-    const byStatus: Record<string, number> = { present: 0, late: 0, half_day: 0, short_day: 0, absent: 0, on_leave: 0, weekend: 0, future: 0 };
-    let totalHours = 0;
-
-    for (let d = 1; d <= lastDay; d++) {
-      const dateStr = `${year}-${pad(month)}-${pad(d)}`;
-      const dObj = new Date(dateStr);
-      const dow = dObj.getDay(); // 0=Sun 6=Sat
-      // Resolve THIS employee's shift/week-off as it stood on dateStr — not
-      // today's shift — so a later shift change never relabels past days.
-      const dayShift = resolveShift(shiftHistory, dateStr);
-      const isWeekend = dow === weekOffDow(dayShift);
-      const dayLateCutoff = lateCutoffMinutes(dayShift, lateCutoffMin);
-      const att = attendance.find((a: any) => a.date === dateStr);
-      // Is this day inside any approved leave range?
-      const onLeave = leaves.find((l: any) => dateStr >= l.from_date && dateStr <= l.to_date && l.leave_type !== "short_leave");
-      let status: string;
-      if (att) {
-        status = att.status;
-        totalHours += +att.total_hours || 0;
-        // Re-classify as 'late' based on this employee's cutoff for that day.
-        // CRITICAL: punch_in_time is stored as UTC ISO. To compare against
-        // the IST cutoff, shift to IST first. Bug before this fix: getHours()
-        // returned UTC hours so 10:23 IST (= 04:53 UTC) was read as '4:53',
-        // never exceeded the cutoff, dashboard showed Late=0 for everyone.
-        if (status === "present" && att.punch_in_time) {
-          const piIst = new Date(new Date(att.punch_in_time).getTime() + 5.5 * 60 * 60 * 1000);
-          if (!isNaN(piIst.getTime())) {
-            const piMin = piIst.getUTCHours() * 60 + piIst.getUTCMinutes();
-            if (piMin > dayLateCutoff) status = "late";
-          }
-        }
-      } else if (onLeave) {
-        status = "on_leave";
-      } else if (isWeekend) {
-        status = "weekend";
-      } else if (dObj > todayObj) {
-        status = "future";
-      } else {
-        status = "absent";
-      }
-      if (byStatus[status] !== undefined) byStatus[status]++;
-      // Include punch-in/out times and total hours so the dashboard can
-      // render a per-day timeline. Also embed any approved leave that
-      // covers this date (short_leave or full-day) for at-a-glance audit.
-      const dayLeave = leaves.find((l: any) => dateStr >= l.from_date && dateStr <= l.to_date);
-      days.push({
-        date: dateStr,
-        day: d,
-        dow,
-        status,
-        punch_in_time: att?.punch_in_time || null,
-        punch_out_time: att?.punch_out_time || null,
-        total_hours: att?.total_hours || 0,
-        leave: dayLeave ? {
-          leave_type: dayLeave.leave_type,
-          from_time: dayLeave.from_time || null,
-          to_time: dayLeave.to_time || null,
-          hours: dayLeave.hours || 0,
-        } : null,
-      });
-    }
-
-    // Short leave summary — count and sum hours across this month's
-    // approved short_leave entries. Mam: 'not like which I fill shortleave
-    // mins/hours according to month current'.
-    const shortLeaves = leaves.filter((l: any) => l.leave_type === "short_leave");
-    const shortLeaveCount = shortLeaves.length;
-    const shortLeaveHours = shortLeaves.reduce((s: number, l: any) => s + (+l.hours || 0), 0);
-
-    // Current-week summary (Mon-Sun of the week containing today). If the user
-    // is viewing a different month via ?month=, still compute the week relative
-    // to today so the "this week" section always reflects reality.
-    const weekStart = new Date(); // today
-    // Start week on Monday: shift back to most recent Monday
-    const dow = weekStart.getDay(); // 0 Sun..6 Sat
-    const shift = (dow === 0 ? 6 : dow - 1); // days since Monday
-    weekStart.setDate(weekStart.getDate() - shift);
-    weekStart.setHours(0, 0, 0, 0);
-    const weekStartStr = weekStart.toISOString().slice(0, 10);
-    const weekEndDate = new Date(weekStart);
-    weekEndDate.setDate(weekEndDate.getDate() + 6);
-    const weekEndStr = weekEndDate.toISOString().slice(0, 10);
-
-    const weekAttendance = await pg.all(
-      "SELECT date, status, total_hours FROM attendance WHERE user_id=? AND date BETWEEN ? AND ?",
-      req.user.id, weekStartStr, weekEndStr);
-    const weekLeaves = await pg.all(
-      `SELECT from_date, to_date FROM leave_requests
-       WHERE user_id=? AND status='approved' AND NOT (to_date < ? OR from_date > ?)`,
-      req.user.id, weekStartStr, weekEndStr);
-    const weekSummary: Record<string, number> = { present: 0, late: 0, half_day: 0, short_day: 0, absent: 0, on_leave: 0, weekend: 0, future: 0, total_hours: 0 };
-    for (let i = 0; i < 7; i++) {
-      const d = new Date(weekStart); d.setDate(d.getDate() + i);
-      const ds = d.toISOString().slice(0, 10);
-      const dObj = new Date(ds);
-      const isWeekend = d.getDay() === weekOffDow(resolveShift(shiftHistory, ds));
-      const att = weekAttendance.find((a: any) => a.date === ds);
-      const leave = weekLeaves.find((l: any) => ds >= l.from_date && ds <= l.to_date);
-      let status: string;
-      if (att) { status = att.status; weekSummary.total_hours += +att.total_hours || 0; }
-      else if (leave) status = "on_leave";
-      else if (isWeekend) status = "weekend";
-      else if (dObj > todayObj) status = "future";
-      else status = "absent";
-      if (weekSummary[status] !== undefined) weekSummary[status]++;
-    }
-    weekSummary.total_hours = Math.round(weekSummary.total_hours * 100) / 100;
-
-    res.json({
-      month: `${year}-${pad(month)}`,
-      days,
-      summary: {
-        ...byStatus,
-        total_hours: Math.round(totalHours * 100) / 100,
-        short_leave_count: shortLeaveCount,
-        short_leave_hours: Math.round(shortLeaveHours * 100) / 100,
-      },
-      week: {
-        start: weekStartStr,
-        end: weekEndStr,
-        summary: weekSummary,
-      },
-      leaves,
-    });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+router.get('/my-month',async(req,res)=>{
+ try{const employees=await pg.all('SELECT * FROM employees WHERE user_id=?',req.user.id);if(employees.length!==1)return res.status(409).json({error:'Exactly one employee/login link required'});
+ const month=req.query.month||workDate().slice(0,7),r=await calculateAttendanceMonth(pg,employees[0],month);
+ const days=r.breakdown.map((d:any)=>({...d,status:d.label==='weekly_off'?'weekend':d.label,punch_in_time:d.punch_in,punch_out_time:d.punch_out,total_hours:d.hours}));
+ res.json({month,days,summary:{present:days.filter((d:any)=>d.status==='present').length,late:r.late_marks,half_day:r.half_days,absent:r.absent_days,total_hours:r.total_hours,review_required:r.exceptions.length},ready:r.ready,exceptions:r.exceptions});
+ }catch(e){res.status(400).json({error:(e as Error).message});}
 });
 
 // GET the logged-in user's OWN attendance over a start→end date range
@@ -268,7 +111,7 @@ router.get("/my-month", async (req, res) => {
 // allow-list rows stay hidden, same as /my-today and /my-month.
 router.get("/my-history", async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
+    const today = workDate();
     const ok = (s: any) => /^\d{4}-\d{2}-\d{2}$/.test(s || "");
     let from = ok(req.query.from) ? req.query.from : today;
     let to = ok(req.query.to) ? req.query.to : today;
@@ -280,7 +123,7 @@ router.get("/my-history", async (req, res) => {
          ORDER BY date DESC, punch_in_time DESC`,
       req.user.id, from, to);
     res.json(rows);
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GET attendance list (admin view) with filters
@@ -290,7 +133,7 @@ router.get("/", requirePermission("attendance", "view"), async (req, res) => {
     // COALESCE to the snapshot so a deleted user's KEPT attendance rows still
     // show who they belonged to (user_id is nulled on force-delete but the name
     // snapshot stays) — mam 2026-07-06 "old attendance data don't delete".
-    let sql = `SELECT a.*, COALESCE(u.name, a.user_name_snapshot) as user_name, u.department, u.phone FROM attendance a LEFT JOIN users u ON a.user_id=u.id WHERE 1=1`;
+    let sql = `SELECT a.*, false AS can_delete, COALESCE(u.name, a.user_name_snapshot) as user_name, u.department, u.phone FROM attendance a LEFT JOIN users u ON a.user_id=u.id WHERE ${await scopeSql(req,"attendance","view","a.user_id")}`;
     const params: any[] = [];
     if (date) { sql += " AND a.date=?"; params.push(date); }
     if (user_id) { sql += " AND a.user_id=?"; params.push(user_id); }
@@ -299,50 +142,31 @@ router.get("/", requirePermission("attendance", "view"), async (req, res) => {
     if (date_to) { sql += " AND a.date <= ?"; params.push(date_to); }
     sql += " ORDER BY a.date DESC, a.punch_in_time DESC";
     res.json(await pg.all(sql, ...params));
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
-// GET admin dashboard stats
-// Auto-mark today's allow-list users as present (admin_marked=1) so they
-// don't show up in the 'Not Punched In Today' panel. Idempotent — only
-// inserts where no row exists for the user today. Called lazily from the
-// admin dashboard so we don't need a cron.
-async function syncAutoMarkPresent(today: string, byUserId: any) {
-  try {
-    const list = await pg.all("SELECT id FROM users WHERE active=1 AND COALESCE(auto_mark_present,0)=1");
-    if (!list.length) return;
-    for (const u of list) {
-      if (await pg.get("SELECT 1 FROM attendance WHERE user_id=? AND date=?", u.id, today)) continue;
-      await pg.run(
-        `INSERT INTO attendance (user_id, date, status, admin_marked, marked_by, total_hours, remarks)
-         VALUES (?,?,?,1,?,?,?)`,
-        u.id, today, "present", byUserId || null, 8, "Auto-marked (allow-list)");
-    }
-  } catch (_e) { /* never block dashboard on this */ }
-}
-
+// Read-only dashboard; attendance exemptions require an explicit authorized write.
 router.get("/dashboard", requirePermission("attendance", "view"), async (req, res) => {
   try {
-    const today = new Date().toISOString().split("T")[0];
-    // Auto-mark allow-list before computing today's stats.
-    await syncAutoMarkPresent(today, req.user.id);
-    const totalUsers = await pg.get("SELECT COUNT(*) as c FROM users WHERE active=1");
+    const today = workDate();
+
+    const totalUsers = await pg.get(`SELECT COUNT(*) as c FROM users WHERE active=1 AND ${await scopeSql(req,"attendance","view","users.id")}`);
     // Count admin-marked rows as present too — they're a deliberate override
     // by admin / HR for users who didn't punch.
     const presentToday = await pg.get(
-      "SELECT COUNT(DISTINCT user_id) as c FROM attendance WHERE date=? AND (punch_in_time IS NOT NULL OR COALESCE(admin_marked,0)=1)",
+      `SELECT COUNT(DISTINCT user_id) as c FROM attendance WHERE date=? AND ${await scopeSql(req,"attendance","view","attendance.user_id")} AND (punch_in_time IS NOT NULL OR COALESCE(admin_marked,0)=1)`,
       today);
     const absentToday = totalUsers.c - presentToday.c;
-    const lateToday = await pg.get("SELECT COUNT(*) as c FROM attendance WHERE date=? AND status='late'", today);
-    const onLeave = await pg.get("SELECT COUNT(*) as c FROM leave_requests WHERE status='approved' AND from_date <= ? AND to_date >= ?", today, today);
+    const lateToday = await pg.get(`SELECT COUNT(*) as c FROM attendance WHERE date=? AND status='late' AND ${await scopeSql(req,"attendance","view","attendance.user_id")}`, today);
+    const onLeave = await pg.get(`SELECT COUNT(*) as c FROM leave_requests WHERE status='approved' AND from_date <= ? AND to_date >= ? AND ${await scopeSql(req,"attendance","view","leave_requests.user_id")}`, today, today);
 
     const todayRecords = await pg.all(`SELECT a.*, u.name as user_name, u.department FROM attendance a
-      LEFT JOIN users u ON a.user_id=u.id WHERE a.date=? ORDER BY a.punch_in_time DESC`, today);
+      LEFT JOIN users u ON a.user_id=u.id WHERE a.date=? AND ${await scopeSql(req,"attendance","view","a.user_id")} ORDER BY a.punch_in_time DESC`, today);
 
     // Users who haven't punched in. Keep only real integer ids — a stray
     // NULL user_id would otherwise produce `IN (5,,8)` and 500 the dashboard.
     const punchedUserIds = todayRecords.map((r: any) => r.user_id).filter((id: any) => Number.isInteger(id));
-    const notPunched = await pg.all(`SELECT id, name, department, phone FROM users WHERE active=1 ${punchedUserIds.length > 0 ? "AND id NOT IN (" + punchedUserIds.join(",") + ")" : ""}`);
+    const notPunched = await pg.all(`SELECT id, name, department, phone, (id<>${Number(req.user.id)} AND ${await scopeSql(req,'attendance_corrections','approve','users.id')}) AS can_correct FROM users WHERE active=1 AND ${await scopeSql(req,"attendance","view","users.id")} ${punchedUserIds.length > 0 ? "AND id NOT IN (" + punchedUserIds.join(",") + ")" : ""}`);
 
     // Geofence settings
     const geofences = await pg.all("SELECT * FROM geofence_settings WHERE active=1");
@@ -351,61 +175,16 @@ router.get("/dashboard", requirePermission("attendance", "view"), async (req, re
       totalUsers: totalUsers.c, present: presentToday.c, absent: absentToday, late: lateToday.c, onLeave: onLeave.c,
       todayRecords, notPunched, geofences,
     });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // ADMIN MARK PRESENT — admin override for users who didn't punch (phone
 // dead / no network / forgot). Creates an attendance row flagged
 // admin_marked=1 so the user's own dashboard / month view skips it.
 // Restricted to admins or roles with attendance.approve.
-router.post("/admin-mark", async (req, res) => {
-  try {
-    const { user_id, date, status, remarks } = req.body;
-    if (!user_id || !date) return res.status(400).json({ error: "user_id and date are required" });
+router.post('/admin-mark',async(_req,res)=>res.status(409).json({error:'Use Attendance > Requests to submit a reasoned correction for approval. Original records are retained.'}));
 
-    // Admin may backfill any PAST date, but never a future one.
-    const todayStr = new Date().toISOString().split("T")[0];
-    if (date > todayStr) return res.status(400).json({ error: "Cannot mark a future date" });
 
-    // Permission gate: admin OR a role with attendance.approve
-    if (req.user.role !== "admin") {
-      const ok = await pg.get(`
-        SELECT MAX(CASE WHEN rp.can_approve = 1 THEN 1 ELSE 0 END) as ok
-        FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
-        WHERE ur.user_id = ? AND rp.module = 'attendance'
-      `, req.user.id);
-      if (!ok?.ok) return res.status(403).json({ error: "Forbidden" });
-    }
-
-    // "clear" removes an admin mark, reverting the day to no-record (implicit
-    // absent / whatever the punch was).  Never touches a real punch row.
-    if (status === "clear") {
-      const ex = await pg.get("SELECT id, admin_marked FROM attendance WHERE user_id=? AND date=?", user_id, date);
-      if (ex && ex.admin_marked) await pg.run("DELETE FROM attendance WHERE id=?", ex.id);
-      return res.json({ message: "Cleared" });
-    }
-    const finalStatus = ["present", "half_day", "short_day", "absent", "leave", "holiday"].includes(status) ? status : "present";
-
-    // If a real attendance row already exists (user actually punched), don't
-    // overwrite it. Admin-mark is meant for the missing-row case only.
-    const existing = await pg.get("SELECT id, admin_marked FROM attendance WHERE user_id=? AND date=?", user_id, date);
-    if (existing && !existing.admin_marked) {
-      return res.status(400).json({ error: "User already has an attendance record for this date" });
-    }
-    if (existing && existing.admin_marked) {
-      await pg.run(
-        `UPDATE attendance SET status=?, remarks=?, marked_by=? WHERE id=?`,
-        finalStatus, remarks || null, req.user.id, existing.id);
-      return res.json({ message: "Updated", id: existing.id });
-    }
-
-    const r = await pg.run(
-      `INSERT INTO attendance (user_id, date, status, remarks, admin_marked, marked_by, total_hours)
-       VALUES (?,?,?,?,1,?, ?)`,
-      user_id, date, finalStatus, remarks || null, req.user.id, finalStatus === "half_day" ? 4 : finalStatus === "present" ? 8 : 0);
-    res.status(201).json({ id: r.lastInsertRowid, message: "Marked" });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
 
 // ── Monthly Attendance Grid (mam 2026-06-13: "make automatic salary") ────
 // Admin marks present/absent/half/leave for everyone in one screen so the
@@ -413,272 +192,33 @@ router.post("/admin-mark", async (req, res) => {
 // through admin-mark (admin_marked=1) so real punches are never overwritten.
 
 // Admin OR attendance.approve may use the grid.
-async function canMarkAttendance(req: any) {
-  if (req.user.role === "admin") return true;
-  try {
-    const ok = await pg.get(`
-      SELECT MAX(CASE WHEN rp.can_approve = 1 THEN 1 ELSE 0 END) AS ok
-      FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
-      WHERE ur.user_id = ? AND rp.module = 'attendance'`, req.user.id);
-    return !!ok?.ok;
-  } catch { return false; }
-}
 const gpad = (n: number) => String(n).padStart(2, "0");
 
 // GET /attendance/grid?month=YYYY-MM — per-employee per-day status for the
 // month, plus the "no login linked" employees with suggested user matches.
-router.get("/grid", async (req, res) => {
-  try {
-    if (!(await canMarkAttendance(req))) return res.status(403).json({ error: "Forbidden" });
-    const month = String(req.query.month || "");
-    if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: "month=YYYY-MM required" });
-    const [y, m] = month.split("-").map(Number);
-    const lastDay = new Date(y, m, 0).getDate();
-    const start = `${month}-01`, end = `${month}-${gpad(lastDay)}`;
-    const todayStr = new Date(new Date().getTime() + 5.5 * 3600 * 1000).toISOString().split("T")[0]; // IST today
-
-    const days: any[] = [];
-    for (let d = 1; d <= lastDay; d++) {
-      const dateStr = `${month}-${gpad(d)}`;
-      const dow = new Date(y, m - 1, d).getDay();
-      // `sunday` here is just the calendar-Sunday column highlight in the grid
-      // header — the actual per-employee week-off status used below is
-      // resolved per row/day since it now varies by employee.
-      days.push({ date: dateStr, d, dow, sunday: dow === 0, future: dateStr > todayStr });
-    }
-
-    const employees = await pg.all(
-      `SELECT id, name, user_id FROM employees WHERE (status IS NULL OR status='active') ORDER BY name`);
-    // Shift/week-off history for every employee at once (one query, grouped
-    // in JS) so week-off is judged per-employee-per-day, not one global Sunday.
-    const shiftHistoryByEmp = new Map<any, any[]>();
-    for (const row of await pg.all(`SELECT * FROM employee_shifts ORDER BY effective_from ASC, id ASC`)) {
-      if (!shiftHistoryByEmp.has(row.employee_id)) shiftHistoryByEmp.set(row.employee_id, []);
-      shiftHistoryByEmp.get(row.employee_id)!.push(row);
-    }
-    const activeUsers = await pg.all(`SELECT id, name FROM users WHERE active=1`);
-    const _usersById = new Map<any, any>(activeUsers.map((u: any) => [u.id, u] as [any, any]));
-    const linkedUserIds = new Set<any>(employees.map((e: any) => e.user_id).filter(Boolean));
-    const tokens = (s: any) => String(s || "").toLowerCase().trim().split(/\s+/).filter(Boolean);
-    const suggestFor = (name: any) => {
-      const set = new Set(tokens(name)); const first = [...set][0] || "";
-      return activeUsers
-        .filter((u: any) => !linkedUserIds.has(u.id))
-        .map((u: any) => ({ u, overlap: tokens(u.name).filter((t) => set.has(t)).length, first: tokens(u.name)[0] === first }))
-        .filter((c: any) => c.overlap > 0 || c.first)
-        .sort((a: any, b: any) => b.overlap - a.overlap)
-        .slice(0, 4)
-        .map((c: any) => ({ user_id: c.u.id, name: c.u.name }));
-    };
-
-    const userIds = [...linkedUserIds];
-    const attByUserDate = new Map<string, any>(), leavesByUser = new Map<any, any[]>();
-    if (userIds.length) {
-      const ph = userIds.map(() => "?").join(",");
-      for (const a of await pg.all(
-        `SELECT user_id, date, status, admin_marked, punch_in_time FROM attendance
-          WHERE user_id IN (${ph}) AND date BETWEEN ? AND ?`, ...userIds, start, end)) {
-        attByUserDate.set(`${a.user_id}|${a.date}`, a);
-      }
-      for (const lr of await pg.all(
-        `SELECT user_id, leave_type, from_date, to_date FROM leave_requests
-          WHERE status='approved' AND user_id IN (${ph}) AND NOT (to_date < ? OR from_date > ?)`, ...userIds, start, end)) {
-        if (!leavesByUser.has(lr.user_id)) leavesByUser.set(lr.user_id, []);
-        leavesByUser.get(lr.user_id)!.push(lr);
-      }
-    }
-
-    const rows = employees.map((e: any) => {
-      const cells: Record<string, any> = {};
-      const empHistory = shiftHistoryByEmp.get(e.id) || [];
-      if (e.user_id) {
-        const leaves = leavesByUser.get(e.user_id) || [];
-        for (const day of days) {
-          const att = attByUserDate.get(`${e.user_id}|${day.date}`);
-          const isWeekOff = day.dow === weekOffDow(resolveShift(empHistory, day.date));
-          let status = "", source = "";
-          if (att) {
-            status = String(att.status || "").toLowerCase();
-            source = att.admin_marked ? "admin" : "punch";
-          } else if (leaves.some((l: any) => day.date >= l.from_date && day.date <= l.to_date)) {
-            status = "leave"; source = "leave";
-          } else if (isWeekOff) {
-            status = "sunday"; source = "auto";
-          } else if (!day.future) {
-            status = "absent"; source = "implicit";
-          } else {
-            status = ""; source = "future";
-          }
-          cells[day.date] = { status, source };
-        }
-      }
-      return {
-        employee_id: e.id,
-        name: e.name,
-        user_id: e.user_id || null,
-        no_login: !e.user_id,
-        suggestions: e.user_id ? [] : suggestFor(e.name),
-        cells,
-      };
-    });
-
-    res.json({ month, today: todayStr, days, employees: rows });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+router.get('/grid',async(req,res)=>{
+ try{const month=req.query.month,dates=monthDays(month),today=workDate(),employees=await pg.all(`SELECT * FROM employees WHERE ${await scopeSql(req,'attendance','view','employees.id',true)} ORDER BY name`),rows=[];
+ for(const e of employees){const r=await calculateAttendanceMonth(pg,e,month),cells:any={};for(const d of r.breakdown)cells[d.date]={status:d.label,source:'evaluated',pay:d.pay,exceptions:d.exceptions};rows.push({employee_id:e.id,name:e.name,user_id:e.user_id,no_login:!e.user_id,can_correct:false,suggestions:[],cells});}
+ res.json({month,today,days:dates.map(date=>({date,d:Number(date.slice(8)),future:date>today,sunday:false})),employees:rows});
+ }catch(e){res.status(400).json({error:(e as Error).message});}
 });
 
 // POST /attendance/admin-mark-bulk — mark every BLANK (no record) non-Sunday
 // past day of a month for one user as `status` (default present).  The fast
 // "mark this person present for the month" button.
-router.post("/admin-mark-bulk", async (req, res) => {
-  try {
-    if (!(await canMarkAttendance(req))) return res.status(403).json({ error: "Forbidden" });
-    const { user_id, month } = req.body;
-    if (!user_id || !/^\d{4}-\d{2}$/.test(String(month || ""))) return res.status(400).json({ error: "user_id and month=YYYY-MM required" });
-    const status = ["present", "half_day", "absent"].includes(req.body.status) ? req.body.status : "present";
-    const [y, m] = String(month).split("-").map(Number);
-    const lastDay = new Date(y, m, 0).getDate();
-    const todayStr = new Date(new Date().getTime() + 5.5 * 3600 * 1000).toISOString().split("T")[0];
-    const existing = new Set(
-      (await pg.all(`SELECT date FROM attendance WHERE user_id=? AND date BETWEEN ? AND ?`,
-        user_id, `${month}-01`, `${month}-${gpad(lastDay)}`)).map((r: any) => r.date),
-    );
-    const insSql =
-      `INSERT INTO attendance (user_id, date, status, admin_marked, marked_by, total_hours) VALUES (?,?,?,1,?,?)`;
-    const hrs = status === "half_day" ? 4 : status === "present" ? 8 : 0;
-    const empId = await employeeIdForUser(pg, user_id);
-    const shiftHistory = await getShiftHistory(pg, empId);
-    let marked = 0;
-    await pg.tx(async (t) => {
-      for (let d = 1; d <= lastDay; d++) {
-        const dateStr = `${month}-${gpad(d)}`;
-        if (dateStr > todayStr) continue;
-        const dow = new Date(y, m - 1, d).getDay();
-        if (dow === weekOffDow(resolveShift(shiftHistory, dateStr))) continue; // skip this employee's week-off (auto-paid)
-        if (existing.has(dateStr)) continue;                  // never overwrite a punch/admin row
-        await t.run(insSql, user_id, dateStr, status, req.user.id, hrs);
-        marked++;
-      }
-    });
-    res.json({ message: `Marked ${marked} day(s)`, marked });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
+router.post('/admin-mark-bulk',async(_req,res)=>res.status(409).json({error:'Bulk present backfills are disabled. Use reviewed correction requests; leave and original evidence must be preserved.'}));
 
 // POST /attendance/link-login — link an employee to a login user so their
 // attendance can be read (fixes the "⚠ no login" near-zero salaries).
-router.post("/link-login", async (req, res) => {
-  try {
-    if (req.user.role !== "admin") return res.status(403).json({ error: "Admin only" });
-    const employee_id = +req.body.employee_id, user_id = +req.body.user_id;
-    if (!employee_id || !user_id) return res.status(400).json({ error: "employee_id and user_id required" });
-    const emp = await pg.get("SELECT id FROM employees WHERE id=?", employee_id);
-    const usr = await pg.get("SELECT id, name FROM users WHERE id=?", user_id);
-    if (!emp || !usr) return res.status(404).json({ error: "Employee or user not found" });
-    await pg.run("UPDATE employees SET user_id=? WHERE id=?", user_id, employee_id);
-    res.json({ message: `Linked to ${usr.name}`, user_id });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
+router.post('/link-login',async(req,res)=>{try{
+ const employee=await pg.get('SELECT id FROM employees WHERE id=?',req.body.employee_id);
+ if(!employee)return res.status(404).json({error:'Employee not found'});
+ await pg.tx(t=>linkEmployee(t,Number(req.body.employee_id),Number(req.body.user_id)));
+ res.json({message:'Explicit login link saved'});
+}catch(e){res.status(409).json({error:(e as Error).message});}});
 
-// PUNCH IN
-router.post("/punch-in", async (req, res) => {
-  try {
-    const { latitude, longitude, address, photo, site_name } = req.body;
-    if (!latitude || !longitude) return res.status(400).json({ error: "Location required. Please enable GPS." });
-
-    const today = new Date().toISOString().split("T")[0];
-    const now = new Date().toISOString();
-
-    // Check if already punched in today
-    const existing = await pg.get("SELECT id FROM attendance WHERE user_id=? AND date=?", req.user.id, today);
-    if (existing) return res.status(400).json({ error: "Already punched in today" });
-
-    // Check geofence — MANDATORY, must be inside a site area. The decision is
-    // delegated to the shared, uncertainty-honest rule in lib/geofence.ts:
-    // a weak indoor phone-GPS fix can NEVER block someone who might be on-site;
-    // only a GOOD GPS lock that is confidently outside is rejected. Coarse fixes
-    // are allowed but tagged location_verified=0 for admin audit.
-    const geofences = await pg.all("SELECT * FROM geofence_settings WHERE active=1");
-    if (geofences.length === 0) {
-      return res.status(400).json({ error: "No site locations configured. Contact admin to add geofence areas." });
-    }
-    const accuracy = +req.body?.accuracy || 0;
-    const geo = evaluateGeofence(latitude, longitude, accuracy, geofences, await geoSettings(pg));
-    if (!geo.allow) {
-      // Only reached on a trustworthy GPS lock that is genuinely off-site, so the
-      // distance we quote is real (no more false "you are 3km away" on weak GPS).
-      return res.status(400).json({
-        error: `You appear to be about ${geo.nearestDist}m from the nearest site (${geo.nearestSite}). Your GPS lock is precise (±${geo.accuracyUsed}m), so this reads as off-site. Go to your assigned site to punch in, or ask your admin to mark you present.`,
-        distance_m: geo.nearestDist, nearest_site: geo.nearestSite,
-      });
-    }
-    const matchedSite = geo.matchedSite || site_name || geo.nearestSite || "";
-
-    // Check if late — uses IST timezone + payroll_settings.late_after_time.
-    // Fixes the UTC-vs-IST bug where 10:23 IST (04:53 UTC) was treated as
-    // not-late because getHours() on UTC-running VPS returned 4.
-    const isLate = await isPunchLate(now, req.user.id);
-
-    const r = await pg.run(`INSERT INTO attendance (user_id, date, punch_in_time, punch_in_lat, punch_in_lng, punch_in_address, punch_in_photo, site_name, status, punch_in_accuracy, location_verified)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`, req.user.id, today, now, latitude, longitude, address, photo, matchedSite, isLate ? "late" : "present", accuracy || null, geo.verified);
-
-    res.status(201).json({
-      id: r.lastInsertRowid,
-      message: isLate ? "Punched In (Late)" : "Punched In",
-      site: matchedSite, isLate,
-      location_verified: !!geo.verified,
-      // When the fix was too weak to confirm, tell the user it was recorded for
-      // review rather than silently passing — keeps it honest both ways.
-      note: geo.verified ? undefined : "Location could not be precisely verified (weak GPS) — punch recorded and flagged for admin review.",
-    });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
-
-// PUNCH OUT
-router.post("/punch-out", async (req, res) => {
-  try {
-    const { latitude, longitude, address, photo } = req.body;
-    const today = new Date().toISOString().split("T")[0];
-    const now = new Date().toISOString();
-
-    const record = await pg.get("SELECT * FROM attendance WHERE user_id=? AND date=?", req.user.id, today);
-    if (!record) return res.status(400).json({ error: "You have not punched in today" });
-    if (record.punch_out_time) return res.status(400).json({ error: "Already punched out today" });
-
-    // PUNCH-OUT GEOFENCE (mam, 2026-05-16: "out attendance ... punch out is
-    // also need according to geofencing"). Same uncertainty-honest rule as
-    // punch-in: a weak fix never blocks an on-site person; only a precise lock
-    // that is confidently off-site is rejected. No permissive walk-away
-    // allowance — if staff want to step off-site they punch out FIRST.
-    if (latitude == null || longitude == null) {
-      return res.status(400).json({ error: "Location required to punch out." });
-    }
-    const accuracy = +req.body?.accuracy || 0;
-    {
-      const geofences = await pg.all("SELECT * FROM geofence_settings WHERE active=1");
-      if (geofences.length === 0) {
-        return res.status(400).json({ error: "No site locations configured. Contact admin." });
-      }
-      const geo = evaluateGeofence(latitude, longitude, accuracy, geofences, await geoSettings(pg));
-      if (!geo.allow) {
-        return res.status(400).json({
-          error: `Punch-out blocked: GPS shows you about ${geo.nearestDist}m from the nearest site (${geo.nearestSite}) with a precise lock (±${geo.accuracyUsed}m). Go back to site to punch out, or ask your admin.`,
-          distance_m: geo.nearestDist,
-          nearest_site: geo.nearestSite,
-        });
-      }
-    }
-
-    // Calculate total hours
-    const punchIn = new Date(record.punch_in_time);
-    const punchOut = new Date(now);
-    const totalHours = Math.round((punchOut.getTime() - punchIn.getTime()) / (1000 * 60 * 60) * 100) / 100;
-    const status = totalHours < 4 ? "half_day" : record.status;
-
-    await pg.run(`UPDATE attendance SET punch_out_time=?, punch_out_lat=?, punch_out_lng=?, punch_out_address=?, punch_out_photo=?, total_hours=?, status=?, punch_out_accuracy=? WHERE id=?`,
-      now, latitude, longitude, address, photo, totalHours, status, accuracy || null, record.id);
-
-    res.json({ message: `Punched Out. Total: ${totalHours} hours`, totalHours });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
-});
+router.post('/punch-in',capture('in'));
+router.post('/punch-out',capture('out'));
 
 // Live location tracking — site engineer sends location periodically.
 // GPS accuracy buffer: phone GPS readings can be off by 50-200m+ indoors
@@ -691,7 +231,7 @@ router.post("/punch-out", async (req, res) => {
 router.post("/track-location", async (req, res) => {
   try {
     const { latitude, longitude, address, accuracy, gps_off, reason } = req.body;
-    const today = new Date().toISOString().split("T")[0];
+    const today = workDate();
     const now = new Date().toISOString();
 
     // Heartbeat with gps_off=true → user is online (page is open, network
@@ -716,14 +256,14 @@ router.post("/track-location", async (req, res) => {
     await pg.run("INSERT INTO location_tracking (user_id, date, time, latitude, longitude, address, site_name) VALUES (?,?,?,?,?,?,?)",
       req.user.id, today, now, latitude, longitude, address, siteName);
     res.json({ site: siteName });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GET location history for a user (admin)
-router.get("/track/:userId/:date", requirePermission("attendance", "view"), async (req, res) => {
+router.get("/track/:userId/:date", requirePermission("attendance_tracking", "view"), async (req, res) => {
   try {
     res.json(await pg.all("SELECT * FROM location_tracking WHERE user_id=? AND date=? ORDER BY time", req.params.userId, req.params.date));
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GET geofence settings
@@ -732,10 +272,10 @@ router.get("/track/:userId/:date", requirePermission("attendance", "view"), asyn
 // 403 → empty list → the false "No site locations configured" warning even when
 // standing in the office (mam 2026-07-01). Only authenticated; edits (POST/PUT/
 // DELETE below) stay permission-gated.
-router.get("/geofence", async (_req, res) => {
+router.get("/geofence", async (req, res) => {
   try {
-    res.json(await pg.all("SELECT * FROM geofence_settings ORDER BY site_name"));
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+    res.json(await pg.all(`SELECT *, (${await branchSql(req,'attendance_locations','edit')}) AS can_edit, (${await branchSql(req,'attendance_locations','delete')}) AS can_delete FROM geofence_settings WHERE ${await branchSql(req,"attendance_locations","view")} ORDER BY site_name`));
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GEOFENCE AUDIT — mam (2026-05-16): "just a audit our staff says we
@@ -755,14 +295,8 @@ router.get("/geofence", async (_req, res) => {
 //
 // URL: /attendance/audit/geofence-violations?from=YYYY-MM-DD&to=YYYY-MM-DD
 //      /attendance/audit/geofence-violations?days=7
-router.get("/audit/geofence-violations", requirePermission("attendance", "view"), async (req, res) => {
+router.get("/audit/geofence-violations", requirePermission("attendance_tracking", "view"), async (req, res) => {
   try {
-    // Admin / can-see-all only — never let a normal employee scan
-    // colleagues' coordinates.
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ error: "Admin only" });
-    }
-
     let { from, to } = req.query;
     const { days } = req.query;
     if (!from || !to) {
@@ -773,162 +307,59 @@ router.get("/audit/geofence-violations", requirePermission("attendance", "view")
       to = end.toISOString().slice(0, 10);
     }
 
-    const geofences = await pg.all("SELECT * FROM geofence_settings WHERE active=1");
-    if (geofences.length === 0) {
-      return res.json({ from, to, geofences: [], rows: [], violations: [], note: "No active geofences configured." });
-    }
-
-    const rows = await pg.all(`
-      SELECT a.id, a.user_id, a.date, a.punch_in_time, a.punch_out_time,
-             a.punch_in_lat, a.punch_in_lng, a.punch_in_address,
-             a.punch_out_lat, a.punch_out_lng, a.punch_out_address,
-             a.punch_in_accuracy, a.punch_out_accuracy, a.location_verified,
-             a.site_name, a.status,
-             u.name as employee_name
-      FROM attendance a
-      LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.date BETWEEN ? AND ?
-      ORDER BY a.date DESC, a.punch_in_time DESC
-    `, from, to);
-
-    // For each row, find distance to nearest geofence at IN and OUT
-    const enrich = (lat: any, lng: any) => {
-      if (lat == null || lng == null) return { nearest_site: null, distance_m: null };
-      let best: { dist: number; site: any } = { dist: Infinity, site: null };
-      for (const gf of geofences) {
-        const d = haversine(+lat, +lng, gf.latitude, gf.longitude);
-        if (d < best.dist) { best = { dist: d, site: gf.site_name }; }
-      }
-      return { nearest_site: best.site, distance_m: Math.round(best.dist) };
-    };
-    const radius = geofences[0]?.radius_meters || 200;
-    const { trust } = await geoSettings(pg);
-
-    // A row is a REAL off-site violation only when the fix was a precise GPS lock
-    // (accuracy <= trust) AND the distance is beyond the geofence radius. A weak
-    // fix (accuracy > trust, or unknown on historical rows) is NOT a violation —
-    // it's surfaced as "unverified" so admin can eyeball the selfie instead.
-    const isOutside = (distance_m: number | null, accuracy: any) => {
-      if (distance_m == null) return false;
-      if (accuracy != null) return accuracy <= trust && distance_m > radius;
-      return distance_m > radius + 500; // historical rows w/o stored accuracy: old buffer
-    };
-
-    const enriched = rows.map((r: any) => {
-      const inInfo = enrich(r.punch_in_lat, r.punch_in_lng);
-      const outInfo = enrich(r.punch_out_lat, r.punch_out_lng);
-      const punchInOutside = isOutside(inInfo.distance_m, r.punch_in_accuracy);
-      const punchOutOutside = isOutside(outInfo.distance_m, r.punch_out_accuracy);
-      return {
-        id: r.id,
-        date: r.date,
-        employee: r.employee_name || `user#${r.user_id}`,
-        site_assigned: r.site_name,
-        location_verified: r.location_verified == null ? null : !!r.location_verified,
-        punch_in: {
-          time: r.punch_in_time,
-          lat: r.punch_in_lat, lng: r.punch_in_lng,
-          address: r.punch_in_address,
-          accuracy_m: r.punch_in_accuracy != null ? Math.round(r.punch_in_accuracy) : null,
-          nearest_site: inInfo.nearest_site,
-          distance_m: inInfo.distance_m,
-          outside_geofence: punchInOutside,
-          beyond_3km: inInfo.distance_m != null && inInfo.distance_m > 3000,
-        },
-        punch_out: r.punch_out_time ? {
-          time: r.punch_out_time,
-          lat: r.punch_out_lat, lng: r.punch_out_lng,
-          address: r.punch_out_address,
-          accuracy_m: r.punch_out_accuracy != null ? Math.round(r.punch_out_accuracy) : null,
-          nearest_site: outInfo.nearest_site,
-          distance_m: outInfo.distance_m,
-          outside_geofence: punchOutOutside,
-          beyond_3km: outInfo.distance_m != null && outInfo.distance_m > 3000,
-        } : null,
-      };
+    const rows=await pg.all(`SELECT a.*,u.name AS employee_name,
+      (SELECT evidence FROM attendance_capture_events WHERE attendance_id=a.id AND kind='in' ORDER BY id LIMIT 1) AS in_evidence,
+      (SELECT evidence FROM attendance_capture_events WHERE attendance_id=a.id AND kind='out' ORDER BY id LIMIT 1) AS out_evidence
+      FROM attendance a LEFT JOIN users u ON u.id=a.user_id WHERE a.date BETWEEN ? AND ? AND ${await scopeSql(req,'attendance_tracking','view','a.user_id')} ORDER BY a.date DESC,a.id DESC`,from,to);
+    const enriched=rows.map((r:any)=>{
+      const proof=(kind:string)=>{const ev=jsonValue(r[kind==='in'?'in_evidence':'out_evidence']),geo=ev?.geofence,prefix=kind==='in'?'punch_in':'punch_out';return {
+       time:r[prefix+'_time'],lat:r[prefix+'_lat'],lng:r[prefix+'_lng'],address:r[prefix+'_address'],accuracy_m:r[prefix+'_accuracy'],
+       nearest_site:geo?.nearestSite||geo?.matchedSite||null,distance_m:geo?.nearestDist??null,
+       outside_geofence:geo?geo.decision==='outside':null,beyond_3km:geo?.nearestDist!=null?geo.nearestDist>3000:null,
+       verified:geo?.verified??null,provenance:geo?'stored_capture_decision':'legacy_location_policy_unavailable'};};
+      const pi=proof('in'),po=r.punch_out_time?proof('out'):null;return {id:r.id,date:r.date,employee:r.employee_name||r.user_name_snapshot,site_assigned:r.site_name,review_state:r.review_state,
+       location_verified:pi.verified==null?null:!!pi.verified&&(!po||!!po.verified),punch_in:pi,punch_out:po};
     });
-
-    const violations = enriched.filter((r: any) =>
-      r.punch_in.outside_geofence || r.punch_in.beyond_3km ||
-      (r.punch_out && (r.punch_out.outside_geofence || r.punch_out.beyond_3km))
-    );
-    // Punches allowed despite a weak/unconfirmed GPS fix — review the selfie.
-    const unverified = enriched.filter((r: any) => r.location_verified === false);
-
-    res.json({
-      from, to,
-      geofence_radius_meters: radius,
-      geofence_trust_accuracy_m: trust,
-      geofence_count: geofences.length,
-      geofences: geofences.map((g: any) => ({ site_name: g.site_name, lat: g.latitude, lng: g.longitude, radius_m: g.radius_meters })),
-      totals: {
-        total_attendance_rows: enriched.length,
-        punch_in_outside_geofence: enriched.filter((r: any) => r.punch_in.outside_geofence).length,
-        punch_in_beyond_3km: enriched.filter((r: any) => r.punch_in.beyond_3km).length,
-        punch_out_outside_geofence: enriched.filter((r: any) => r.punch_out?.outside_geofence).length,
-        punch_out_beyond_3km: enriched.filter((r: any) => r.punch_out?.beyond_3km).length,
-        location_unverified: unverified.length,
-      },
-      enforcement_notes: {
-        rule: `Uncertainty-honest (from 2026-06-29). A punch is INSIDE when distance - GPS_accuracy <= radius (${radius}m). Staff are only BLOCKED when a precise GPS lock (accuracy <= ${trust}m) puts them confidently outside. Weak/coarse fixes are allowed but tagged location_verified=0 for review — they CANNOT falsely block an on-site person.`,
-        punch_out: "Same uncertainty-honest rule as punch-in (strict-but-fair). Server rejects with 400 only on a precise off-site lock.",
-        gps_spoof: "A user with mock-location apps can fake their coordinates. This audit catches obvious cases (large distance with a precise lock) but cannot detect a well-crafted spoof reporting site lat/lng directly. The selfie is the backstop.",
-      },
-      violations,
-      unverified,
-    });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+    const violations=enriched.filter((r:any)=>r.punch_in.outside_geofence||r.punch_out?.outside_geofence),unverified=enriched.filter((r:any)=>r.location_verified!==true);
+    res.json({from,to,rows:enriched,violations,unverified,totals:{total_attendance_rows:enriched.length,punch_in_outside_geofence:enriched.filter((r:any)=>r.punch_in.outside_geofence).length,punch_out_outside_geofence:enriched.filter((r:any)=>r.punch_out?.outside_geofence).length,location_unverified:unverified.length},enforcement_notes:{rule:'Uses the original capture decision. Legacy records without saved policy evidence remain unverified; current site settings do not reclassify history.'}});
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // POST add geofence
-router.post("/geofence", requirePermission("attendance", "create"), async (req, res) => {
+router.post("/geofence", requirePermission("attendance_locations", "create"), async (req, res) => {
   try {
     const { site_name, latitude, longitude, radius_meters } = req.body;
     if (!latitude || !longitude || !site_name) return res.status(400).json({ error: "Site name and location required" });
     const r = await pg.run("INSERT INTO geofence_settings (site_name, latitude, longitude, radius_meters) VALUES (?,?,?,?)",
       site_name, latitude, longitude, radius_meters || 200);
     res.status(201).json({ id: r.lastInsertRowid });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // PUT edit geofence
-router.put("/geofence/:id", requirePermission("attendance", "edit"), async (req, res) => {
+router.put("/geofence/:id", requirePermission("attendance_locations", "edit"), async (req, res) => {
   try {
     const { site_name, latitude, longitude, radius_meters, active } = req.body;
     await pg.run("UPDATE geofence_settings SET site_name=?, latitude=?, longitude=?, radius_meters=?, active=? WHERE id=?",
       site_name, latitude, longitude, radius_meters || 200, active !== undefined ? (active ? 1 : 0) : 1, req.params.id);
     res.json({ message: "Updated" });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // DELETE geofence
-router.delete("/geofence/:id", requirePermission("attendance", "delete"), async (req, res) => {
+router.delete("/geofence/:id", requirePermission("attendance_locations", "delete"), async (req, res) => {
   try {
     await pg.run("DELETE FROM geofence_settings WHERE id=?", req.params.id);
     res.json({ message: "Deleted" });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // GET monthly report
-router.get("/report", requirePermission("attendance", "view"), async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    const m = month || (new Date().getMonth() + 1);
-    const y = year || new Date().getFullYear();
-    const startDate = `${y}-${String(m).padStart(2, "0")}-01`;
-    const endDate = `${y}-${String(m).padStart(2, "0")}-31`;
-
-    const report = await pg.all(`SELECT u.id as user_id, u.name, u.department,
-      COUNT(CASE WHEN a.status='present' THEN 1 END) as present_days,
-      COUNT(CASE WHEN a.status='late' THEN 1 END) as late_days,
-      COUNT(CASE WHEN a.status='half_day' THEN 1 END) as half_days,
-      COUNT(CASE WHEN a.status='absent' THEN 1 END) as absent_days,
-      ROUND(AVG(a.total_hours)::numeric,1) as avg_hours
-      FROM users u LEFT JOIN attendance a ON u.id=a.user_id AND a.date BETWEEN ? AND ?
-      WHERE u.active=1 GROUP BY u.id ORDER BY u.name`, startDate, endDate);
-
-    res.json(report);
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+router.get('/report',requirePermission('attendance','view'),async(req,res)=>{
+ try{const month=`${req.query.year||workDate().slice(0,4)}-${String(req.query.month||workDate().slice(5,7)).padStart(2,'0')}`;monthDays(month);
+ const employees=await pg.all(`SELECT * FROM employees WHERE ${await scopeSql(req,'attendance','view','employees.id',true)} ORDER BY name`),out=[];
+ for(const e of employees){const r=await calculateAttendanceMonth(pg,e,month);out.push({user_id:e.user_id,name:e.name,department:e.department,present_days:r.breakdown.filter((d:any)=>d.label==='present').length,late_days:r.late_marks,half_days:r.half_days,absent_days:r.absent_days,avg_hours:r.breakdown.length?r.total_hours/r.breakdown.length:0,review_required:r.exceptions.length});}res.json(out);
+ }catch(e){res.status(400).json({error:(e as Error).message});}
 });
 
 // user_ids of the employees who report to managerUserId (via
@@ -959,7 +390,7 @@ router.post("/leave", async (req, res) => {
   try {
     const { leave_type, from_date, reason } = req.body;
     let { to_date } = req.body;
-    if (!from_date) return res.status(400).json({ error: "Date required" });
+    if (!validDate(from_date) || (to_date && (!validDate(to_date) || to_date < from_date))) return res.status(400).json({ error: "Valid ordered leave dates required" });
     if (!["full_day", "half_day"].includes(leave_type)) {
       return res.status(400).json({ error: "Leave type must be Full Day or Half Day" });
     }
@@ -987,47 +418,24 @@ router.post("/leave", async (req, res) => {
       director_email: atDirector(),
     });
     res.status(201).json({ id: r.lastInsertRowid });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 router.get("/leaves", requirePermission("attendance", "view"), async (req, res) => {
   try {
-    // Scope rule: admin / anyone with attendance.can_approve or can_see_all
-    // sees every leave request. A reporting manager additionally sees their
-    // OWN direct reports' requests even without that blanket permission.
-    // Everyone else sees only their own. Mam: manager OR admin/HR can approve
-    // — both paths, not manager-only.
-    const isAdmin = req.user.role === "admin";
-    let canSeeAll = isAdmin;
-    if (!canSeeAll) {
-      const r = await pg.get(`
-        SELECT MAX(CASE WHEN rp.can_approve = 1 OR rp.can_see_all = 1 THEN 1 ELSE 0 END) as ok
-        FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
-        WHERE ur.user_id = ? AND rp.module = 'attendance'
-      `, req.user.id);
-      canSeeAll = !!r?.ok;
-    }
-
-    let where = "WHERE lr.user_id = ?";
-    let params: any[] = [req.user.id];
-    if (canSeeAll) {
-      where = ""; params = [];
-    } else {
-      const reportIds = await getDirectReportUserIds(req.user.id);
-      if (reportIds.length) {
-        const ph = reportIds.map(() => "?").join(",");
-        where = `WHERE lr.user_id = ? OR lr.user_id IN (${ph})`;
-        params = [req.user.id, ...reportIds];
-      }
-    }
+    const where='WHERE '+await scopeSql(req,'attendance','view','lr.user_id');
+    const params:any[]=[];
     res.json(await pg.all(`
-      SELECT lr.*, u.name as user_name
+      SELECT lr.*, u.name as user_name,
+       (${await scopeSql(req,'attendance','approve','lr.user_id')} AND lr.user_id<>${Number(req.user.id)} AND lr.status='pending') AS can_approve,
+       (${await scopeSql(req,'attendance','edit','lr.user_id')} AND lr.user_id<>${Number(req.user.id)} AND lr.status='pending') AS can_edit,
+       (${await scopeSql(req,'attendance','delete','lr.user_id')} AND lr.user_id<>${Number(req.user.id)} AND lr.status='pending') AS can_delete
         FROM leave_requests lr
         LEFT JOIN users u ON lr.user_id=u.id
        ${where}
        ORDER BY lr.created_at DESC
     `, ...params));
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 router.put("/leave/:id/approve", async (req, res) => {
@@ -1036,14 +444,9 @@ router.put("/leave/:id/approve", async (req, res) => {
     const lr = await pg.get("SELECT lr.user_id, lr.leave_type, u.name FROM leave_requests lr LEFT JOIN users u ON u.id=lr.user_id WHERE lr.id=?", req.params.id);
     if (!lr) return res.status(404).json({ error: "Leave request not found" });
 
-    const isAdmin = req.user.role === "admin";
-    const isManager = (await getDirectReportUserIds(req.user.id)).includes(lr.user_id);
-    if (!isAdmin && !isManager && !(await canApproveLeaves(req.user.id))) {
-      return res.status(403).json({ error: "Only the reporting manager or an attendance approver can decide this leave" });
-    }
-
-    await pg.run("UPDATE leave_requests SET status=?, approved_by=?, remarks=? WHERE id=?",
+    const updated=await pg.run("UPDATE leave_requests SET status=?, approved_by=?, remarks=? WHERE id=? AND status='pending'",
       status, req.user.id, remarks, req.params.id);
+    if(!updated.changes)return res.status(409).json({error:"Leave already decided; submit an explicit leave amendment under Requests & Reviews"});
     fireEmailEvent("leave.decided", {
       employee: lr?.name || "",
       leave_type: lr?.leave_type || "",
@@ -1054,7 +457,7 @@ router.put("/leave/:id/approve", async (req, res) => {
       director_email: atDirector(),
     });
     res.json({ message: `Leave ${status}` });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
 // Full edit — admin / approver fixes typos, wrong dates, wrong hours,
@@ -1062,98 +465,37 @@ router.put("/leave/:id/approve", async (req, res) => {
 // approve route for that).
 router.put("/leave/:id", requirePermission("attendance", "edit"), async (req, res) => {
   try {
-    const b = req.body;
+    const previous=await pg.get('SELECT * FROM leave_requests WHERE id=?',req.params.id);
+    const b={...previous,...req.body};
+    if(!['full_day','half_day'].includes(b.leave_type)||!validDate(b.from_date)||!validDate(b.to_date)||b.from_date>b.to_date)return res.status(400).json({error:'Valid leave type and ordered dates required'});
+    if(b.leave_type==='half_day')b.to_date=b.from_date;
+    b.days=b.leave_type==='half_day'?.5:Math.round((Date.parse(b.to_date)-Date.parse(b.from_date))/86400000)+1;b.hours=0;
     const fields = ["leave_type", "from_date", "to_date", "from_time", "to_time", "days", "hours", "reason"];
     const sets: string[] = []; const vals: any[] = [];
     for (const f of fields) if (b[f] !== undefined) { sets.push(`${f}=?`); vals.push(b[f]); }
     if (!sets.length) return res.status(400).json({ error: "No fields to update" });
     vals.push(req.params.id);
-    await pg.run(`UPDATE leave_requests SET ${sets.join(", ")} WHERE id=?`, ...vals);
+    const changed = await pg.run(`UPDATE leave_requests SET ${sets.join(", ")} WHERE id=? AND status='pending'`, ...vals);
+    if (!changed.changes) return res.status(409).json({error:'Leave was decided or removed; refresh before editing'});
     res.json({ message: "Updated" });
-  } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  } catch (err) { res.status(err instanceof AttendanceError?err.status:(err as any).code==='P0001'?409:500).json({ error: (err as Error).message }); }
 });
 
 router.delete("/leave/:id", requirePermission("attendance", "delete"), async (req, res) => {
   try {
-    await pg.run("DELETE FROM leave_requests WHERE id=?", req.params.id);
+    const changed = await pg.run("DELETE FROM leave_requests WHERE id=? AND status='pending'", req.params.id);
+    if (!changed.changes) return res.status(409).json({error:'Leave was decided or removed; original decision is preserved'});
     res.json({ message: "Deleted" });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
-router.delete("/:id", requirePermission("attendance", "delete"), async (req, res) => {
+router.delete("/:id", requirePermission("attendance_corrections", "delete"), async (req, res) => {
   try {
-    await pg.run("DELETE FROM attendance WHERE id=?", req.params.id);
+    const changed = await pg.run("DELETE FROM attendance WHERE id=? AND punch_in_time IS NULL AND punch_out_time IS NULL", req.params.id);
+    if (!changed.changes) return res.status(409).json({error:'Original punch evidence cannot be deleted or the record no longer exists'});
     res.json({ message: "Deleted" });
-  } catch (e) { res.status(500).json({ error: (e as Error).message }); }
+  } catch (e) { res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'?409:500).json({ error: (e as Error).message }); }
 });
 
-// -------------------- Auto punch-in / punch-out --------------------
-// Runs every 60s. Uses the last 5 minutes of /attendance/track-location
-// samples to decide if a user has been continuously inside a geofence
-// (→ auto punch-in) or continuously outside all geofences (→ auto
-// punch-out). Flag columns let admins spot auto-marked rows.
-async function _runAutoPunchCheck() {
-  const today = new Date().toISOString().split("T")[0];
-  const now = new Date().toISOString();
-  const fiveMinAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-
-  const recentUsers = await pg.all(
-    "SELECT DISTINCT user_id FROM location_tracking WHERE date=? AND time >= ?",
-    today, fiveMinAgo);
-
-  for (const { user_id } of recentUsers) {
-    const updates = await pg.all(
-      "SELECT * FROM location_tracking WHERE user_id=? AND date=? AND time >= ? ORDER BY time DESC",
-      user_id, today, fiveMinAgo);
-
-    if (updates.length < 2) continue; // need at least 2 pings in the window
-
-    const allInside = updates.every((u: any) => u.site_name && u.site_name !== "Outside");
-    const allOutside = updates.every((u: any) => !u.site_name || u.site_name === "Outside");
-    if (!allInside && !allOutside) continue; // mixed — still transitioning
-
-    const attendance = await pg.get("SELECT * FROM attendance WHERE user_id=? AND date=?", user_id, today);
-    const latest = updates[0];
-
-    if (!attendance && allInside) {
-      // Same IST-aware late check as manual punch-in.
-      const isLate = await isPunchLate(now, user_id);
-      try {
-        await pg.run(`INSERT INTO attendance
-          (user_id, date, punch_in_time, punch_in_lat, punch_in_lng, punch_in_address, site_name, status, auto_punched_in)
-          VALUES (?,?,?,?,?,?,?,?,1)`,
-          user_id, today, now, latest.latitude, latest.longitude, latest.address || "",
-          latest.site_name, isLate ? "late" : "present",
-        );
-        console.log(`[auto-punch] IN user=${user_id} site=${latest.site_name} late=${isLate}`);
-      } catch (e) { console.error("[auto-punch] IN failed:", (e as Error).message); }
-    } else if (attendance && attendance.punch_in_time && !attendance.punch_out_time && allOutside) {
-      const punchIn = new Date(attendance.punch_in_time);
-      const totalHours = Math.round((new Date(now).getTime() - punchIn.getTime()) / (1000 * 60 * 60) * 100) / 100;
-      const status = totalHours < 4 ? "half_day" : (totalHours < 8 ? "short_day" : attendance.status);
-      try {
-        await pg.run(`UPDATE attendance
-          SET punch_out_time=?, punch_out_lat=?, punch_out_lng=?, punch_out_address=?,
-              total_hours=?, status=?, auto_punched_out=1 WHERE id=?`,
-          now, latest.latitude, latest.longitude, latest.address || "",
-          totalHours, status, attendance.id,
-        );
-        console.log(`[auto-punch] OUT user=${user_id} hours=${totalHours}`);
-      } catch (e) { console.error("[auto-punch] OUT failed:", (e as Error).message); }
-    }
-  }
-}
-
-// Auto-punch disabled per mam's request (2026-04-23) — every punch must be
-// manual + selfie-backed so there's clear accountability. The runAutoPunchCheck
-// function above is kept as a reference in case the behaviour is ever wanted
-// back. (In the Edge Function there is no long-lived process for a setInterval
-// anyway — it would need a scheduled invocation.)
-//
-// if (Deno.env.get("NODE_ENV") !== "test") {
-//   setInterval(() => {
-//     runAutoPunchCheck().catch(e => console.error('[auto-punch] tick error:', e.message));
-//   }, 60 * 1000);
-// }
-
+// All attendance capture is an explicit authenticated submission.
 export default router;

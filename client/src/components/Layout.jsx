@@ -98,15 +98,17 @@ const SIDEBAR_GROUPS = [
     // construction (Site Engineer, Foreman, DPR). Route stays in App.jsx.
   ]},
   { id: 'tasks', label: 'Tasks', icon: FiCheckSquare, items: [
+    { path: '/my-work', label: 'My work', icon: FiCheckSquare, module: null, open: true },
     { path: '/delegations', label: 'Delegations', icon: FiPaperclip,   module: 'delegations' },
     { path: '/checklists',  label: 'Checklists',  icon: FiCheckCircle, module: 'checklists' },
   ]},
   { id: 'support', label: 'Support', icon: FiPhoneCall, items: [
-    { path: '/help-tickets', label: 'Help Tickets', icon: FiMessageCircle, module: null, open: true },
+    { path: '/help-tickets', label: 'Help Tickets', icon: FiMessageCircle, module: 'help_tickets' },
+    { path: '/work-settings', label: 'Work settings', icon: FiSettings, module: 'work_settings' },
   ]},
   { id: 'admin', label: 'Admin', icon: FiKey, adminOnly: true, items: [
-    { path: '/admin/word-count', label: 'Activity Log', icon: FiActivity, module: 'users' },
-    { path: '/admin/locations',  label: 'Location',     icon: FiMapPin,   module: 'users' },
+    { path: '/admin/word-count', label: 'Activity Log', icon: FiActivity, module: 'permission_admin' },
+    { path: '/admin/locations',  label: 'Location',     icon: FiMapPin,   module: 'attendance_tracking' },
   ]},
 ];
 
@@ -117,8 +119,8 @@ const SIDEBAR_SETTINGS = { id: 'settings', label: 'Settings', icon: FiSettings, 
   { path: '/admin/ai-settings',    label: 'AI',                  icon: LuBrain,     module: 'users' },
   { path: '/admin/email-settings', label: 'Email',               icon: FiMail,      module: 'users' },
   { path: '/admin/email-triggers', label: 'Email Triggers',      icon: FiZap,       module: 'users' },
-  { path: '/admin/users',          label: 'Users',               icon: FiUserCheck, module: 'users' },
-  { path: '/admin/roles',          label: 'Roles & Permissions', icon: FiShield,    module: 'users' },
+  { path: '/admin/users',          label: 'Users',               icon: FiUserCheck, module: 'permission_admin' },
+  { path: '/admin/roles',          label: 'Roles & Permissions', icon: FiShield,    module: 'permission_admin' },
   { path: '/admin/audit',          label: 'Audit Log',           icon: FiSearch,    module: 'users' },
 ]};
 
@@ -134,7 +136,7 @@ export default function Layout() {
   const [userMenu, setUserMenu] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
-  const { user, logout, canView, isAdmin, userRoles } = useAuth();
+  const { user, logout, canView, canCreate, isAdmin, userRoles } = useAuth();
   const { subscribe } = useAppSocket();
 
   // Admin bypasses mandatory fields everywhere (mam 2026-06-19: "admin can
@@ -269,64 +271,7 @@ export default function Layout() {
     setUserMenu(false);   // also dismiss the header avatar menu on navigation
   }, [location.pathname, isMobile]);
 
-  // GLOBAL LOCATION TRACKING — was Attendance-page-only before, but mam's
-  // team often closes that tab and just uses Leads / Procurement / etc.
-  // Running it from the Layout means as long as ANY Sotyn.Headmasters page is open in
-  // the browser (or installed PWA), GPS pings every 30 seconds. Each ping
-  // also acts as a heartbeat for backend auto-punch.
-  // Limitations: a fully-closed browser cannot ping. For 24/7 tracking
-  // even when the app is closed, we'd need a native Android wrapper.
-  useEffect(() => {
-    if (!user) return;                    // not logged in -> no tracking
-    if (!navigator.geolocation) return;   // no GPS support
-    let cancelled = false;
-    let wakeLock = null;
-
-    const trackLocation = () => {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          if (cancelled) return;
-          // accuracy is the radius of GPS uncertainty in meters. Backend
-          // uses it to apply a tolerance to the geofence check so users
-          // physically on site aren't tagged "Outside" because of indoor
-          // GPS drift / cloud cover noise.
-          api.post('/attendance/track-location', {
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.accuracy || 0,
-            address: '',
-          }).catch(() => {});
-        },
-        () => {},                              // permission denied / timeout — silent
-        { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
-      );
-    };
-
-    // Best-effort wake lock so phone screen / tab doesn't fully suspend
-    // mid-day; not all browsers support this — silently ignore if missing.
-    const requestWakeLock = async () => {
-      try {
-        if ('wakeLock' in navigator) {
-          wakeLock = await navigator.wakeLock.request('screen');
-        }
-      } catch (e) { /* ignore */ }
-    };
-    requestWakeLock();
-    // Named handler so the cleanup can remove it — an anonymous listener here
-    // leaked a new one on every user change (audit 2026-06-12).
-    const onVisible = () => { if (document.visibilityState === 'visible') requestWakeLock(); };
-    document.addEventListener('visibilitychange', onVisible);
-
-    trackLocation();
-    const interval = setInterval(trackLocation, 30 * 1000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisible);
-      if (wakeLock && wakeLock.release) wakeLock.release().catch(() => {});
-    };
-  }, [user?.id]);
+  // Page navigation is read-only. Capture is an explicit user action.
 
   // ─── Sidebar search (mam 2026-05-28: "users have issue to find") ───
   // Type-anywhere search across every menu label so an MD who knows
@@ -402,7 +347,7 @@ export default function Layout() {
   // passes any adminOnly gate. Hidden helper items (the 2 legacy CMD
   // routes folded into Executive) don't count.
   const groupVisible = (g) => {
-    if (g.adminOnly && !isAdmin()) return false;
+    if (g.adminOnly && !isAdmin() && !canView('permission_admin') && !canView('attendance_tracking')) return false;
     return g.items.some(it => !it.hidden && itemVisible(it) && itemMatches(it));
   };
   const visibleGroups = SIDEBAR_GROUPS.filter(groupVisible);
@@ -771,8 +716,8 @@ export default function Layout() {
             </button>
             {userMenu && (
               <>
-                <div className="fixed inset-0 z-30" onClick={() => setUserMenu(false)} />
-                <div className="absolute right-0 mt-1 w-60 bg-white border border-gray-200 rounded-lg shadow-lg z-40 overflow-hidden">
+                <div className="fixed inset-0 z-30" onClick={() => setUserMenu(false)} onTouchStart={() => setUserMenu(false)} />
+                <div className="absolute right-0 mt-1 w-60 max-w-[calc(100vw-1.5rem)] bg-white border border-gray-200 rounded-lg shadow-lg z-40 overflow-hidden">
                   <div className="px-4 py-3 border-b border-gray-100">
                     <div className="text-sm font-semibold text-gray-800 truncate">{user?.name}</div>
                     {user?.username && <div className="text-[11px] text-gray-500 font-mono truncate">@{user.username}</div>}
@@ -785,6 +730,9 @@ export default function Layout() {
                       </div>
                     )}
                   </div>
+                  {canView('attendance') && <Link to="/attendance" onClick={() => setUserMenu(false)} className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50">
+                    <FiClock size={15} /> My Attendance
+                  </Link>}
                   <button
                     onClick={() => { setUserMenu(false); setPwdModal(true); }}
                     className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"

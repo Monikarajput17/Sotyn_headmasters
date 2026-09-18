@@ -9,6 +9,7 @@
 // Connection: the Supavisor TRANSACTION pooler (port 6543) — required for
 // serverless; prepared statements are disabled accordingly.
 import postgres from "postgres";
+import { isLocalDevelopment } from "./environment.ts";
 
 const url = Deno.env.get("DB_POOL_URL") ?? Deno.env.get("SUPABASE_DB_URL") ?? "";
 if (!url) console.error("[pg] DB_POOL_URL / SUPABASE_DB_URL not set");
@@ -46,7 +47,7 @@ const sql = postgres(url, {
   idle_timeout: 3,          // give connections back to the pooler quickly
   max_lifetime: 300,
   connect_timeout: 10,
-  ssl: "require",
+  ssl: isLocalDevelopment ? false : "require",
   types: {
     int8: { to: 20, from: [20], serialize: (x: unknown) => String(x), parse: (x: string) => Number(x) },
     numeric: { to: 1700, from: [1700], serialize: (x: unknown) => String(x), parse: (x: string) => Number(x) },

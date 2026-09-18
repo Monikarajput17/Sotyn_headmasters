@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import api from '../../api';
 import Modal from '../../components/Modal';
+import AttendanceAccessSetup from '../../components/AttendanceAccessSetup';
 import toast from 'react-hot-toast';
 import { FiPlus, FiEdit2, FiTrash2, FiShield, FiCheck, FiX } from 'react-icons/fi';
 
@@ -24,12 +25,25 @@ const ALL_MODULES = [
   { key: 'salon_memberships', label: 'Salon · Memberships' },
   { key: 'salon_commissions', label: 'Salon · Commissions' },
   // ─── Staff ───
-  { key: 'attendance', label: 'Attendance' },
+  { key: 'attendance', label: 'Attendance / leave' },
+  { key: 'attendance_capture', label: 'Attendance capture' },
+  { key: 'attendance_corrections', label: 'Manual attendance corrections' },
+  { key: 'attendance_locations', label: 'Attendance locations' },
+  { key: 'attendance_tracking', label: 'Location tracking' },
+  { key: 'employee_shifts', label: 'Employee shift assignments' },
+  { key: 'employee_links', label: 'Employee login links' },
+  { key: 'attendance_rules', label: 'Attendance / payroll settings' },
+  { key: 'attendance_rosters', label: 'Shift templates and rosters' },
+  { key: 'attendance_policies', label: 'Attendance policy versions' },
+  { key: 'attendance_requests', label: 'Attendance correction requests' },
+  { key: 'attendance_periods', label: 'Attendance period close/reopen' },
   { key: 'payroll', label: 'Payroll' },
   { key: 'employees', label: 'Employees' },
   // ─── Other ───
   { key: 'delegations', label: 'Delegations' },
   { key: 'checklists', label: 'Checklists' },
+  { key: 'help_tickets', label: 'Help Tickets' },
+  { key: 'work_settings', label: 'Work settings and scheduled jobs' },
   { key: 'site_chat', label: 'Salon Chat — manage groups (chatting is open to all)' },
   { key: 'ai_agent', label: 'AI Assistant (Ask Sotyn)' },
   { key: 'users', label: 'User Management' },
@@ -56,6 +70,7 @@ export default function RolesPermissions() {
   const [roleForm, setRoleForm] = useState({ name: '', description: '' });
   const [editingRole, setEditingRole] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [showRelationships, setShowRelationships] = useState(false);
 
   const loadRoles = () => api.get('/auth/roles').then(r => setRoles(r.data));
 
@@ -75,6 +90,8 @@ export default function RolesPermissions() {
       can_delete: permMap[m.key]?.can_delete || 0,
       can_approve: permMap[m.key]?.can_approve || 0,
       can_see_all: permMap[m.key]?.can_see_all || 0,
+      scope_mode: permMap[m.key]?.scope_mode || 'self',
+      scope_branches: permMap[m.key]?.scope_branches || '[]',
     }));
     setPermissions(fullPerms);
   };
@@ -83,6 +100,7 @@ export default function RolesPermissions() {
     setPermissions(prev => prev.map(p => {
       if (p.module !== moduleKey) return p;
       const newVal = p[actionKey] ? 0 : 1;
+      if(actionKey==='can_see_all') return {...p,can_see_all:newVal,scope_mode:newVal?'all':'self'};
       // If enabling any action, also enable view
       if (newVal && actionKey !== 'can_view') {
         return { ...p, [actionKey]: newVal, can_view: 1 };
@@ -98,6 +116,7 @@ export default function RolesPermissions() {
   const toggleAll = (actionKey) => {
     const allEnabled = permissions.every(p => p[actionKey]);
     setPermissions(prev => prev.map(p => {
+      if(actionKey==='can_see_all')return {...p,can_see_all:allEnabled?0:1,scope_mode:allEnabled?'self':'all'};
       if (allEnabled) {
         if (actionKey === 'can_view') return { ...p, can_view: 0, can_create: 0, can_edit: 0, can_delete: 0, can_approve: 0 };
         return { ...p, [actionKey]: 0 };
@@ -150,32 +169,32 @@ export default function RolesPermissions() {
     <div className="space-y-6">
       <div>
         <h3 className="text-xl font-bold text-gray-800">Roles & Permissions</h3>
-        <p className="text-sm text-gray-500">Define roles and customize what each role can view, create, edit, delete, or approve in each module</p>
+        <p className="text-sm text-gray-500">Set permissions once per role, then assign that role to employees in Users. Everyone assigned the role inherits its permissions.</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Roles List */}
-        <div className="card lg:col-span-1 p-0">
+        <div className="card lg:col-span-1 p-0 min-w-0 self-start">
           <div className="p-4 border-b flex items-center justify-between">
             <h4 className="font-semibold text-gray-700">Roles</h4>
             <button onClick={() => { setEditingRole(null); setRoleForm({ name: '', description: '' }); setModal(true); }} className="p-1.5 hover:bg-red-50 rounded text-red-600"><FiPlus size={18} /></button>
           </div>
-          <div className="divide-y">
+          <div className="divide-y max-h-[36rem] overflow-y-auto">
             {roles.map(r => (
               <div
                 key={r.id}
                 className={`p-3 cursor-pointer flex items-center justify-between group hover:bg-gray-50 ${selectedRole?.id === r.id ? 'bg-red-50 border-l-4 border-red-500' : ''}`}
                 onClick={() => selectRole(r)}
               >
-                <div>
+                <div className="min-w-0">
                   <div className="text-sm font-medium flex items-center gap-2">
-                    <FiShield size={14} className={selectedRole?.id === r.id ? 'text-red-600' : 'text-gray-400'} />
-                    {r.name}
+                    <FiShield size={14} className={`shrink-0 ${selectedRole?.id === r.id ? 'text-red-600' : 'text-gray-400'}`} />
+                    <span className="break-words min-w-0">{r.name}</span>
                   </div>
-                  <div className="text-xs text-gray-500 mt-0.5">{r.description}</div>
+                  <div className="text-xs text-gray-500 mt-0.5 break-words">{r.description}</div>
                 </div>
                 {!r.is_system && (
-                  <div className="hidden group-hover:flex gap-1">
+                  <div className="hidden group-hover:flex gap-1 shrink-0">
                     <button onClick={(e) => { e.stopPropagation(); setEditingRole(r); setRoleForm({ name: r.name, description: r.description }); setModal(true); }} className="p-1 hover:bg-red-100 rounded text-red-600"><FiEdit2 size={12} /></button>
                     <button onClick={(e) => { e.stopPropagation(); deleteRole(r); }} className="p-1 hover:bg-red-100 rounded text-red-600"><FiTrash2 size={12} /></button>
                   </div>
@@ -186,13 +205,13 @@ export default function RolesPermissions() {
         </div>
 
         {/* Permissions Matrix */}
-        <div className="card lg:col-span-3 p-0">
+        <div className="card lg:col-span-3 p-0 min-w-0">
           {selectedRole ? (
             <>
               <div className="p-4 border-b flex items-center justify-between bg-gradient-to-r from-blue-50 to-white">
                 <div>
                   <h4 className="font-semibold text-gray-800">Permissions for: <span className="text-blue-700">{selectedRole.name}</span></h4>
-                  <p className="text-xs text-gray-500 mt-1">Click checkboxes to toggle permissions. Changes are saved when you click "Save Permissions".</p>
+                  <p className="text-xs text-gray-500 mt-1">Saving changes updates access for everyone assigned this role. Attendance scope controls whose records they can access: their own, their team, selected branches, or all records.</p>
                 </div>
                 <button onClick={savePermissions} disabled={saving} className="btn btn-primary flex items-center gap-2">
                   {saving ? 'Saving...' : 'Save Permissions'}
@@ -208,6 +227,7 @@ export default function RolesPermissions() {
                           <button onClick={() => toggleAll(a.key)} className={`hover:underline ${a.color}`}>{a.label}</button>
                         </th>
                       ))}
+                      <th>Scope / Branch IDs</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -219,6 +239,8 @@ export default function RolesPermissions() {
                           {ACTIONS.map(a => (
                             <td key={a.key} className="px-3 py-3 text-center">
                               <button
+                                aria-label={`${mod?.label || p.module}: ${a.label}`}
+                                aria-pressed={!!p[a.key]}
                                 onClick={() => togglePerm(p.module, a.key)}
                                 className={`w-8 h-8 rounded-lg flex items-center justify-center mx-auto transition-colors ${p[a.key] ? 'bg-emerald-100 text-emerald-600 hover:bg-emerald-200' : 'bg-gray-100 text-gray-300 hover:bg-gray-200'}`}
                               >
@@ -226,6 +248,8 @@ export default function RolesPermissions() {
                               </button>
                             </td>
                           ))}
+                          <td><select aria-label={(mod?.label||p.module)+' scope'} className="select" value={p.scope_mode} onChange={e=>setPermissions(prev=>prev.map(x=>x.module===p.module?{...x,scope_mode:e.target.value,can_see_all:e.target.value==='all'?1:0}:x))}>{['self','team','branch','all'].map(v=><option key={v} value={v}>{v}</option>)}</select>
+                          {p.scope_mode==='branch'&&<input aria-label={(mod?.label||p.module)+' branch IDs'} className="input" placeholder="Branch IDs, e.g. 1,2" value={(()=>{try{return JSON.parse(p.scope_branches).join(',');}catch{return '';}})()} onChange={e=>{const ids=e.target.value.split(',').map(Number).filter(n=>Number.isSafeInteger(n)&&n>0);setPermissions(prev=>prev.map(x=>x.module===p.module?{...x,scope_branches:JSON.stringify(ids)}:x));}}/>}</td>
                         </tr>
                       );
                     })}
@@ -242,6 +266,12 @@ export default function RolesPermissions() {
           )}
         </div>
       </div>
+
+      <details className="card" onToggle={e => setShowRelationships(e.currentTarget.open)}>
+        <summary className="cursor-pointer font-semibold text-gray-700">Team and branch assignments</summary>
+        <p className="text-sm text-gray-500 my-3">Configure these relationships when using team or branch attendance scopes. Employee permissions are still inherited from roles.</p>
+        {showRelationships && <AttendanceAccessSetup />}
+      </details>
 
       {/* Role Create/Edit Modal */}
       <Modal isOpen={modal} onClose={() => setModal(false)} title={editingRole ? 'Edit Role' : 'Create New Role'}>

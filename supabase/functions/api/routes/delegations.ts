@@ -11,8 +11,10 @@ import { Router, upload } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
 import { authMiddleware } from "../../_shared/auth.ts";
 import { notify } from "../../_shared/lib/push.ts";
+import { legacyWork } from "../../_shared/work-legacy.ts";
 const router = Router();
 router.use(authMiddleware);
+router.use(legacyWork('tasks'));
 
 // ─── duplicateGuard (local async copy of server/utils/duplicateGuard.js) ──
 // Mam (2026-05-21): "raise entry data can not be duplicate if some enter data

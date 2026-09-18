@@ -5,10 +5,17 @@ import { Router } from "../../_shared/express-lite.ts";
 import pg from "../../_shared/pg.ts";
 import { nextSequencePg } from "../../_shared/nextSequence.ts";
 import { authMiddleware, requirePermission } from "../../_shared/auth.ts";
+import {stylistScope,hasAllSalonAccess} from '../../_shared/salon-access.ts';
 const router = Router();
 router.use(authMiddleware);
 
 const M = 'salon_appointments';
+// Booking mutations currently operate on the shared salon calendar.
+router.use(async(req,res,next)=>{
+ if(!['GET','HEAD','OPTIONS'].includes(req.method)&&!await hasAllSalonAccess(req,M,req.method==='POST'&&!req.path.endsWith('/reminder')?'create':req.method==='DELETE'?'delete':'edit'))
+  return res.status(403).json({error:'Shared calendar management permission required'});
+ next();
+});
 
 // Edge-function stand-in for server/services/notify (Twilio WhatsApp + SMS).
 // Twilio isn't wired into the Edge Function, so this always reports "skipped" —
@@ -33,6 +40,7 @@ router.get('/', requirePermission(M, 'view'), async (req, res) => {
                FROM appointments a
                LEFT JOIN salon_clients c ON c.id = a.client_id
                LEFT JOIN stylists st ON st.id = a.stylist_id WHERE 1=1`;
+    sql += ` AND ${await stylistScope(req,M,'a.stylist_id')}`;
     const p: any[] = [];
     if (date) { sql += ' AND a.appt_date=?'; p.push(date); }
     if (from) { sql += ' AND a.appt_date>=?'; p.push(from); }
@@ -53,7 +61,7 @@ router.get('/:id', requirePermission(M, 'view'), async (req, res) => {
       `SELECT a.*, c.name AS client_name, c.phone AS client_phone, st.name AS stylist_name
        FROM appointments a
        LEFT JOIN salon_clients c ON c.id = a.client_id
-       LEFT JOIN stylists st ON st.id = a.stylist_id WHERE a.id=?`, req.params.id);
+       LEFT JOIN stylists st ON st.id = a.stylist_id WHERE a.id=? AND ${await stylistScope(req,M,'a.stylist_id')}`, req.params.id);
     if (!row) return res.status(404).json({ error: 'Not found' });
     res.json(await attachServices(row));
   } catch (e) { res.status(500).json({ error: (e as Error).message }); }

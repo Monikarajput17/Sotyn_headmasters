@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import api from '../api';
+import {useSearchParams} from 'react-router-dom';
 import Modal from '../components/Modal';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
@@ -12,7 +13,8 @@ export default function SalonProducts() {
   const { canCreate, canEdit, canDelete } = useAuth();
   const [rows, setRows] = useState([]);
   const [search, setSearch] = useState('');
-  const [lowOnly, setLowOnly] = useState(false);
+  const [params]=useSearchParams();
+  const [lowOnly, setLowOnly] = useState(params.get('low_only')==='1');
   const [modal, setModal] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({});

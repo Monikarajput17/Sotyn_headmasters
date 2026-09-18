@@ -34,17 +34,22 @@ The seed creates 5 categories / 17 services, 4 stylists, and 2 membership plans 
 
 ## Run it locally
 
-```bash
-npm install            # root deps
-cd client && npm install && cd ..
-npm run dev            # server (:5055) + vite (:3055) together
+Start Docker Desktop (WSL 2 / Linux containers), then run in PowerShell:
+
+```powershell
+npm.cmd ci
+npm.cmd ci --prefix client
+npm.cmd run local:start # isolated Supabase backend and synthetic test database
+npm.cmd run dev         # frontend at http://127.0.0.1:3055
 ```
 
-Or separately: `npm run server` and (in `client/`) `npm run dev`.
-Ports are set to **5055 (API)** / **3055 (web)** to avoid clashing with the base ERP.
-Change them in `.env` (`PORT`) and `client/vite.config.js` (proxy target + `server.port`).
+Local API: **54321**. Local database: **54322**. Supabase Studio: **54323**.
+The local backend uses the same Edge Function source as production with separate
+Auth accounts, data and uploads. Development rejects remote backend URLs.
 
-Default login: **`admin` / `admin123`** (change immediately).
+Test login: **`local-admin` / `LocalTest123!`** (local stack only).
+Full startup and deployment separation: [Local development](docs/LOCAL-DEVELOPMENT.md).
+The Express `server` command is legacy and is not the local testing workflow.
 
 ## Deploy
 

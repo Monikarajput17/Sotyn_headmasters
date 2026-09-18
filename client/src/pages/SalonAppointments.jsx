@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import api from '../api';
+import {useSearchParams} from 'react-router-dom';
 import Modal from '../components/Modal';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
@@ -19,7 +20,8 @@ const STATUS = {
 
 export default function SalonAppointments() {
   const { canCreate, canEdit, canDelete } = useAuth();
-  const [date, setDate] = useState(todayStr());
+  const [searchParams]=useSearchParams();
+  const [date, setDate] = useState(()=>searchParams.get('date')||todayStr());
   const [rows, setRows] = useState([]);
   const [clients, setClients] = useState([]);
   const [stylists, setStylists] = useState([]);
@@ -33,9 +35,10 @@ export default function SalonAppointments() {
   };
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [date]);
   useEffect(() => {
+    if (!canCreate(M)) return;
     Promise.all([api.get('/salon/clients'), api.get('/salon/stylists', { params: { active: 1 } }), api.get('/salon/services', { params: { active: 1 } })])
       .then(([c, st, sv]) => { setClients(c.data); setStylists(st.data); setServices(sv.data); }).catch(() => {});
-  }, []);
+  }, [canCreate(M)]);
 
   const shiftDay = (d) => { const nd = new Date(date); nd.setDate(nd.getDate() + d); setDate(nd.toISOString().slice(0, 10)); };
 
@@ -80,7 +83,7 @@ export default function SalonAppointments() {
 
       <div className="space-y-2">
         {rows.map(a => (
-          <div key={a.id} className="bg-white rounded-xl border p-3 sm:p-4 flex flex-wrap items-center gap-3">
+          <div key={a.id} id={`appointment-${a.id}`} className={`${String(a.id)===searchParams.get('record')?'ring-2 ring-blue-500 ':''}bg-white rounded-xl border p-3 sm:p-4 flex flex-wrap items-center gap-3`}>
             <div className="text-center w-16 flex-shrink-0">
               <div className="text-lg font-bold text-gray-800 flex items-center justify-center gap-1"><FiClock size={14} className="text-blue-600" />{a.start_time || '—'}</div>
               {a.end_time && <div className="text-[11px] text-gray-400">to {a.end_time}</div>}

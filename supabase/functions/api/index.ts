@@ -5,19 +5,12 @@
 import { App } from "../_shared/express-lite.ts";
 import { auditMiddleware } from "../_shared/audit.ts";
 
-import authRouter from "./routes/auth.ts";
-import uploadRouter from "./routes/upload.ts";
-import salonServices from "./routes/salonServices.ts";
-// Ported modules are registered here as they land (see routes/README).
-import { extraMounts } from "./routes/_mounts.ts";
+import { lazyMounts } from "./routes/lazy-mounts.ts";
 
 const app = new App({ prefixes: ["/functions/v1/api", "/api"] });
 
 app.use(auditMiddleware);
 
-app.use("/auth", authRouter);
-app.use("/upload", uploadRouter);
-app.use("/salon/services", salonServices);
-for (const [prefix, router] of extraMounts) app.use(prefix, router);
+for (const [prefix, router] of lazyMounts) app.use(prefix, router);
 
 Deno.serve((req) => app.handle(req));
