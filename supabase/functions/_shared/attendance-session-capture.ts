@@ -29,7 +29,7 @@ export function capture(kind:'in'|'out'):Handler{return async(req,res)=>{
    await writeLock(db);await db.get('SELECT pg_advisory_xact_lock(?::bigint)',740000000000+Number(req.user.id));
    const replay=await db.get('SELECT * FROM attendance_capture_events WHERE user_id=? AND request_id=?',req.user.id,b.request_id);
    if(replay){if(replay.payload_hash!==hash)throw new CaptureError(409,'IDEMPOTENCY_CONFLICT','Request ID was used with different evidence');return {id:replay.attendance_id,replayed:true,message:'Submission already recorded'};}
-   if(b.captured_at&&(!Number.isFinite(Date.parse(b.captured_at))||Math.abs(received.getTime()-Date.parse(b.captured_at))>300000))throw new CaptureError(409,'CAPTURE_TIME_INVALID','Online capture must be recent. Submit delayed attendance through a correction request.');
+   if(b.captured_at&&(!Number.isFinite(Date.parse(b.captured_at))||Math.abs(received.getTime()-Date.parse(b.captured_at))>1800000))throw new CaptureError(409,'CAPTURE_TIME_INVALID','Online capture must be recent. Submit delayed attendance through a correction request.');
    const employees=await db.all('SELECT * FROM employees WHERE user_id=?',req.user.id);
    if(employees.length!==1)throw new CaptureError(409,'EMPLOYEE_LINK_REQUIRED','Exactly one employee/login link is required; ask the owner to resolve it');
    const employee=employees[0];
