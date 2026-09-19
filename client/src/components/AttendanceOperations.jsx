@@ -2,6 +2,8 @@ import {useCallback,useEffect,useState} from 'react';
 import api from '../api';
 import {useAuth} from '../context/AuthContext';
 import toast from 'react-hot-toast';
+import Modal from './Modal';
+import { FiCheck, FiX, FiCalendar, FiClock, FiCheckCircle, FiAlertCircle } from 'react-icons/fi';
 
 const today=()=>new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Kolkata'});
 const readable=s=>String(s||'').toLowerCase().replaceAll('_',' ');
@@ -45,6 +47,22 @@ export default function AttendanceOperations({mode,employeeId}){
  const [range,setRange]=useState({from:today(),to:today()}),[cycle,setCycle]=useState([{day_type:'work',template_id:''}]),[preview,setPreview]=useState(null),[requestId,setRequestId]=useState(()=>crypto.randomUUID());
  const [leaves,setLeaves]=useState([]),[amend,setAmend]=useState({leave_id:'',action:'cancel',from_date:today(),to_date:today(),leave_type:'full_day',reason:''}),[adjust,setAdjust]=useState({source_month:'',target_month:today().slice(0,7),amount:'',reason:''});
  const [periodReason,setPeriodReason]=useState(''),[history,setHistory]=useState([]);
+ const [decisionModal,setDecisionModal]=useState(null);
+
+ const confirmDecision = async () => {
+   if (!decisionModal?.request?.id) return;
+   const why = decisionModal.reason?.trim() || (decisionModal.status === 'approved' ? 'Approved' : 'Rejected');
+   run(async () => {
+     await api.put(`/attendance-ops/requests/${decisionModal.request.id}/decision`, {
+       status: decisionModal.status,
+       reason: why
+     });
+     toast.success(`Request ${decisionModal.status}`);
+     setDecisionModal(null);
+     load();
+   });
+ };
+
  const run=async(fn)=>{setBusy(true);setError('');try{await fn();}catch(e){const msg=e.response?.data?.error||e.message;setError(msg);toast.error(msg);}finally{setBusy(false);}};
  const load=useCallback(async()=>{
   setError('');try{
@@ -88,8 +106,197 @@ export default function AttendanceOperations({mode,employeeId}){
     {amend.action==='replace'&&<div className="flex gap-3">{['from_date','to_date'].map(k=><Field key={k} label={readable(k)}><input className="input" type="date" value={amend[k]} onChange={e=>{setRequestId(crypto.randomUUID());setAmend({...amend,[k]:e.target.value});}}/></Field>)}<Field label="Leave type"><select className="select" value={amend.leave_type} onChange={e=>{setRequestId(crypto.randomUUID());setAmend({...amend,leave_type:e.target.value});}}><option value="full_day">Full day</option><option value="half_day">Half day (same date)</option></select></Field></div>}
     <Field label="Amendment reason"><input className="input w-full" required value={amend.reason} onChange={e=>{setRequestId(crypto.randomUUID());setAmend({...amend,reason:e.target.value});}}/></Field><button disabled={busy||!employeeId} className="btn btn-primary">Submit leave amendment</button>
    </form></details>}
-   <div className="card overflow-auto"><table><thead><tr><th>Employee / date</th><th>Request</th><th>Reason</th><th>Status</th><th>Decision</th></tr></thead><tbody>{Array.isArray(data)&&data.map(r=><tr key={r.id}><td>{r.employee_name}<br/>{r.work_date}</td><td>{readable(r.kind)}{r.kind==='correction'&&<div>{r.proposed.hours} hours / {r.proposed.pay_fraction} day</div>}</td><td>{r.reason}{r.capture_evidence?.map((c,i)=><details key={i}><summary>{c.kind==='in'?'Check-in':'Checkout'} evidence</summary><p>{fmt(c.received_at)}<br/>GPS: {c.evidence.latitude??'missing'}, {c.evidence.longitude??'missing'}; accuracy: {c.evidence.accuracy??'unknown'} m<br/>{readable(c.evidence.geofence?.decision)}</p>{c.evidence.photo?<img src={c.evidence.photo} alt="Capture submitted for review" className="w-40 rounded"/>:<p>No selfie supplied</p>}</details>)}{r.kind==='leave_amendment'&&<p>{r.proposed.action} leave #{r.proposed.leave_id}: {r.proposed.from_date} {r.proposed.to_date}</p>}</td><td>{r.status}<br/>{r.decision_reason}</td><td>{r.status==='pending'&&canApprove('attendance_requests')&&r.requested_by!==user.id&&r.employee_user_id!==user.id&&<div className="flex gap-2">{['approved','rejected'].map(status=><button disabled={busy} key={status} className="btn btn-secondary" onClick={()=>{const why=prompt('Reason for this decision');if(!why)return;run(async()=>{await api.put(`/attendance-ops/requests/${r.id}/decision`,{status,reason:why});load();});}}>{status==='approved'?'Approve':'Reject'}</button>)}</div>}</td></tr>)}</tbody></table></div>
-  </>}
+   <div className="card p-4 space-y-4">
+     <div className="flex justify-between items-center flex-wrap gap-2 pb-2 border-b border-gray-100">
+      <div>
+       <h3 className="font-semibold text-gray-800">Submitted Requests & Reviews</h3>
+       <p className="text-xs text-gray-500">Attendance corrections and leave amendments awaiting manager approval.</p>
+      </div>
+      <span className="text-xs text-gray-600 bg-gray-100 px-2.5 py-1 rounded-full font-medium">
+       {Array.isArray(data) ? data.length : 0} request(s)
+      </span>
+     </div>
+
+     {/* Desktop Table */}
+     <div className="hidden md:block overflow-x-auto">
+      <table className="w-full text-left text-xs">
+       <thead>
+        <tr className="border-b text-gray-500 font-semibold uppercase tracking-wider text-[11px] bg-gray-50/50">
+         <th className="py-2.5 px-3">Employee & Date</th>
+         <th className="py-2.5 px-3">Request</th>
+         <th className="py-2.5 px-3">Reason / Evidence</th>
+         <th className="py-2.5 px-3">Status</th>
+         <th className="py-2.5 px-3 text-right">Decision</th>
+        </tr>
+       </thead>
+       <tbody className="divide-y divide-gray-100">
+        {Array.isArray(data) && data.length > 0 ? (
+         data.map(r => (
+          <tr key={r.id} className="hover:bg-gray-50/60 transition-colors">
+           <td className="py-3 px-3">
+            <div className="flex items-center gap-2.5">
+             <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 text-white flex items-center justify-center font-bold text-xs shadow-sm flex-shrink-0">
+              {r.employee_name?.slice(0, 1) || 'E'}
+             </div>
+             <div>
+              <div className="font-semibold text-gray-800 text-sm">{r.employee_name}</div>
+              <div className="text-[11px] text-gray-500 flex items-center gap-1 mt-0.5">
+               <FiCalendar size={11} className="text-gray-400" /> {r.work_date}
+              </div>
+             </div>
+            </div>
+           </td>
+           <td className="py-3 px-3">
+            <span className="font-semibold text-gray-800 capitalize">{readable(r.kind)}</span>
+            {r.kind === 'correction' && (
+             <div className="text-[11px] text-gray-600 mt-0.5 font-medium">
+              {r.proposed?.hours} hrs · <span className="text-indigo-600 font-semibold">{r.proposed?.pay_fraction} day</span>
+             </div>
+            )}
+           </td>
+           <td className="py-3 px-3 max-w-xs">
+            <p className="text-gray-700 text-xs leading-relaxed">{r.reason}</p>
+            {r.capture_evidence?.map((c, i) => (
+             <details key={i} className="mt-1 text-[11px] text-indigo-600 cursor-pointer">
+              <summary className="hover:underline font-medium">{c.kind === 'in' ? 'Check-in' : 'Checkout'} evidence</summary>
+              <div className="p-2 bg-gray-50 rounded-lg mt-1 text-gray-600 space-y-1 border border-gray-100">
+               <div>Time: {fmt(c.received_at)}</div>
+               <div>GPS: ±{c.evidence?.accuracy ?? '?'}m ({readable(c.evidence?.geofence?.decision)})</div>
+               {c.evidence?.photo && (
+                <img src={c.evidence.photo} alt="Punch evidence" className="w-28 rounded-lg mt-1 border shadow-sm" />
+               )}
+              </div>
+             </details>
+            ))}
+            {r.kind === 'leave_amendment' && (
+             <p className="text-[11px] text-blue-700 mt-0.5">{r.proposed.action} leave #{r.proposed.leave_id}: {r.proposed.from_date} to {r.proposed.to_date}</p>
+            )}
+           </td>
+           <td className="py-3 px-3">
+            {r.status === 'pending' ? (
+             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+              Pending
+             </span>
+            ) : r.status === 'approved' ? (
+             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+              <FiCheck size={12} className="stroke-[2.5]" /> Approved
+             </span>
+            ) : (
+             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-800 border border-rose-200">
+              <FiX size={12} className="stroke-[2.5]" /> Rejected
+             </span>
+            )}
+            {r.decision_reason && (
+             <div className="text-[10px] text-gray-500 mt-1 italic line-clamp-1">"{r.decision_reason}"</div>
+            )}
+           </td>
+           <td className="py-3 px-3 text-right">
+            {r.status === 'pending' && canApprove('attendance_requests') && r.requested_by !== user.id && r.employee_user_id !== user.id ? (
+             <div className="inline-flex items-center gap-2 justify-end">
+              <button
+               disabled={busy}
+               onClick={() => setDecisionModal({ isOpen: true, request: r, status: 'approved', reason: 'Approved based on shift record' })}
+               className="bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-medium text-xs px-3.5 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 transition-all hover:shadow hover:-translate-y-0.5"
+              >
+               <FiCheck size={13} className="stroke-[2.5]" />
+               Approve
+              </button>
+              <button
+               disabled={busy}
+               onClick={() => setDecisionModal({ isOpen: true, request: r, status: 'rejected', reason: 'Incomplete hours / unable to verify' })}
+               className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-medium text-xs px-3.5 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5 transition-all hover:shadow hover:-translate-y-0.5"
+              >
+               <FiX size={13} className="stroke-[2.5]" />
+               Reject
+              </button>
+             </div>
+            ) : r.status === 'pending' ? (
+             <span className="text-[11px] text-gray-400 italic">Self-approval restricted</span>
+            ) : null}
+           </td>
+          </tr>
+         ))
+        ) : (
+         <tr>
+          <td colSpan={5} className="py-8 text-center text-gray-400 text-xs">
+           No attendance requests found
+          </td>
+         </tr>
+        )}
+       </tbody>
+      </table>
+     </div>
+
+     {/* Mobile Cards View */}
+     <div className="block md:hidden space-y-3">
+      {Array.isArray(data) && data.length > 0 ? (
+       data.map(r => (
+        <div key={r.id} className="p-3.5 bg-gray-50/80 rounded-xl border border-gray-200/80 space-y-2.5">
+         <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+           <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-indigo-500 to-purple-600 text-white flex items-center justify-center font-bold text-xs shadow-sm flex-shrink-0">
+            {r.employee_name?.slice(0, 1) || 'E'}
+           </div>
+           <div>
+            <div className="font-semibold text-gray-800 text-sm">{r.employee_name}</div>
+            <div className="text-xs text-gray-500 flex items-center gap-1">
+             <FiCalendar size={10} /> {r.work_date}
+            </div>
+           </div>
+          </div>
+          {r.status === 'pending' ? (
+           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+            Pending
+           </span>
+          ) : r.status === 'approved' ? (
+           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-50 text-emerald-800 border border-emerald-200">
+            <FiCheck size={12} className="stroke-[2.5]" /> Approved
+           </span>
+          ) : (
+           <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-50 text-rose-800 border border-rose-200">
+            <FiX size={12} className="stroke-[2.5]" /> Rejected
+           </span>
+          )}
+         </div>
+
+         <div className="text-xs text-gray-700 bg-white p-2.5 rounded-lg border border-gray-100 space-y-1">
+          <div className="font-semibold text-indigo-700 capitalize">
+           {readable(r.kind)} {r.kind === 'correction' && `· ${r.proposed?.hours} hrs (${r.proposed?.pay_fraction} day)`}
+          </div>
+          <p className="text-gray-600">{r.reason}</p>
+          {r.decision_reason && <p className="text-[11px] text-gray-500 italic border-t pt-1 mt-1">Decision: "{r.decision_reason}"</p>}
+         </div>
+
+         {r.status === 'pending' && canApprove('attendance_requests') && r.requested_by !== user.id && r.employee_user_id !== user.id && (
+          <div className="grid grid-cols-2 gap-2 pt-1">
+           <button
+            disabled={busy}
+            onClick={() => setDecisionModal({ isOpen: true, request: r, status: 'approved', reason: 'Approved based on shift record' })}
+            className="bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-medium text-xs py-2 rounded-lg shadow-sm flex items-center justify-center gap-1.5"
+           >
+            <FiCheck size={14} className="stroke-[2.5]" />
+            Approve
+           </button>
+           <button
+            disabled={busy}
+            onClick={() => setDecisionModal({ isOpen: true, request: r, status: 'rejected', reason: 'Incomplete hours / unable to verify' })}
+            className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-medium text-xs py-2 rounded-lg shadow-sm flex items-center justify-center gap-1.5"
+           >
+            <FiX size={14} className="stroke-[2.5]" />
+            Reject
+           </button>
+          </div>
+         )}
+        </div>
+       ))
+      ) : (
+       <p className="text-center text-gray-400 py-6 text-xs">No attendance requests found</p>
+      )}
+     </div>
+    </div>
+   </>}
   {mode==='rosters'&&<>
    {canCreate('attendance_rosters')&&<details className="card"><summary className="font-semibold cursor-pointer">Create a shift template / new version</summary><form className="space-y-3 mt-3" onSubmit={e=>{e.preventDefault();run(async()=>{await api.post('/attendance-ops/templates',shift);toast.success('New immutable shift version saved');load();});}}>
     <div className="flex gap-3"><Field label="Shift code"><input className="input" value={shift.code} onChange={e=>setShift({...shift,code:e.target.value.toUpperCase()})}/></Field><Field label="Shift name"><input className="input" value={shift.name} onChange={e=>setShift({...shift,name:e.target.value})}/></Field></div>
@@ -141,5 +348,83 @@ export default function AttendanceOperations({mode,employeeId}){
    {canApprove('attendance_periods')&&<div className="card flex flex-wrap gap-3"><input aria-label="Period action reason" className="input flex-1" placeholder="Reason for closing / reopening" value={periodReason} onChange={e=>setPeriodReason(e.target.value)}/>{['close','reopen'].map(action=><button disabled={busy} key={action} className="btn btn-primary" onClick={()=>run(async()=>{await api.post('/attendance-ops/periods/'+action,{month,reason:periodReason});toast.success('Period '+action+' recorded');load();})}>{action==='close'?'Close attendance':'Reopen for amendment'}</button>)}</div>}
    <div className="card"><table><thead><tr><th>Month</th><th>State</th><th>Revision</th><th>History</th></tr></thead><tbody>{Array.isArray(data)&&data.map(p=><tr key={p.month}><td>{p.month}</td><td>{p.state}</td><td>{p.revision}</td><td><button className="btn btn-secondary" onClick={()=>run(async()=>setHistory((await api.get(`/attendance-ops/periods/${p.month}/history`)).data))}>View history</button></td></tr>)}</tbody></table>{history.map(h=><p key={h.id} className="text-sm py-1">{h.month} — {h.action}, revision {h.revision}: {h.reason} ({fmt(h.created_at)})</p>)}</div>
   </>}
+
+   {decisionModal?.isOpen && (
+    <Modal
+      isOpen={true}
+      onClose={() => setDecisionModal(null)}
+      title={decisionModal.status === 'approved' ? 'Approve Attendance Request' : 'Reject Attendance Request'}
+    >
+      <div className="space-y-4">
+        <div className="p-3 bg-gray-50 rounded-xl text-xs space-y-1.5 border border-gray-100">
+          <div className="font-semibold text-gray-800 text-sm flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+            {decisionModal.request.employee_name}
+          </div>
+          <div className="text-gray-600">
+            Work Date: <span className="font-semibold text-gray-800">{decisionModal.request.work_date}</span>
+          </div>
+          <div className="text-gray-600">
+            Request: <span className="font-semibold text-gray-800 capitalize">{readable(decisionModal.request.kind)}</span>
+            {decisionModal.request.kind === 'correction' && ` · ${decisionModal.request.proposed?.hours} hrs (${decisionModal.request.proposed?.pay_fraction} day)`}
+          </div>
+          <div className="text-gray-700 bg-white p-2 rounded border border-gray-100 mt-1">
+            <span className="text-gray-400 font-medium">Employee reason: </span>
+            <span className="italic">"{decisionModal.request.reason}"</span>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-gray-700 mb-1.5">Decision note / reason (required):</label>
+          <div className="flex flex-wrap gap-1.5 mb-2.5">
+            {(decisionModal.status === 'approved' ? [
+              'Approved based on shift record',
+              'Verified with floor manager',
+              'Camera/punch issue verified',
+              'Approved as requested'
+            ] : [
+              'Incomplete hours / unable to verify',
+              'Duplicate request',
+              'Punch records conflict',
+              'Please discuss with floor manager'
+            ]).map((msg) => (
+              <button
+                type="button"
+                key={msg}
+                onClick={() => setDecisionModal(prev => ({ ...prev, reason: msg }))}
+                className={`text-[11px] px-2.5 py-1 rounded-lg border transition-all ${decisionModal.reason === msg ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-semibold shadow-xs' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}
+              >
+                {msg}
+              </button>
+            ))}
+          </div>
+          <input
+            type="text"
+            className="input w-full text-xs"
+            placeholder="Enter reason for decision (min 3 chars)"
+            value={decisionModal.reason}
+            onChange={e => setDecisionModal(prev => ({ ...prev, reason: e.target.value }))}
+          />
+        </div>
+
+        <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+          <button type="button" className="btn btn-secondary text-xs px-4" onClick={() => setDecisionModal(null)}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={busy || !decisionModal.reason || decisionModal.reason.trim().length < 3}
+            onClick={confirmDecision}
+            className={decisionModal.status === 'approved' 
+              ? 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white font-medium text-xs px-4 py-2 rounded-lg flex items-center gap-1.5 shadow transition-all disabled:opacity-50'
+              : 'bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-medium text-xs px-4 py-2 rounded-lg flex items-center gap-1.5 shadow transition-all disabled:opacity-50'}
+          >
+            {decisionModal.status === 'approved' ? <FiCheck size={14} className="stroke-[2.5]" /> : <FiX size={14} className="stroke-[2.5]" />}
+            {decisionModal.status === 'approved' ? 'Confirm Approval' : 'Confirm Rejection'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+   )}
  </section>;
 }

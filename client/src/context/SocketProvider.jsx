@@ -44,6 +44,9 @@ export function SocketProvider({ children }) {
           if (!p || !p.type) return;
           dispatch(p.type, { ...(p.data || {}), from: p.fromUserId, fromName: p.fromName });
         },
+        'notification:new': (p) => {
+          dispatch('notification:new', p);
+        },
       });
       connectedRef.current = true;
     };

@@ -5,7 +5,42 @@ import pg from '../../_shared/pg.ts';
 import {idNumber,inScope,permissionRows,scopeSql} from '../../_shared/attendance-access.ts';
 import {addDays,isoDay,jsonValue,monthDays,shiftPlan,validDay,validMonth,validatePolicy,validateSegments} from '../../_shared/attendance-engine.ts';
 import {AttendanceError,assertOpen,calculateAttendanceMonth,fail,hashPayload,resolveDuty,writeLock} from '../../_shared/attendance-operations.ts';
+import {broadcast} from '../../_shared/realtime.ts';
+import {notify,notifyMany} from '../../_shared/lib/push.ts';
+
 const router=Router();router.use(authMiddleware);
+
+async function notifyAttendanceApprovers(title:string,body:string,requesterUserId:number){
+ try{
+  const approvers=await pg.all(`
+   SELECT DISTINCT u.id 
+   FROM users u
+   LEFT JOIN roles r ON r.id = u.role_id
+   WHERE u.active = 1
+     AND u.id <> ?
+     AND (
+       u.role = 'admin' 
+       OR u.role_id = 1 
+       OR (r.permissions IS NOT NULL AND (r.permissions->'attendance_requests' ? 'approve' OR r.permissions::text LIKE '%"attendance_requests"%approve%'))
+     )
+  `,requesterUserId);
+  const ids=approvers.map((a:any)=>a.id);
+  if(!ids.length)return;
+  for(const approverId of ids){
+   await pg.run(`INSERT INTO notifications(user_id,type,title,body,link_url,channel_sent) VALUES(?,'approval_pending',?,?,?,'in_app')`,approverId,title,body,'/attendance?tab=requests');
+   broadcast(`user:${approverId}`,'notification:new',{type:'approval_pending',title,body,link_url:'/attendance?tab=requests'});
+  }
+  notifyMany(ids,{title,body,url:'/attendance?tab=requests',tag:'attendance-request'});
+ }catch(err){console.warn('[attendance-ops] notify approvers failed:',(err as Error).message);}
+}
+
+async function notifyRequester(userId:number,title:string,body:string){
+ try{
+  await pg.run(`INSERT INTO notifications(user_id,type,title,body,link_url,channel_sent) VALUES(?,'approval_pending',?,?,?,'in_app')`,userId,title,body,'/attendance?tab=requests');
+  broadcast(`user:${userId}`,'notification:new',{type:'approval_pending',title,body,link_url:'/attendance?tab=requests'});
+  notify(userId,{title,body,url:'/attendance?tab=requests',tag:'attendance-decision'});
+ }catch(err){console.warn('[attendance-ops] notify requester failed:',(err as Error).message);}
+}
 const action=(module:string,verb:string,fn:any,global=false)=>async(req:any,res:any)=>{
  try{const grants=await permissionRows(req.user.id,module,verb);if(!grants.length||global&&!grants.some(r=>r.scope_mode==='all'))return res.status(403).json({error:`Explicit ${module}.${verb}${global?' with all scope':''} required`});await fn(req,res);}
  catch(e){res.status(e instanceof AttendanceError?e.status:(e as any).code==='P0001'||(e as any).code==='23505'?409:400).json({error:(e as Error).message});}
@@ -131,14 +166,18 @@ router.post('/requests',action('attendance_requests','create',async(req,res)=>{
    const prior=await db.get('SELECT * FROM attendance_requests WHERE requested_by=? AND request_id=?',req.user.id,b.request_id);if(prior){if(prior.payload_hash!==hash)fail('Request ID has different content',409);return {lastInsertRowid:prior.id};}
    await checkLeaveAmendmentPeriods(db,original,proposed);
    return db.run("INSERT INTO attendance_requests(request_id,payload_hash,employee_id,work_date,kind,proposed,reason,requested_by) VALUES(?,?,?,?,'leave_amendment',?::jsonb,?,?)",b.request_id,hash,employee.id,original.from_date,{...proposed,original_from:original.from_date,original_to:original.to_date},why,req.user.id);
-  });return res.status(201).json({id:result.lastInsertRowid});
+  });
+  notifyAttendanceApprovers(`Leave Amendment: ${employee.name}`, `${employee.name} requested leave amendment for ${original.from_date}: ${why}`, req.user.id);
+  return res.status(201).json({id:result.lastInsertRowid});
  }
 
  if(!proposed||![0,.5,1,1.5,2].includes(proposed.pay_fraction)||!Number.isFinite(proposed.hours)||proposed.hours<0||proposed.hours>48||!Number.isFinite(Number(proposed.late_minutes||0))||Number(proposed.late_minutes||0)<0)fail('Correction needs explicit pay fraction, hours (0-48), and nonnegative late minutes');
  const why=reason(b.reason);if(!/^[-\w]{16,100}$/.test(b.request_id||''))fail('Stable request ID required');
  const hash=await hashPayload({employee_id:employee.id,work_date:b.work_date,proposed,reason:why});
  const r=await pg.tx(async db=>{await assertOpen(db,b.work_date);const old=await db.get('SELECT * FROM attendance_requests WHERE requested_by=? AND request_id=?',req.user.id,b.request_id);if(old){if(old.payload_hash!==hash)fail('Request ID has different evidence',409);return {lastInsertRowid:old.id};}
- return db.run("INSERT INTO attendance_requests(request_id,payload_hash,employee_id,work_date,kind,proposed,reason,requested_by) VALUES(?,?,?,?,'correction',?::jsonb,?,?)",b.request_id,hash,employee.id,b.work_date,proposed,why,req.user.id);});res.status(201).json({id:r.lastInsertRowid});
+ return db.run("INSERT INTO attendance_requests(request_id,payload_hash,employee_id,work_date,kind,proposed,reason,requested_by) VALUES(?,?,?,?,'correction',?::jsonb,?,?)",b.request_id,hash,employee.id,b.work_date,proposed,why,req.user.id);});
+ notifyAttendanceApprovers(`Attendance Correction: ${employee.name}`, `${employee.name} requested correction for ${b.work_date} (${proposed.hours} hrs): ${why}`, req.user.id);
+ res.status(201).json({id:r.lastInsertRowid});
 }));
 router.put('/requests/:id/decision',action('attendance_requests','approve',async(req,res)=>{
  const b=req.body;if(!['approved','rejected'].includes(b.status))fail('Approve or reject required');
@@ -156,7 +195,9 @@ router.put('/requests/:id/decision',action('attendance_requests','approve',async
    const state=states.some((s:any)=>s.status==='pending')?'pending':states.some((s:any)=>s.status==='rejected')?'rejected':'accepted';
    await db.run('UPDATE attendance SET review_state=? WHERE id=?',state,request.proposed.attendance_id);
   }else if(request.kind==='correction'&&b.status==='approved')await db.run("UPDATE attendance SET capture_state='review_closed' WHERE user_id=? AND date=? AND punch_in_time IS NOT NULL AND punch_out_time IS NULL",employee.user_id,request.work_date);
- });res.json({message:'Decision recorded; original evidence retained'});
+ });
+ notifyRequester(request.requested_by, `Attendance Request ${b.status === 'approved' ? 'Approved' : 'Rejected'}`, `Your request for ${request.work_date} was ${b.status}: ${b.reason}`);
+ res.json({message:'Decision recorded; original evidence retained'});
 }));
 
 router.get('/periods',action('attendance_periods','view',async(_req,res)=>res.json(await pg.all('SELECT * FROM attendance_periods ORDER BY month DESC'))));

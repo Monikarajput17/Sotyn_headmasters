@@ -8,6 +8,7 @@ import {
 import api from '../api';
 import toast from 'react-hot-toast';
 import { useAuth } from '../context/AuthContext';
+import { useAppSocket } from '../context/SocketProvider';
 import { fmtDate, fmtTime } from '../utils/datetime';
 
 // HR notification type → icon + colour (used in the Notifications tab)
@@ -71,6 +72,8 @@ export default function AnnouncementBell() {
     api.get('/hr/my-notifications').then(r => setNotifications(r.data || [])).catch(() => setNotifications([]));
   };
 
+  const socket = useAppSocket();
+
   // Poll both unread counts every 60s so the bell badge stays current even
   // when the user keeps the same tab open all day.
   useEffect(() => {
@@ -78,6 +81,26 @@ export default function AnnouncementBell() {
     const t = setInterval(loadCount, 60000);
     return () => clearInterval(t);
   }, []);
+
+  // Instant real-time listener for incoming in-app notifications
+  useEffect(() => {
+    if (!socket?.subscribe) return;
+    const unsub = socket.subscribe('notification:new', (notif) => {
+      loadCount();
+      loadNotifications();
+      if (notif?.title) {
+        toast((t) => (
+          <div onClick={() => { toast.dismiss(t.id); if (notif.link_url) navigate(notif.link_url); }} className="cursor-pointer">
+            <div className="font-semibold text-sm text-gray-800 flex items-center gap-1.5">
+              <span>🔔</span> {notif.title}
+            </div>
+            <div className="text-xs text-gray-600 mt-0.5">{notif.body}</div>
+          </div>
+        ), { duration: 6000 });
+      }
+    });
+    return () => unsub?.();
+  }, [socket, navigate]);
 
   // Click outside the panel closes it. Loaded once per mount.
   useEffect(() => {
