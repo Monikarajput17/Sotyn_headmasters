@@ -10,13 +10,38 @@ const choices={missing_checkout:['review','absent'],half_day_leave:['review','co
 const fmt=t=>t?new Date(t).toLocaleString('en-IN',{timeZone:'Asia/Kolkata'}):'—';
 const Field=({label,children})=><label className="block text-sm"><span className="block text-gray-600 mb-1">{label}</span>{children}</label>;
 
+const DEFAULT_SALON_RULES = {
+  grace_minutes: '15',
+  full_day_hours: '8',
+  half_day_hours: '4',
+  late_half_day_minutes: '0',
+  late_grace_count: '3',
+  late_per_minute_rate: '0',
+  lates_to_absent: '3',
+  ot_threshold_hours: '9',
+  ot_rate_multiplier: '1.5',
+  cl_per_month: '1',
+  sl_per_month: '1',
+  pl_per_month: '1.5',
+  missing_checkout: 'review',
+  half_day_leave: 'combine',
+  off_work: 'extra_day',
+  sandwich: 'none',
+  short_leave: 'credit_hours',
+  below_half_day: 'absent',
+  capture_exception: 'review',
+  location_scope: 'branch',
+  weekly_off_paid: 'true',
+  allow_multiple_sessions: 'true',
+};
+
 export default function AttendanceOperations({mode,employeeId}){
  const {user,canView,canCreate,canEdit,canApprove}=useAuth();
  const [month,setMonth]=useState(today().slice(0,7)),[data,setData]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false);
  const [employees,setEmployees]=useState([]),[templates,setTemplates]=useState([]),[selectedEmployee,setSelectedEmployee]=useState(employeeId||'');
  const [form,setForm]=useState({work_date:today(),pay_fraction:1,hours:'',reason:''});
  const [shift,setShift]=useState({code:'',name:'',week_off_days:[],segments:[{start:'',end:'',start_day:0,end_day:0}]});
- const [rules,setRules]=useState({}),[effective,setEffective]=useState(today()),[reason,setReason]=useState('');
+ const [rules,setRules]=useState(DEFAULT_SALON_RULES),[effective,setEffective]=useState('2024-01-01'),[reason,setReason]=useState('Standard Headmasters salon attendance policy');
  const [range,setRange]=useState({from:today(),to:today()}),[cycle,setCycle]=useState([{day_type:'work',template_id:''}]),[preview,setPreview]=useState(null),[requestId,setRequestId]=useState(()=>crypto.randomUUID());
  const [leaves,setLeaves]=useState([]),[amend,setAmend]=useState({leave_id:'',action:'cancel',from_date:today(),to_date:today(),leave_type:'full_day',reason:''}),[adjust,setAdjust]=useState({source_month:'',target_month:today().slice(0,7),amount:'',reason:''});
  const [periodReason,setPeriodReason]=useState(''),[history,setHistory]=useState([]);
@@ -87,7 +112,16 @@ export default function AttendanceOperations({mode,employeeId}){
   {mode==='policies'&&<>
    <p className="card bg-amber-50">Choose the business rules explicitly. Published versions are retained; changes apply from their effective date. Closed periods require an authorized reopen. “Review” keeps uncertain days out of finalization.</p>
    {canCreate('attendance_policies')&&<form className="card space-y-4" onSubmit={e=>{e.preventDefault();run(async()=>{const parsed={...rules};Object.keys(numbers).forEach(k=>parsed[k]=rules[k]===''||rules[k]===undefined?null:Number(rules[k]));for(const k of ['weekly_off_paid','allow_multiple_sessions'])parsed[k]=rules[k]==='true'?true:rules[k]==='false'?false:null;await api.post('/attendance-ops/policies',{effective_from:effective,rules:parsed,reason});toast.success('Policy version published');load();});}}>
-    <Field label="Effective from"><input className="input" type="date" value={effective} onChange={e=>setEffective(e.target.value)}/></Field>
+     <div className="flex flex-wrap justify-between items-center gap-2 pb-2 border-b">
+      <div>
+        <h3 className="font-semibold text-gray-800">Salon Attendance Policy</h3>
+        <p className="text-xs text-gray-500">Configure attendance thresholds, shift rules, and leave allowances.</p>
+      </div>
+      <button type="button" className="btn btn-secondary text-xs" onClick={()=>{setRules({...DEFAULT_SALON_RULES});setEffective('2024-01-01');setReason('Standard Headmasters salon attendance policy');toast.success('Loaded recommended salon defaults');}}>
+        ✨ Load Recommended Salon Defaults
+      </button>
+     </div>
+     <Field label="Effective from"><input className="input" type="date" value={effective} onChange={e=>setEffective(e.target.value)}/></Field>
     <div className="grid md:grid-cols-3 gap-3">{Object.entries(numbers).map(([key,label])=><Field key={key} label={label}><input className="input w-full" type="number" step="any" min="0" value={rules[key]??''} onChange={e=>setRules({...rules,[key]:e.target.value})}/></Field>)}{Object.entries(choices).map(([key,values])=><Field key={key} label={readable(key)}><select className="select w-full" value={rules[key]||''} onChange={e=>setRules({...rules,[key]:e.target.value})}><option value="">Choose a rule</option>{values.map(v=><option key={v} value={v}>{readable(v)}</option>)}</select></Field>)}{['weekly_off_paid','allow_multiple_sessions'].map(key=><Field key={key} label={readable(key)}><select className="select" value={rules[key]??''} onChange={e=>setRules({...rules,[key]:e.target.value})}><option value="">Choose</option><option value="true">Yes</option><option value="false">No</option></select></Field>)}</div>
     <Field label="Reason for publishing"><input className="input w-full" value={reason} onChange={e=>setReason(e.target.value)}/></Field><button disabled={busy} className="btn btn-primary">Publish new version</button>
    </form>}
